@@ -1,0 +1,22 @@
+# Tiger Brain V6+V7 — Python Dependencies
+# ==========================================
+# Install karne ke liye apne server pe ye command chalao:
+#   pip install -r requirements.txt
+
+# Data handling
+pandas>=2.0.0
+numpy>=1.24.0
+
+# Free data sources (data/loader.py ke liye)
+yfinance>=0.2.36
+requests>=2.31.0
+
+# Technical indicators (ADX, RSI, Bollinger Bands — regime classifier
+# aur sub-brains ke liye baad mein chahiye honge)
+pandas-ta>=0.3.14b0
+
+# Environment variables / secrets (.env file se API keys load karne ke liye)
+python-dotenv>=1.0.0
+
+# Scheduling (automation/scheduler.py ke liye, Section 34)
+apscheduler>=3.10.0
