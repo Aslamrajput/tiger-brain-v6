@@ -1,0 +1,242 @@
+"""
+Tiger Brain V6+V7 — Automation Scheduler (Section 34)
+========================================================
+24x7 cycle: Mon-Fri poora trading cycle khud chalta hai, Saturday
+low-power "watch mode" (koi trading nahi, sirf background monitoring),
+Sunday poori tarah OFF (deep sleep).
+
+⚠️ IMPORTANT — apscheduler is sandbox mein install nahi hai (internet
+disabled), isliye is file ka actual scheduling part (TigerBrainScheduler
+class) yahan TEST NAHI hua hai. Apne server pe `pip install -r
+requirements.txt` chalane ke baad ye khud verify karna.
+
+Jo cheez yahan properly test hui hai: din ka "mode" decide karne wala
+logic (is_trading_day, get_day_mode, etc.) — ye pure Python hai, koi
+extra dependency nahi chahiye, aur neeche test bhi hua hai.
+"""
+
+from datetime import datetime, time
+
+try:
+    from config.thresholds import AUTOMATION
+    from automation.holidays import is_market_holiday
+except ImportError:
+    raise ImportError("Repo ROOT se chalao, 'automation/' ke andar se nahi.")
+
+
+WEEKDAY_MAP = {0: "MON", 1: "TUE", 2: "WED", 3: "THU", 4: "FRI", 5: "SAT", 6: "SUN"}
+
+
+# ============================================================
+# DAY-MODE LOGIC (koi extra dependency nahi, pure Python)
+# ============================================================
+
+def get_day_mode(check_date: datetime = None) -> str:
+    """
+    Section 34 ka schedule decide karta hai — ab weekday RULE ke saath
+    saath declared NSE holidays bhi check karta hai (automation/holidays.py).
+
+    Returns:
+        'TRADING' | 'WATCH_ONLY' | 'OFF'
+    """
+    check_date = check_date or datetime.now()
+    day_name = WEEKDAY_MAP[check_date.weekday()]
+
+    # Pehle holiday check — agar declared holiday hai, chahe weekday
+    # "TRADING" list mein ho, phir bhi OFF treat karna hai
+    is_holiday, holiday_name = is_market_holiday(check_date)
+    if is_holiday:
+        return "OFF"
+
+    if day_name in AUTOMATION["TRADING_DAYS"]:
+        return "TRADING"
+    elif day_name in AUTOMATION["WATCH_ONLY_DAYS"]:
+        return "WATCH_ONLY"
+    elif day_name in AUTOMATION["OFF_DAYS"]:
+        return "OFF"
+    else:
+        return "OFF"
+
+
+def is_trading_day(check_date: datetime = None) -> bool:
+    return get_day_mode(check_date) == "TRADING"
+
+
+def is_market_hours(check_time: datetime = None) -> bool:
+    """
+    Market open/close time ke beech hai ya nahi (sirf trading days pe
+    meaningful hai — caller ko pehle is_trading_day() check karna chahiye).
+
+    ⚠️ NOTE: Market holidays (Diwali, Republic Day, etc.) is function mein
+    check NAHI hote — sirf weekday logic hai. Holiday calendar ek alag
+    concern hai jo Phase 2/3 mein NSE holiday list se add karna hoga.
+    """
+    check_time = check_time or datetime.now()
+
+    open_h, open_m = map(int, AUTOMATION["MARKET_OPEN_TIME"].split(":"))
+    close_h, close_m = map(int, AUTOMATION["MARKET_CLOSE_TIME"].split(":"))
+
+    market_open = time(open_h, open_m)
+    market_close = time(close_h, close_m)
+    current = check_time.time()
+
+    return market_open <= current <= market_close
+
+
+def is_opening_range_period(check_time: datetime = None) -> bool:
+    """
+    Section 32 ka "Opening Range Wait" — market open ke pehle N minutes
+    mein koi trade nahi lena, sirf observation.
+    """
+    check_time = check_time or datetime.now()
+    open_h, open_m = map(int, AUTOMATION["MARKET_OPEN_TIME"].split(":"))
+
+    open_dt = check_time.replace(hour=open_h, minute=open_m, second=0, microsecond=0)
+    minutes_since_open = (check_time - open_dt).total_seconds() / 60
+
+    return 0 <= minutes_since_open < AUTOMATION["OPENING_RANGE_WAIT_MINUTES"]
+
+
+# ============================================================
+# SCHEDULER SETUP (apscheduler chahiye — sandbox mein untested)
+# ============================================================
+
+class TigerBrainScheduler:
+    """
+    Poora 24x7 automation cycle wire karta hai. Har job pehle apna
+    day-mode check karta hai — agar aaj TRADING day nahi hai, job khud
+    ko skip kar leta hai.
+
+    Usage (apne server pe):
+        scheduler = TigerBrainScheduler()
+        scheduler.setup_jobs(
+            pre_market_fn=my_pre_market_function,
+            market_open_fn=my_market_open_function,
+            intraday_fn=my_intraday_scan_function,
+            market_close_fn=my_market_close_function,
+            nightly_replay_fn=my_replay_function,
+        )
+        scheduler.start()
+    """
+
+    def __init__(self):
+        # apscheduler ka import yahan (class instantiate hote waqt, module
+        # import ke waqt nahi) taaki agar library missing hai to error
+        # sirf tab aaye jab scheduler actually use ho — isse upar wale
+        # day-logic functions bina apscheduler ke bhi test ho sakte hain
+        try:
+            from apscheduler.schedulers.background import BackgroundScheduler
+        except ImportError:
+            raise ImportError(
+                "apscheduler install nahi hai. Chalao: pip install apscheduler "
+                "(ya poora requirements.txt install karo)"
+            )
+
+        self.scheduler = BackgroundScheduler()
+
+    def _guarded(self, fn, required_mode="TRADING"):
+        """Wrapper — job ke andar day-mode check karta hai pehle."""
+        def wrapped():
+            current_mode = get_day_mode()
+            if current_mode != required_mode:
+                return  # aaj ye job chalne wala din nahi hai, silently skip
+            fn()
+        return wrapped
+
+    def setup_jobs(
+        self,
+        pre_market_fn=None,
+        market_open_fn=None,
+        intraday_fn=None,
+        market_close_fn=None,
+        nightly_replay_fn=None,
+    ):
+        pre_h, pre_m = map(int, AUTOMATION["PRE_MARKET_WAKE_TIME"].split(":"))
+        open_h, open_m = map(int, AUTOMATION["MARKET_OPEN_TIME"].split(":"))
+        close_h, close_m = map(int, AUTOMATION["MARKET_CLOSE_TIME"].split(":"))
+        replay_h, replay_m = map(int, AUTOMATION["NIGHTLY_REPLAY_TIME"].split(":"))
+
+        if pre_market_fn:
+            self.scheduler.add_job(
+                self._guarded(pre_market_fn), "cron",
+                hour=pre_h, minute=pre_m, id="pre_market_wakeup",
+            )
+
+        if market_open_fn:
+            self.scheduler.add_job(
+                self._guarded(market_open_fn), "cron",
+                hour=open_h, minute=open_m, id="market_open",
+            )
+
+        if intraday_fn:
+            def intraday_guarded():
+                if get_day_mode() == "TRADING" and is_market_hours() and not is_opening_range_period():
+                    intraday_fn()
+
+            self.scheduler.add_job(
+                intraday_guarded, "interval",
+                minutes=AUTOMATION.get("RESCAN_INTERVAL_MINUTES", 20),
+                id="intraday_scan",
+            )
+
+        if market_close_fn:
+            self.scheduler.add_job(
+                self._guarded(market_close_fn), "cron",
+                hour=close_h, minute=close_m, id="market_close",
+            )
+
+        if nightly_replay_fn:
+            def replay_guarded():
+                if get_day_mode() == "TRADING":
+                    nightly_replay_fn()
+
+            self.scheduler.add_job(
+                replay_guarded, "cron",
+                hour=replay_h, minute=replay_m, id="nightly_replay",
+            )
+
+    def start(self):
+        self.scheduler.start()
+
+    def shutdown(self):
+        self.scheduler.shutdown()
+
+
+# ============================================================
+# QUICK MANUAL TEST — sirf day-logic (apscheduler ki zarurat nahi)
+# Chalane ka tarika: repo ROOT se → python3 -m automation.scheduler
+# ============================================================
+if __name__ == "__main__":
+    from datetime import timedelta
+
+    print("=== Day-Mode Logic Test (pure Python, apscheduler nahi chahiye) ===\n")
+
+    monday = datetime(2025, 1, 6)  # ye ek Monday hai
+    for i in range(7):
+        test_date = monday + timedelta(days=i)
+        day_name = WEEKDAY_MAP[test_date.weekday()]
+        mode = get_day_mode(test_date)
+        print(f"{day_name} ({test_date.date()}): {mode}")
+
+    print("\n=== Market Hours Test ===")
+    trading_day = datetime(2025, 1, 6, 10, 30)
+    print(f"Monday 10:30 AM — is_market_hours: {is_market_hours(trading_day)}")
+
+    before_open = datetime(2025, 1, 6, 8, 45)
+    print(f"Monday 8:45 AM — is_market_hours: {is_market_hours(before_open)}")
+
+    print("\n=== Opening Range Period Test ===")
+    just_after_open = datetime(2025, 1, 6, 9, 20)
+    print(f"9:20 AM (5 min after open) — is_opening_range: {is_opening_range_period(just_after_open)}")
+
+    well_into_day = datetime(2025, 1, 6, 11, 0)
+    print(f"11:00 AM — is_opening_range: {is_opening_range_period(well_into_day)}")
+
+    print("\n✅ Day-logic test complete — koi crash nahi hua.")
+    print(
+        "⚠️ REMINDER: TigerBrainScheduler class (apscheduler-based) is "
+        "sandbox mein untested hai kyunki apscheduler install nahi ho paya "
+        "(internet disabled). Apne server pe requirements.txt install "
+        "karne ke baad khud verify karna."
+      )
+  
