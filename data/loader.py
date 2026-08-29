@@ -270,6 +270,181 @@ def fetch_bhavcopy_range(start_date: datetime, end_date: datetime) -> pd.DataFra
 
 
 # ============================================================
+# 4. ANGEL ONE — REAL HISTORICAL + LIVE DATA (Section 19, 24, 28)
+# ============================================================
+# Ye Angel One ke asli account se REAL data laata hai (free NSE
+# sources ke bajaye) — intraday bhi milega, jo free sources se
+# nahi milta tha.
+#
+# ⚠️ Ye functions ek already-logged-in `AngelBroker` instance
+# (broker/angel_connect.py se) maangte hain — pehle broker.login()
+# call karna zaroori hai.
+
+# Angel One ka public instrument-master file — isme har symbol
+# (NIFTY, BANKNIFTY, options strikes, etc.) ka unique "token" hota
+# hai jo API calls ke liye zaroori hai.
+ANGEL_INSTRUMENT_MASTER_URL = (
+    "https://margincalculator.angelbroking.com/OpenAPI_File/files/"
+    "OpenAPIScripMaster.json"
+)
+
+_instrument_master_cache = None  # ek baar download hone ke baad memory mein rakhte hain
+
+
+def load_angel_instrument_master(force_refresh: bool = False) -> pd.DataFrame:
+    """
+    Angel One ka poora instrument list download karta hai (hazaaron
+    symbols, saare tokens ke saath). Ye file rozana thodi badalti hai
+    (naye expiries add hote hain), isliye din mein ek baar refresh
+    karna sahi practice hai.
+    """
+    global _instrument_master_cache
+
+    if _instrument_master_cache is not None and not force_refresh:
+        return _instrument_master_cache
+
+    try:
+        response = requests.get(ANGEL_INSTRUMENT_MASTER_URL, timeout=30)
+        response.raise_for_status()
+        data = response.json()
+        df = pd.DataFrame(data)
+        _instrument_master_cache = df
+        logger.info(f"Angel instrument master load hua: {len(df)} instruments.")
+        return df
+    except Exception as exc:
+        logger.error(f"Instrument master fetch mein error: {exc}")
+        raise
+
+
+def find_symbol_token(exchange: str, search_text: str) -> pd.DataFrame:
+    """
+    Symbol ka token dhundta hai naam se search karke.
+
+    Args:
+        exchange: 'NSE' (index/stock spot) ya 'NFO' (futures/options)
+        search_text: jaise 'NIFTY' ya 'BANKNIFTY' ya kisi option ka
+                     naam (jaise 'NIFTY28AUG25000CE')
+
+    Returns:
+        Matching rows ka DataFrame — caller ko isme se exact match
+        chunna hai (kai symbols match ho sakte hain, jaise saari
+        expiries ek naam se).
+    """
+    df = load_angel_instrument_master()
+    filtered = df[df["exch_seg"] == exchange]
+    mask = filtered["symbol"].str.contains(search_text, case=False, na=False)
+    return filtered[mask]
+
+
+# Section 18-25 documentation ke hisaab se Angel One ke interval limits
+ANGEL_INTERVAL_MAX_DAYS = {
+    "ONE_MINUTE": 30, "THREE_MINUTE": 60, "FIVE_MINUTE": 100,
+    "TEN_MINUTE": 100, "FIFTEEN_MINUTE": 200, "THIRTY_MINUTE": 200,
+    "ONE_HOUR": 400, "ONE_DAY": 2000,
+}
+
+
+def fetch_angel_historical_candles(
+    broker, exchange: str, symboltoken: str, interval: str,
+    from_date: datetime, to_date: datetime,
+) -> pd.DataFrame:
+    """
+    Angel One se real historical OHLCV candles fetch karta hai —
+    Phase 2 backtest ke liye ye MAIN function hoga.
+
+    Interval limits (Angel One ke rules) automatically handle hoti
+    hain — agar tumne 2 saal ka 1-minute data manga, ye khud usko
+    30-30 din ke chunks mein todke saari requests karega aur combine
+    karke ek DataFrame dega.
+
+    Args:
+        broker: AngelBroker instance jisme login() already ho chuka ho
+        exchange: 'NSE' ya 'NFO'
+        symboltoken: instrument ka token (find_symbol_token se milega)
+        interval: 'ONE_MINUTE', 'FIVE_MINUTE', 'ONE_DAY', etc.
+        from_date, to_date: datetime objects
+
+    Returns:
+        DataFrame with index=timestamp, columns=[open, high, low, close, volume]
+        Khali DataFrame agar kuch na mile.
+    """
+    if broker.smart_api is None:
+        raise RuntimeError(
+            "Broker login nahi hua hai — pehle broker.login() call karo."
+        )
+
+    max_days = ANGEL_INTERVAL_MAX_DAYS.get(interval, 30)
+    all_candles = []
+
+    chunk_start = from_date
+    while chunk_start <= to_date:
+        chunk_end = min(chunk_start + timedelta(days=max_days - 1), to_date)
+
+        params = {
+            "exchange": exchange,
+            "symboltoken": symboltoken,
+            "interval": interval,
+            "fromdate": chunk_start.strftime("%Y-%m-%d %H:%M"),
+            "todate": chunk_end.strftime("%Y-%m-%d %H:%M"),
+        }
+
+        try:
+            response = broker.smart_api.getCandleData(params)
+            if response.get("status") and response.get("data"):
+                all_candles.extend(response["data"])
+                logger.info(
+                    f"Candles mile: {chunk_start.date()} se {chunk_end.date()} "
+                    f"({len(response['data'])} rows)"
+                )
+            else:
+                logger.warning(
+                    f"Candle chunk {chunk_start.date()}-{chunk_end.date()} "
+                    f"khali/fail: {response.get('message', 'unknown')}"
+                )
+        except Exception as exc:
+            logger.error(
+                f"Candle fetch error {chunk_start.date()}-{chunk_end.date()}: {exc}"
+            )
+
+        chunk_start = chunk_end + timedelta(days=1)
+
+    if not all_candles:
+        logger.warning("Koi candle data nahi mila poore range mein.")
+        return pd.DataFrame()
+
+    df = pd.DataFrame(
+        all_candles, columns=["timestamp", "open", "high", "low", "close", "volume"]
+    )
+    df["timestamp"] = pd.to_datetime(df["timestamp"])
+    df = df.set_index("timestamp")
+    return df
+
+
+def fetch_angel_ltp(broker, exchange: str, tradingsymbol: str, symboltoken: str) -> dict | None:
+    """
+    Live/Last-Traded-Price snapshot — Market Feeds ke liye. Intraday
+    scanning (Section 7, 28 — Dynamic Universe Selection) ke waqt ye
+    use hoga real-time price/volume check karne ke liye.
+
+    Returns:
+        dict with price/OI info, ya None agar fetch fail ho
+    """
+    if broker.smart_api is None:
+        raise RuntimeError("Broker login nahi hua hai — pehle broker.login() call karo.")
+
+    try:
+        response = broker.smart_api.ltpData(exchange, tradingsymbol, symboltoken)
+        if response.get("status"):
+            return response["data"]
+        else:
+            logger.warning(f"LTP fetch fail: {response.get('message', 'unknown')}")
+            return None
+    except Exception as exc:
+        logger.error(f"LTP fetch error: {exc}")
+        return None
+
+
+# ============================================================
 # QUICK MANUAL TEST (isko apne server pe chalao, sandbox mein nahi chalega)
 # ============================================================
 if __name__ == "__main__":
@@ -289,3 +464,32 @@ if __name__ == "__main__":
         print(bhav_df.head())
     else:
         print("Bhavcopy nahi mili — upar ka warning check karo.")
+
+    print("\n=== Angel One Real Data Test ===")
+    print("⚠️ Ye REAL Angel One login + real API calls karega.")
+    try:
+        from broker.angel_connect import AngelBroker
+
+        broker = AngelBroker()
+        broker.login()
+        print("✅ Broker login successful, ab data fetch test karte hain...\n")
+
+        # NIFTY 50 index ka well-known token (NSE) — Angel One
+        # documentation mein diya gaya standard token
+        nifty_token = "99926000"
+
+        print("--- NIFTY Live LTP Test ---")
+        ltp_data = fetch_angel_ltp(broker, "NSE", "NIFTY", nifty_token)
+        print(ltp_data)
+
+        print("\n--- NIFTY Historical Daily Candles (last 10 days) ---")
+        end = datetime.now()
+        start = end - timedelta(days=10)
+        candles = fetch_angel_historical_candles(
+            broker, "NSE", nifty_token, "ONE_DAY", start, end
+        )
+        print(candles)
+
+    except Exception as exc:
+        print(f"❌ Angel One data test fail hua: {exc}")
+
