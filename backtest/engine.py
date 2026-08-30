@@ -64,8 +64,6 @@ def run_single_period_backtest(df: pd.DataFrame, vix_series: pd.Series = None) -
             'accuracy_pct': float
             'trade_log': list of per-trade dicts (day, decision, correct?)
     """
-    trade_log = []
-
     if len(df) < MIN_WARMUP_DAYS + 2:
         logger.warning(
             f"Sirf {len(df)} din ka data hai, kam se kam "
@@ -79,7 +77,42 @@ def run_single_period_backtest(df: pd.DataFrame, vix_series: pd.Series = None) -
 
     # Warmup ke baad se, aur last din se pehle tak (kyunki humein "agle
     # din" ka actual outcome chahiye check karne ke liye)
-    for i in range(MIN_WARMUP_DAYS, len(df) - 1):
+    return backtest_range(df, MIN_WARMUP_DAYS, len(df) - 1, vix_series=vix_series)
+
+
+def backtest_range(
+    df: pd.DataFrame,
+    eval_start: int,
+    eval_end: int,
+    vix_series: pd.Series = None,
+) -> dict:
+    """
+    Core loop — `df` ke sirf [eval_start, eval_end) wale dino pe decision
+    leta hai, PAR history ke liye poora `df` ka pehla hissa use karta hai.
+
+    Ye walk-forward ke liye zaroori hai: test-window ke pehle din ko bhi
+    warmup chahiye, aur wo warmup pichhle (train) window se aana chahiye
+    — na ki test window ko hi kaat ke.
+
+    NO LOOKAHEAD yahan bhi enforce hai: din `i` ka decision sirf
+    `df.iloc[:i+1]` se banta hai, aur outcome `i+1` se check hota hai.
+
+    Args:
+        df: poora OHLCV data (history + evaluation window)
+        eval_start: kis index se decision lena shuru karna hai
+        eval_end: kis index se PEHLE tak (exclusive) — `len(df)-1` se
+                  zyada nahi, kyunki agle din ka outcome chahiye
+        vix_series: optional, same index alignment
+
+    Returns:
+        run_single_period_backtest() jaisa hi dict
+    """
+    trade_log = []
+
+    eval_start = max(eval_start, MIN_WARMUP_DAYS)
+    eval_end = min(eval_end, len(df) - 1)
+
+    for i in range(eval_start, eval_end):
         # ⚠️ NO LOOKAHEAD: sirf index 0 se i tak ka data (aaj tak),
         # kal/future ka data bilkul nahi diya ja raha
         df_till_today = df.iloc[: i + 1]
@@ -106,6 +139,7 @@ def run_single_period_backtest(df: pd.DataFrame, vix_series: pd.Series = None) -
 
         trade_log.append({
             "date_index": i,
+            "date": df.index[i],
             "decision": decision,
             "score": result["meta_brain_result"]["final_score"],
             "actual_direction": actual_direction,
@@ -117,7 +151,7 @@ def run_single_period_backtest(df: pd.DataFrame, vix_series: pd.Series = None) -
     accuracy = round(correct / total_trades * 100, 1) if total_trades > 0 else 0.0
 
     return {
-        "total_days_tested": len(df) - MIN_WARMUP_DAYS - 1,
+        "total_days_tested": max(eval_end - eval_start, 0),
         "total_trades": total_trades,
         "correct_direction": correct,
         "accuracy_pct": accuracy,
