@@ -217,7 +217,17 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+
+    # Backtest chalne se PEHLE validate karo — warna galat value pe crash
+    # poore run ke baad aata hai
+    if args.lot_size <= 0:
+        parser.error("--lot-size 0 se bada hona chahiye")
+    if args.strike_step <= 0:
+        parser.error("--strike-step 0 se bada hona chahiye")
+    if not 0 <= args.expiry_weekday <= 6:
+        parser.error("--expiry-weekday 0 (Mon) se 6 (Sun) ke beech hona chahiye")
 
     if args.source == "csv":
         if not args.csv_path:

@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from backtest import options_sim
+from backtest import cli, options_sim
 
 
 def make_ohlcv(closes, start="2024-01-01") -> pd.DataFrame:
@@ -189,6 +189,62 @@ def test_summary_stats_and_drawdown():
     )
     assert result["max_drawdown"] > 0  # beech wala losing trade
     assert result["total_costs"] > 0
+
+
+def test_expired_option_has_no_time_value():
+    itm = options_sim.black_scholes_price(20100.0, 20000.0, 0.0, 0.14, "CE")
+    otm = options_sim.black_scholes_price(19900.0, 20000.0, 0.0, 0.14, "CE")
+
+    assert itm == pytest.approx(100.0)
+    assert otm == 0.0
+
+
+def test_timezone_aware_prices_still_use_fetched_vix():
+    """Price index tz-aware, VIX index naive — phir bhi asli VIX lagna
+    chahiye, chupchaap 14% fallback nahi."""
+    df = make_ohlcv([20000.0, 20100.0])
+    df.index = df.index.tz_localize("Asia/Kolkata")
+    vix = pd.Series([30.0, 30.0], index=df.index.tz_localize(None))
+
+    result = options_sim.simulate_trade_log(df, [trade(df.index[0])], vix_series=vix)
+
+    assert result["trades"][0]["iv_pct"] == 30.0
+
+
+def test_all_winning_trades_report_infinite_profit_factor():
+    df = make_ohlcv([20000.0, 20600.0, 21200.0])
+    log = [trade(df.index[0]), trade(df.index[1])]
+
+    result = options_sim.simulate_trade_log(df, log)
+
+    assert result["win_rate_pct"] == 100.0
+    assert result["profit_factor"] == float("inf")
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [{"lot_size": 0}, {"strike_step": 0}, {"expiry_weekday": 7}],
+)
+def test_invalid_instrument_settings_rejected(kwargs):
+    df = make_ohlcv([20000.0, 20100.0])
+    with pytest.raises(ValueError):
+        options_sim.simulate_trade_log(df, [trade(df.index[0])], **kwargs)
+
+
+@pytest.mark.parametrize(
+    "flag", [["--strike-step", "0"], ["--lot-size", "0"], ["--expiry-weekday", "9"]]
+)
+def test_cli_rejects_bad_options_args_before_running(flag, tmp_path):
+    """Validation backtest ke BAAD nahi, pehle honi chahiye."""
+    csv_path = tmp_path / "prices.csv"
+    make_ohlcv([20000.0, 20100.0]).to_csv(csv_path)
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(
+            ["--source", "csv", "--csv-path", str(csv_path), "--no-vix", *flag]
+        )
+
+    assert exc.value.code == 2
 
 
 def test_empty_trade_log_is_honest():

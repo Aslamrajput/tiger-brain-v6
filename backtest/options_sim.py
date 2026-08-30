@@ -89,6 +89,11 @@ def black_scholes_price(
     if option_type not in ("CE", "PE"):
         raise ValueError(f"option_type 'CE' ya 'PE' hona chahiye, mila: {option_type}")
 
+    if t_years <= 0:
+        # Expiry pe option ki koi time value nahi bachti — sirf intrinsic
+        intrinsic = spot - strike if option_type == "CE" else strike - spot
+        return max(intrinsic, 0.0)
+
     t_years = max(t_years, MIN_T_YEARS)
     if iv <= 0 or spot <= 0 or strike <= 0:
         # Degenerate input — sirf intrinsic value lauta do
@@ -108,6 +113,8 @@ def black_scholes_price(
 
 def atm_strike(spot: float, step: int = DEFAULT_STRIKE_STEP) -> float:
     """Spot ke sabse nazdeek wala tradable strike."""
+    if step <= 0:
+        raise ValueError(f"strike step 0 se bada hona chahiye, mila: {step}")
     return round(spot / step) * step
 
 
@@ -120,16 +127,48 @@ def days_to_expiry(date, expiry_weekday: int = DEFAULT_EXPIRY_WEEKDAY) -> int:
     shifts (expiry Wednesday ho jaana) handle nahi karta — ek known
     approximation hai.
     """
+    if not 0 <= expiry_weekday <= 6:
+        raise ValueError(
+            f"expiry_weekday 0-6 mein hona chahiye, mila: {expiry_weekday}"
+        )
     days_ahead = (expiry_weekday - date.weekday()) % 7
     return days_ahead if days_ahead > 0 else 7
 
 
+def _strip_tz(index: pd.Index) -> pd.Index:
+    """
+    Timezone hata deta hai taaki price index aur VIX index match karein.
+
+    Angel One / saved CSV ka index tz-aware ho sakta hai jabki VIX loader
+    naive index deta hai — bina iske har lookup chupchaap fail hota aur
+    saare trades fallback IV pe price hote.
+    """
+    if isinstance(index, pd.DatetimeIndex) and index.tz is not None:
+        return index.tz_localize(None)
+    return index
+
+
+def _normalise_vix(vix_series: pd.Series) -> pd.Series:
+    if vix_series is None:
+        return None
+    normalised = vix_series.copy()
+    normalised.index = _strip_tz(normalised.index)
+    return normalised
+
+
 def _iv_for_date(vix_series: pd.Series, date, fallback_pct: float) -> float:
-    """India VIX (percent) ko decimal IV mein badalta hai, warna fallback."""
-    if vix_series is not None and date in vix_series.index:
-        value = vix_series.loc[date]
-        if pd.notna(value) and float(value) > 0:
-            return float(value) / 100.0
+    """India VIX (percent) ko decimal IV mein badalta hai, warna fallback.
+
+    `vix_series` ka index tz-naive hona chahiye (`_normalise_vix` dekhein).
+    """
+    if vix_series is not None:
+        key = pd.Timestamp(date)
+        if key.tz is not None:
+            key = key.tz_localize(None)
+        if key in vix_series.index:
+            value = vix_series.loc[key]
+            if pd.notna(value) and float(value) > 0:
+                return float(value) / 100.0
     return fallback_pct / 100.0
 
 
@@ -171,6 +210,16 @@ def simulate_trade_log(
             'directional_accuracy_pct': comparison ke liye
             'warnings': list[str] — honest limitations + small sample
     """
+    if lot_size <= 0:
+        raise ValueError(f"lot_size 0 se bada hona chahiye, mila: {lot_size}")
+    if strike_step <= 0:
+        raise ValueError(f"strike_step 0 se bada hona chahiye, mila: {strike_step}")
+    if not 0 <= expiry_weekday <= 6:
+        raise ValueError(
+            f"expiry_weekday 0-6 mein hona chahiye, mila: {expiry_weekday}"
+        )
+
+    vix_series = _normalise_vix(vix_series)
     trades = []
     equity_curve = []
     running = 0.0
@@ -295,7 +344,11 @@ def _summarise(trades: list, equity_curve: list, vix_series) -> dict:
         "win_rate_pct": win_rate,
         "avg_win": round(sum(wins) / len(wins), 2) if wins else 0.0,
         "avg_loss": round(sum(losses) / len(losses), 2) if losses else 0.0,
-        "profit_factor": round(sum(wins) / gross_loss, 2) if gross_loss > 0 else 0.0,
+        "profit_factor": (
+            round(sum(wins) / gross_loss, 2)
+            if gross_loss > 0
+            else (float("inf") if wins else 0.0)
+        ),
         "expectancy": round(total_pnl / len(trades), 2),
         "max_drawdown": round(max_dd, 2),
         "directional_accuracy_pct": directional_accuracy,
