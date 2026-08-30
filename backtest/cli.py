@@ -30,6 +30,9 @@ Examples (repo ROOT se):
     python3 -m backtest.cli --source csv --csv-path data/nifty_2y.csv \\
         --train-days 250 --test-days 40 --anchored
 
+    # directional accuracy ke saath simulated options P&L bhi
+    python3 -m backtest.cli --source csv --csv-path data/nifty_2y.csv --options-pnl
+
 ⚠️ Angel One ONE_DAY data max ~2000 din deta hai, isliye --years 2
 aaram se milta hai. VIX (regime classifier ke liye) Yahoo Finance se
 aata hai; agar wo fail ho jaaye to backtest phir bhi chalega — bas
@@ -46,6 +49,13 @@ import pandas as pd
 
 try:
     from backtest.engine import print_backtest_report, run_backtest_with_split
+    from backtest.options_sim import (
+        DEFAULT_EXPIRY_WEEKDAY,
+        DEFAULT_LOT_SIZE,
+        DEFAULT_STRIKE_STEP,
+        print_options_report,
+        simulate_trade_log,
+    )
     from backtest.walk_forward import (
         DEFAULT_TEST_DAYS,
         DEFAULT_TRAIN_DAYS,
@@ -186,6 +196,23 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--no-vix", action="store_true", help="India VIX fetch mat karo"
     )
+    parser.add_argument(
+        "--options-pnl", action="store_true",
+        help="Directional decisions ko simulated ATM option trades mein badalke "
+             "rupee P&L bhi nikalo (theta + costs shaamil)",
+    )
+    parser.add_argument(
+        "--lot-size", type=int, default=DEFAULT_LOT_SIZE,
+        help=f"--options-pnl ke liye lot size (default NIFTY: {DEFAULT_LOT_SIZE})",
+    )
+    parser.add_argument(
+        "--strike-step", type=int, default=DEFAULT_STRIKE_STEP,
+        help=f"ATM strike rounding step (default: {DEFAULT_STRIKE_STEP})",
+    )
+    parser.add_argument(
+        "--expiry-weekday", type=int, default=DEFAULT_EXPIRY_WEEKDAY,
+        help="Weekly expiry ka weekday (0=Mon ... 3=Thu, default: 3)",
+    )
     return parser
 
 
@@ -227,7 +254,30 @@ def main(argv: list[str] | None = None) -> int:
         results = run_backtest_with_split(df, vix, in_sample_pct=args.in_sample_pct)
         print_backtest_report(results)
 
+    if args.options_pnl:
+        _run_options_sim(df, results, vix, args)
+
     return 0
+
+
+def _collect_trade_log(results: dict, mode: str) -> list:
+    """Dono modes ke result-shapes se ek flat trade log banata hai."""
+    if mode == "walkforward":
+        return [t for fold in results["folds"] for t in fold["trade_log"]]
+    # split mode: sirf OUT-OF-SAMPLE trades — in-sample P&L pe bharosa nahi
+    return list(results["out_of_sample"]["trade_log"])
+
+
+def _run_options_sim(df: pd.DataFrame, results: dict, vix, args) -> None:
+    trade_log = _collect_trade_log(results, args.mode)
+    if args.mode == "split":
+        print("(Options P&L sirf OUT-OF-SAMPLE trades pe — in-sample pe nahi.)")
+
+    sim = simulate_trade_log(
+        df, trade_log, vix_series=vix, lot_size=args.lot_size,
+        strike_step=args.strike_step, expiry_weekday=args.expiry_weekday,
+    )
+    print_options_report(sim, lot_size=args.lot_size)
 
 
 if __name__ == "__main__":
