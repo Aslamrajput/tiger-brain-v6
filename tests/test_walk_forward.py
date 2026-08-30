@@ -44,7 +44,9 @@ def test_folds_cover_data_without_overlap():
 
 def test_rolling_vs_anchored_train_window():
     rolling = walk_forward.generate_folds(400, train_days=200, test_days=50)
-    anchored = walk_forward.generate_folds(400, train_days=200, test_days=50, anchored=True)
+    anchored = walk_forward.generate_folds(
+        400, train_days=200, test_days=50, anchored=True
+    )
 
     assert [f["train_start"] for f in rolling] == [0, 50, 100, 150]
     assert all(f["train_start"] == 0 for f in anchored)
@@ -109,9 +111,13 @@ def test_test_window_gets_warmup_from_train_window(monkeypatch):
 
 # ----------------------- aggregation & warnings -----------------------
 
-def _stub_scanner(decisions_by_index):
+def _stub_scanner(decisions_by_index, full_df=None):
     def fake_scanner(df_till_today, vix_series=None, **kwargs):
-        idx = len(df_till_today) - 1
+        idx = (
+            full_df.index.get_loc(df_till_today.index[-1])
+            if full_df is not None
+            else len(df_till_today) - 1
+        )
         return {
             "meta_brain_result": {
                 "final_decision": decisions_by_index.get(idx, "NO_TRADE"),
@@ -124,7 +130,8 @@ def _stub_scanner(decisions_by_index):
 def test_aggregate_counts_only_test_windows(monkeypatch):
     df = make_ohlcv(200)
     monkeypatch.setattr(
-        "backtest.engine.run_scanner", _stub_scanner({i: "BUY" for i in range(200)})
+        "backtest.engine.run_scanner",
+        _stub_scanner({i: "BUY" for i in range(200)}, full_df=df),
     )
 
     result = walk_forward.run_walk_forward(df, train_days=60, test_days=30)
@@ -165,7 +172,7 @@ def test_consistency_spread_flags_unstable_result(monkeypatch):
     df = make_ohlcv(200)
 
     def fake_scanner(df_till_today, vix_series=None, **kwargs):
-        i = len(df_till_today) - 1
+        i = df.index.get_loc(df_till_today.index[-1])
         actual_up = df["close"].iloc[i + 1] > df["close"].iloc[i]
         in_first_fold = i < 90
         correct_call = actual_up if in_first_fold else not actual_up
@@ -197,3 +204,41 @@ def test_backtest_range_clamps_to_last_evaluable_day(monkeypatch):
 
     assert result["total_days_tested"] == 49  # 50..98, last din chhoda
     assert max(t["date_index"] for t in result["trade_log"]) == 98
+
+
+# ----------------------- rolling window & fold dates -----------------------
+
+def test_rolling_folds_drop_old_history(monkeypatch):
+    """Rolling mode mein scanner ko sirf train_days ki history milni
+    chahiye — warna rolling aur anchored ek jaise ho jaate hain."""
+    df = make_ohlcv(200)
+
+    def record(lengths):
+        def fake_scanner(df_till_today, vix_series=None, **kwargs):
+            lengths.append(len(df_till_today))
+            return {
+                "meta_brain_result": {"final_decision": "NO_TRADE", "final_score": 10}
+            }
+        return fake_scanner
+
+    rolling_lengths, anchored_lengths = [], []
+
+    monkeypatch.setattr("backtest.engine.run_scanner", record(rolling_lengths))
+    walk_forward.run_walk_forward(df, train_days=60, test_days=30)
+
+    monkeypatch.setattr("backtest.engine.run_scanner", record(anchored_lengths))
+    walk_forward.run_walk_forward(df, train_days=60, test_days=30, anchored=True)
+
+    # rolling: har fold ke shuru pe history phir se train_days jitni
+    assert max(rolling_lengths) == 60 + 30
+    assert anchored_lengths[-1] > rolling_lengths[-1]
+
+
+def test_fold_end_date_is_last_evaluated_day():
+    df = make_ohlcv(200)
+    folds = walk_forward.generate_folds(len(df), train_days=60, test_days=30)
+    results = walk_forward.run_walk_forward(df, train_days=60, test_days=30)["folds"]
+
+    for spec, fold in zip(folds, results):
+        # test_end exclusive hai — report mein aakhri EVALUATED din aana chahiye
+        assert fold["test_end_date"] == df.index[spec["test_end"] - 1]

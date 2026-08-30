@@ -114,7 +114,25 @@ def load_vix(df: pd.DataFrame) -> pd.Series | None:
 
         vix.index = pd.to_datetime(vix.index).tz_localize(None)
         price_index = pd.to_datetime(df.index).tz_localize(None)
-        return vix.reindex(price_index, method="ffill")
+        aligned = vix.reindex(price_index, method="ffill")
+
+        # Purane saved dataset pe VIX (jo sirf recent din deta hai) price
+        # dates ko cover hi nahi karta — chup-chaap NaN series dene se
+        # VIX rules bina bataye gayab ho jaate hain.
+        coverage = float(aligned.notna().mean())
+        if coverage == 0:
+            logger.warning(
+                "India VIX aapke price dates ko bilkul cover nahi karta "
+                f"({price_index.min().date()} se {price_index.max().date()}) "
+                "— VIX ke bina chala rahe hain."
+            )
+            return None
+        if coverage < 0.9:
+            logger.warning(
+                f"India VIX sirf {coverage:.0%} dino ko cover karta hai — "
+                "baaki dino pe VIX-based regime rules skip honge."
+            )
+        return aligned
     except Exception as exc:
         logger.warning(
             f"India VIX load nahi hua ({exc}) — VIX ke bina chala rahe hain."

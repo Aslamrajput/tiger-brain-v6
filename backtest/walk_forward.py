@@ -168,16 +168,21 @@ def run_walk_forward(
 
     fold_results = []
     for spec in folds_spec:
-        # NOTE: `df` poora pass ho raha hai (history ke liye), par decisions
-        # sirf [test_start, test_end) pe liye jaate hain — no lookahead
-        # kyunki har din sirf df.iloc[:i+1] dekhta hai.
+        # NOTE: `df` poora pass ho raha hai par scanner ko sirf
+        # [train_start, i] dikhta hai — rolling mein purana data cut,
+        # anchored mein train_start=0. Decisions sirf test window pe.
         result = backtest_range(
-            df, spec["test_start"], spec["test_end"], vix_series=vix_series
+            df,
+            spec["test_start"],
+            spec["test_end"],
+            vix_series=vix_series,
+            history_start=spec["train_start"],
         )
+        last_test_index = min(spec["test_end"], len(df) - 1) - 1
         fold_results.append({
             **spec,
             "test_start_date": df.index[spec["test_start"]],
-            "test_end_date": df.index[min(spec["test_end"], len(df) - 1)],
+            "test_end_date": df.index[last_test_index],
             "total_days_tested": result["total_days_tested"],
             "total_trades": result["total_trades"],
             "correct_direction": result["correct_direction"],

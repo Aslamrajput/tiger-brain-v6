@@ -85,6 +85,7 @@ def backtest_range(
     eval_start: int,
     eval_end: int,
     vix_series: pd.Series = None,
+    history_start: int = 0,
 ) -> dict:
     """
     Core loop — `df` ke sirf [eval_start, eval_end) wale dino pe decision
@@ -103,20 +104,24 @@ def backtest_range(
         eval_end: kis index se PEHLE tak (exclusive) — `len(df)-1` se
                   zyada nahi, kyunki agle din ka outcome chahiye
         vix_series: optional, same index alignment
+        history_start: is index se pehle ka data scanner ko dikhega hi
+                       nahi — rolling window ke liye (0 = poori history)
 
     Returns:
         run_single_period_backtest() jaisa hi dict
     """
     trade_log = []
 
-    eval_start = max(eval_start, MIN_WARMUP_DAYS)
+    eval_start = max(eval_start, history_start + MIN_WARMUP_DAYS)
     eval_end = min(eval_end, len(df) - 1)
 
     for i in range(eval_start, eval_end):
         # ⚠️ NO LOOKAHEAD: sirf index 0 se i tak ka data (aaj tak),
         # kal/future ka data bilkul nahi diya ja raha
-        df_till_today = df.iloc[: i + 1]
-        vix_till_today = vix_series.iloc[: i + 1] if vix_series is not None else None
+        df_till_today = df.iloc[history_start : i + 1]
+        vix_till_today = (
+            vix_series.iloc[history_start : i + 1] if vix_series is not None else None
+        )
 
         try:
             result = run_scanner(df_till_today, vix_series=vix_till_today)
