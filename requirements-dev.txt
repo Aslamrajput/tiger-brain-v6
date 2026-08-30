@@ -1,0 +1,8 @@
+# Tiger Brain — Development/Testing Dependencies
+# ==============================================
+# Tests chalane ke liye (repo ROOT se):  python3 -m pytest tests -q
+#   pip install -r requirements-dev.txt
+
+-r requirements.txt
+
+pytest>=8.0.0
