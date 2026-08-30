@@ -23,6 +23,8 @@ Ye module free data sources se historical + cross-asset data fetch karta hai:
     baad zaroor manually verify karna ki data sahi aa raha hai.
 """
 
+from __future__ import annotations
+
 import io
 import logging
 from datetime import datetime, timedelta
@@ -445,51 +447,104 @@ def fetch_angel_ltp(broker, exchange: str, tradingsymbol: str, symboltoken: str)
 
 
 # ============================================================
-# QUICK MANUAL TEST (isko apne server pe chalao, sandbox mein nahi chalega)
+# 5. OPTIONS CHAIN + OI DATA (Section 19, 22, 23 — Sub-Brains ke
+#    liye zaroori: OI buildup, PCR, IV Skew)
 # ============================================================
-if __name__ == "__main__":
-    print("=== Cross-Asset Snapshot Test ===")
-    snapshot = get_latest_overnight_snapshot()
-    for name, values in snapshot.items():
-        print(f"{name}: {values}")
+# ⚠️ Ye section Angel One ke instrument-master format pe based hai
+# (confirmed via SmartAPI forum documentation): options symbols
+# jaise "NIFTY28OCT2524400CE" — name+expiry(DDMMMYYYY)+strike+CE/PE.
+# Strike value master file mein *100 hoke stored hai (jaise 24400
+# strike = "2440000.000000"), isliye humesha /100 karna hai.
 
-    print("\n=== India VIX History Test (last 10 rows) ===")
-    vix_df = fetch_india_vix_history(days_back=30)
-    print(vix_df.tail(10))
+INDEX_UNDERLYING_TOKENS = {
+    # Spot index token (LTP/candles ke liye — Section 4 mein already use ho raha)
+    "NIFTY": "99926000",
+}
 
-    print("\n=== NSE Bhavcopy Test (yesterday) ===")
-    yesterday = datetime.now() - timedelta(days=1)
-    bhav_df = fetch_nse_bhavcopy(yesterday)
-    if bhav_df is not None:
-        print(bhav_df.head())
-    else:
-        print("Bhavcopy nahi mili — upar ka warning check karo.")
 
-    print("\n=== Angel One Real Data Test ===")
-    print("⚠️ Ye REAL Angel One login + real API calls karega.")
-    try:
-        from broker.angel_connect import AngelBroker
+def get_option_chain_instruments(
+    underlying: str = "NIFTY", expiry_date: str = None
+) -> pd.DataFrame:
+    """
+    Instrument master se ek underlying (jaise NIFTY) ke saare options
+    contracts nikalta hai ek expiry ke liye.
 
-        broker = AngelBroker()
-        broker.login()
-        print("✅ Broker login successful, ab data fetch test karte hain...\n")
+    Args:
+        underlying: 'NIFTY', 'BANKNIFTY', etc.
+        expiry_date: format 'DDMMMYYYY' jaisa '28OCT2025'. None = sabse
+                     nearest (jaldi expire hone wali) expiry khud chunega.
 
-        # NIFTY 50 index ka well-known token (NSE) — Angel One
-        # documentation mein diya gaya standard token
-        nifty_token = "99926000"
+    Returns:
+        DataFrame with columns: token, symbol, strike, option_type (CE/PE),
+        expiry, lotsize
+    """
+    df = load_angel_instrument_master()
 
-        print("--- NIFTY Live LTP Test ---")
-        ltp_data = fetch_angel_ltp(broker, "NSE", "NIFTY", nifty_token)
-        print(ltp_data)
+    mask = (
+        (df["name"] == underlying)
+        & (df["instrumenttype"] == "OPTIDX")
+        & (df["exch_seg"] == "NFO")
+    )
+    options = df[mask].copy()
 
-        print("\n--- NIFTY Historical Daily Candles (last 10 days) ---")
-        end = datetime.now()
-        start = end - timedelta(days=10)
-        candles = fetch_angel_historical_candles(
-            broker, "NSE", nifty_token, "ONE_DAY", start, end
-        )
-        print(candles)
+    if options.empty:
+        logger.warning(f"'{underlying}' ke options nahi mile instrument master mein.")
+        return pd.DataFrame()
 
-    except Exception as exc:
-        print(f"❌ Angel One data test fail hua: {exc}")
+    # Strike master mein *100 hoke stored hai
+    options["strike"] = options["strike"].astype(float) / 100
+    options["option_type"] = options["symbol"].str[-2:]  # last 2 chars: CE/PE
 
+    # Expiry ko date mein convert karke sort karna (nearest expiry dhundhne ke liye)
+    options["expiry_parsed"] = pd.to_datetime(
+        options["expiry"], format="%d%b%Y", errors="coerce"
+    )
+    options = options.dropna(subset=["expiry_parsed"]).sort_values("expiry_parsed")
+
+    if expiry_date is None:
+        # Sabse nearest (jaldi wali) expiry chunna — future ki, aaj se pehle ki nahi
+        today = pd.Timestamp.now().normalize()
+        future_expiries = options[options["expiry_parsed"] >= today]["expiry"].unique()
+        if len(future_expiries) == 0:
+            logger.warning("Koi future expiry nahi mili.")
+            return pd.DataFrame()
+        expiry_date = sorted(
+            future_expiries,
+            key=lambda x: pd.to_datetime(x, format="%d%b%Y"),
+        )[0]
+        logger.info(f"Nearest expiry auto-selected: {expiry_date}")
+
+    result = options[options["expiry"] == expiry_date][
+        ["token", "symbol", "strike", "option_type", "expiry", "lotsize"]
+    ].reset_index(drop=True)
+
+    return result
+
+
+def fetch_option_chain_oi(
+    broker, underlying: str = "NIFTY", expiry_date: str = None, strikes_around_atm: int = 10
+) -> pd.DataFrame:
+    """
+    Ek underlying ke option-chain ka OI + LTP fetch karta hai — ye
+    Sub-Brains (OI Thresholds, Section 19) aur Meta-Brain ke liye
+    ZAROORI data hai jo abhi tak missing tha.
+
+    Args:
+        underlying: 'NIFTY', etc.
+        expiry_date: None = nearest expiry
+        strikes_around_atm: ATM ke around kitni strikes chahiye (dono
+                             taraf) — poora chain lena zaroori nahi,
+                             ATM ke aas-paas ka hi kaam ka hota hai
+
+    Returns:
+        DataFrame: columns = [strike, CE_token, CE_oi, CE_ltp,
+                   PE_token, PE_oi, PE_ltp]
+    """
+    if broker.smart_api is None:
+        raise RuntimeError("Broker login nahi hua hai — pehle broker.login() call karo.")
+
+    instruments = get_option_chain_instruments(underlying, expiry_date)
+    if instruments.empty:
+        return pd.DataFrame()
+
+    # ATM strike                    
