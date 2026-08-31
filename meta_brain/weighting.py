@@ -12,7 +12,11 @@ Formula (Section 5.2):
 """
 
 try:
-    from config.thresholds import META_BRAIN_WEIGHTS, DECISION_SCORE_THRESHOLD
+    from config.thresholds import (
+        META_BRAIN,
+        META_BRAIN_WEIGHTS,
+        DECISION_SCORE_THRESHOLD,
+    )
 except ImportError:
     raise ImportError("Repo ROOT se chalao, 'meta_brain/' ke andar se nahi.")
 
@@ -30,7 +34,23 @@ REGIME_KEY_MAP = {
 }
 
 
-def decide(sub_brain_votes: dict, current_regime: str) -> dict:
+def _participates(vote_data: dict) -> bool:
+    """
+    Brain tabhi score ke denominator mein ginta hai jab uske paas data ho
+    aur regime uske liye bilkul hi bekaar na ho. Warna ek chup brain
+    (jaise IV feed ke bina Vol-Arb) poore score ko neeche kheench leta hai.
+    """
+    if not vote_data.get("data_available", True):
+        return False
+    min_fit = META_BRAIN["MIN_REGIME_FIT_TO_PARTICIPATE"]
+    return vote_data.get("regime_fit", 100) >= min_fit
+
+
+def decide(
+    sub_brain_votes: dict,
+    current_regime: str,
+    score_threshold: float = DECISION_SCORE_THRESHOLD,
+) -> dict:
     """
     Args:
         sub_brain_votes: dict jisme keys hain sub-brain names aur values
@@ -77,12 +97,26 @@ def decide(sub_brain_votes: dict, current_regime: str) -> dict:
 
     # --- STEP 3: Weighted Sum Calculate Karna ---
     raw_weighted_sum = 0.0
+    participating_weight = 0.0
     contributing_factors = {}
 
     for brain_name, weight in weights.items():
         vote_data = sub_brain_votes.get(brain_name)
         if vote_data is None:
             continue  # ye sub-brain evaluate hi nahi hua, skip
+
+        participates = _participates(vote_data)
+        if participates:
+            participating_weight += weight
+        else:
+            contributing_factors[brain_name] = {
+                "vote": vote_data.get("vote", "NO_TRADE"),
+                "confidence": vote_data.get("confidence", 0),
+                "weight": weight,
+                "contribution": 0.0,
+                "participates": False,
+            }
+            continue
 
         vote = vote_data.get("vote", "NO_TRADE")
         confidence = vote_data.get("confidence", 0)
@@ -101,12 +135,18 @@ def decide(sub_brain_votes: dict, current_regime: str) -> dict:
             "confidence": confidence,
             "weight": weight,
             "contribution": round(contribution, 2),
+            "participates": participates,
         }
 
-    final_score = round(abs(raw_weighted_sum), 2)
+    # Score = participating brains ka weighted AVERAGE confidence, taaki
+    # data-gap wale brains score ko structurally cap na kar dein.
+    if META_BRAIN["NORMALISE_BY_PARTICIPATING_WEIGHT"] and participating_weight > 0:
+        final_score = round(abs(raw_weighted_sum) / participating_weight, 2)
+    else:
+        final_score = round(abs(raw_weighted_sum), 2)
 
     # --- STEP 4: Final Decision (Section 5.2) ---
-    if final_score >= DECISION_SCORE_THRESHOLD:
+    if final_score >= score_threshold:
         final_decision = "BUY" if raw_weighted_sum > 0 else "SELL"
     else:
         final_decision = "NO_TRADE"
@@ -119,6 +159,8 @@ def decide(sub_brain_votes: dict, current_regime: str) -> dict:
         "veto_reason": None,
         "contributing_factors": contributing_factors,
         "regime_used": weight_key,
+        "participating_weight": round(participating_weight, 2),
+        "score_threshold": score_threshold,
     }
 
 

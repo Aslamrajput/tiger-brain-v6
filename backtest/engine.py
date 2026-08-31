@@ -29,11 +29,13 @@ signal-quality check" hai, asli profit-loss simulation nahi — wo agla
 step hoga jab options-pricing model banega.
 """
 
+import collections
 import logging
 
 import pandas as pd
 
 try:
+    from config.thresholds import DECISION_SCORE_THRESHOLD, PIPELINE
     from pipeline.stage1_scanner import run_scanner
 except ImportError:
     raise ImportError("Repo ROOT se chalao, 'backtest/' ke andar se nahi.")
@@ -46,7 +48,63 @@ MIN_WARMUP_DAYS = 30  # regime classifier ko ye kam se kam chahiye
 MIN_MEANINGFUL_TRADES = 20  # isse kam trades pe result statistically weak hai
 
 
-def run_single_period_backtest(df: pd.DataFrame, vix_series: pd.Series = None) -> dict:
+def new_gate_stats() -> dict:
+    """Diagnostics ka khaali dhaancha — kaun sa gate kitne din blocked kar raha hai."""
+    return {
+        "days": 0,
+        "regimes": collections.Counter(),
+        "decisions": collections.Counter(),
+        "blocked_by": collections.Counter(),
+        "brain_votes": collections.Counter(),
+        "brain_max_confidence": {},
+        "scores": [],
+    }
+
+
+def merge_gate_stats(target: dict, extra: dict) -> dict:
+    """Do windows ke diagnostics jodta hai (walk-forward folds ke liye)."""
+    target["days"] += extra["days"]
+    for key in ("regimes", "decisions", "blocked_by", "brain_votes"):
+        target[key].update(extra[key])
+    for brain, value in extra["brain_max_confidence"].items():
+        target["brain_max_confidence"][brain] = max(
+            target["brain_max_confidence"].get(brain, 0.0), value
+        )
+    target["scores"].extend(extra["scores"])
+    return target
+
+
+def _record_gate_stats(stats: dict, result: dict, score_threshold: float) -> None:
+    meta = result["meta_brain_result"]
+    regime = result.get("regime") or {}
+    stats["days"] += 1
+    stats["regimes"][regime.get("regime", "UNKNOWN")] += 1
+    stats["decisions"][meta["final_decision"]] += 1
+    stats["scores"].append(meta.get("final_score", 0.0))
+
+    for brain, vote_data in result.get("sub_brain_votes", {}).items():
+        stats["brain_votes"][f"{brain}:{vote_data['vote']}"] += 1
+        stats["brain_max_confidence"][brain] = max(
+            stats["brain_max_confidence"].get(brain, 0.0),
+            float(vote_data["confidence"]),
+        )
+
+    if meta["final_decision"] != "NO_TRADE":
+        return
+    if meta.get("veto_triggered", False):
+        stats["blocked_by"]["vol_arb_hard_veto"] += 1
+    elif meta.get("final_score", 0.0) < score_threshold:
+        stats["blocked_by"]["score_below_threshold"] += 1
+    else:
+        stats["blocked_by"]["no_clear_direction"] += 1
+
+
+def run_single_period_backtest(
+    df: pd.DataFrame,
+    vix_series: pd.Series = None,
+    score_threshold: float = DECISION_SCORE_THRESHOLD,
+    stage1_min: float = PIPELINE["STAGE1_MIN_CONFIDENCE"],
+) -> dict:
     """
     Ek data-period (chahe IN-SAMPLE ho ya OUT-OF-SAMPLE) pe backtest
     chalata hai — har din ka decision uसी din tak ke data se leta hai
@@ -72,12 +130,19 @@ def run_single_period_backtest(df: pd.DataFrame, vix_series: pd.Series = None) -
         return {
             "total_days_tested": 0, "total_trades": 0,
             "correct_direction": 0, "accuracy_pct": 0.0,
-            "trade_log": [],
+            "trade_log": [], "gate_stats": new_gate_stats(),
         }
 
     # Warmup ke baad se, aur last din se pehle tak (kyunki humein "agle
     # din" ka actual outcome chahiye check karne ke liye)
-    return backtest_range(df, MIN_WARMUP_DAYS, len(df) - 1, vix_series=vix_series)
+    return backtest_range(
+        df,
+        MIN_WARMUP_DAYS,
+        len(df) - 1,
+        vix_series=vix_series,
+        score_threshold=score_threshold,
+        stage1_min=stage1_min,
+    )
 
 
 def backtest_range(
@@ -86,6 +151,8 @@ def backtest_range(
     eval_end: int,
     vix_series: pd.Series = None,
     history_start: int = 0,
+    score_threshold: float = DECISION_SCORE_THRESHOLD,
+    stage1_min: float = PIPELINE["STAGE1_MIN_CONFIDENCE"],
 ) -> dict:
     """
     Core loop — `df` ke sirf [eval_start, eval_end) wale dino pe decision
@@ -111,6 +178,7 @@ def backtest_range(
         run_single_period_backtest() jaisa hi dict
     """
     trade_log = []
+    gate_stats = new_gate_stats()
 
     eval_start = max(eval_start, history_start + MIN_WARMUP_DAYS)
     eval_end = min(eval_end, len(df) - 1)
@@ -124,11 +192,17 @@ def backtest_range(
         )
 
         try:
-            result = run_scanner(df_till_today, vix_series=vix_till_today)
+            result = run_scanner(
+                df_till_today,
+                vix_series=vix_till_today,
+                score_threshold=score_threshold,
+                min_stage1_confidence=stage1_min,
+            )
         except Exception as exc:
             logger.warning(f"Day index {i} pe scanner error: {exc}")
             continue
 
+        _record_gate_stats(gate_stats, result, score_threshold)
         decision = result["meta_brain_result"]["final_decision"]
 
         if decision == "NO_TRADE":
@@ -161,11 +235,16 @@ def backtest_range(
         "correct_direction": correct,
         "accuracy_pct": accuracy,
         "trade_log": trade_log,
+        "gate_stats": gate_stats,
     }
 
 
 def run_backtest_with_split(
-    df: pd.DataFrame, vix_series: pd.Series = None, in_sample_pct: float = 60,
+    df: pd.DataFrame,
+    vix_series: pd.Series = None,
+    in_sample_pct: float = 60,
+    score_threshold: float = DECISION_SCORE_THRESHOLD,
+    stage1_min: float = PIPELINE["STAGE1_MIN_CONFIDENCE"],
 ) -> dict:
     """
     MAIN ENTRY POINT — poora data ko IN-SAMPLE aur OUT-OF-SAMPLE mein
@@ -199,8 +278,12 @@ def run_backtest_with_split(
         f"{len(df_out_sample)} din OUT-OF-SAMPLE"
     )
 
-    in_sample_result = run_single_period_backtest(df_in_sample, vix_in)
-    out_sample_result = run_single_period_backtest(df_out_sample, vix_out)
+    in_sample_result = run_single_period_backtest(
+        df_in_sample, vix_in, score_threshold=score_threshold, stage1_min=stage1_min
+    )
+    out_sample_result = run_single_period_backtest(
+        df_out_sample, vix_out, score_threshold=score_threshold, stage1_min=stage1_min
+    )
 
     # --- Overfitting Check ---
     overfitting_warning = None

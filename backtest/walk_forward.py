@@ -48,7 +48,14 @@ import logging
 import pandas as pd
 
 try:
-    from backtest.engine import MIN_MEANINGFUL_TRADES, MIN_WARMUP_DAYS, backtest_range
+    from backtest.engine import (
+        MIN_MEANINGFUL_TRADES,
+        MIN_WARMUP_DAYS,
+        backtest_range,
+        merge_gate_stats,
+        new_gate_stats,
+    )
+    from config.thresholds import DECISION_SCORE_THRESHOLD, PIPELINE
 except ImportError:
     raise ImportError("Repo ROOT se chalao, 'backtest/' ke andar se nahi.")
 
@@ -123,6 +130,8 @@ def run_walk_forward(
     train_days: int = DEFAULT_TRAIN_DAYS,
     test_days: int = DEFAULT_TEST_DAYS,
     anchored: bool = False,
+    score_threshold: float = DECISION_SCORE_THRESHOLD,
+    stage1_min: float = PIPELINE["STAGE1_MIN_CONFIDENCE"],
 ) -> dict:
     """
     MAIN ENTRY POINT — poore data pe walk-forward validation chalata hai
@@ -157,6 +166,7 @@ def run_walk_forward(
             "folds": [],
             "aggregate": _empty_aggregate(),
             "consistency": None,
+            "gate_stats": new_gate_stats(),
             "warnings": [
                 f"Data sirf {len(df)} din ka hai — train_days={train_days} "
                 f"+ test_days={test_days} ke liye kam se kam "
@@ -167,6 +177,7 @@ def run_walk_forward(
         }
 
     fold_results = []
+    gate_stats = new_gate_stats()
     for spec in folds_spec:
         # NOTE: `df` poora pass ho raha hai par scanner ko sirf
         # [train_start, i] dikhta hai — rolling mein purana data cut,
@@ -177,7 +188,10 @@ def run_walk_forward(
             spec["test_end"],
             vix_series=vix_series,
             history_start=spec["train_start"],
+            score_threshold=score_threshold,
+            stage1_min=stage1_min,
         )
+        merge_gate_stats(gate_stats, result["gate_stats"])
         last_test_index = min(spec["test_end"], len(df) - 1) - 1
         fold_results.append({
             **spec,
@@ -230,6 +244,7 @@ def run_walk_forward(
 
     return {
         "folds": fold_results,
+        "gate_stats": gate_stats,
         "aggregate": aggregate,
         "consistency": consistency,
         "warnings": warnings,

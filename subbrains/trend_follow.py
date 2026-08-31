@@ -23,7 +23,7 @@ import numpy as np
 import pandas as pd
 
 try:
-    from config.thresholds import SUBBRAIN_TREND_FOLLOW, REGIME
+    from config.thresholds import SUBBRAIN_TREND_FOLLOW, REGIME, VWAP
     from regime.classifier import calculate_atr
 except ImportError:
     raise ImportError(
@@ -91,16 +91,50 @@ def calculate_supertrend(
     return pd.DataFrame({"supertrend": supertrend, "trend": trend})
 
 
-def calculate_vwap(df: pd.DataFrame) -> pd.Series:
+def has_volume_data(df: pd.DataFrame) -> bool:
     """
-    Volume Weighted Average Price — cumulative (session ke andar reset
-    karna ho to caller ko df ko session-wise slice karna hoga).
+    Index spot candles (jaise Angel ka NIFTY token 99926000) volume = 0
+    dete hain. Aise data pe volume-based factor ko "fail" maan lena galat
+    hai — wo factor available hi nahi hai.
     """
+    if "volume" not in df.columns:
+        return False
+    recent = df["volume"].tail(VWAP["ROLLING_CANDLES"])
+    return bool(recent.notna().any() and (recent.fillna(0) > 0).any())
+
+
+def calculate_vwap(df: pd.DataFrame, window: int | None = None) -> pd.Series:
+    """
+    Rolling Volume Weighted Average Price (default window config se).
+    Cumulative VWAP 2 saal ke daily data pe bekaar ho jaata hai — har din
+    ka distance mahine purane average se naapa jaata hai.
+
+    Volume data na ho (index spot candles) to typical price ka simple
+    rolling average lautata hai — yani unweighted VWAP.
+    """
+    window = window or VWAP["ROLLING_CANDLES"]
     typical_price = (df["high"] + df["low"] + df["close"]) / 3
-    cumulative_tpv = (typical_price * df["volume"]).cumsum()
-    cumulative_volume = df["volume"].cumsum()
-    vwap = cumulative_tpv / cumulative_volume
-    return vwap
+
+    if not has_volume_data(df):
+        return typical_price.rolling(window, min_periods=1).mean()
+
+    volume = df["volume"].fillna(0)
+    rolling_tpv = (typical_price * volume).rolling(window, min_periods=1).sum()
+    rolling_volume = volume.rolling(window, min_periods=1).sum()
+    fallback = typical_price.rolling(window, min_periods=1).mean()
+    return (rolling_tpv / rolling_volume).where(rolling_volume > 0, fallback)
+
+
+def redistribute_weight(weights: dict, missing_key: str) -> None:
+    """Jo factor available nahi hai uska weight baaki factors mein baant do."""
+    if missing_key not in weights:
+        return
+    freed = weights.pop(missing_key)
+    remaining_total = sum(weights.values())
+    if remaining_total <= 0:
+        return
+    for key in weights:
+        weights[key] += freed * (weights[key] / remaining_total)
 
 
 # ============================================================
@@ -159,6 +193,7 @@ def evaluate(
             "reasoning_tags": [],
             "conflicting_evidence": ["Insufficient data — kam se kam 30 rows chahiye"],
             "regime_fit": regime_fit,
+            "data_available": False,
         }
 
     # --- Indicator Calculations ---
@@ -174,9 +209,10 @@ def evaluate(
         cfg["MIN_VWAP_DISTANCE_PCT"] if is_index else cfg["MIN_VWAP_DISTANCE_PCT"] * 1.67
     )  # stock threshold Section 21 ke hisaab se index se zyada hota hai
 
-    # Volume check
-    volume_avg_20 = df["volume"].tail(20).mean()
-    latest_volume = df["volume"].iloc[-1]
+    # Volume check (index spot pe volume 0 hota hai — tab factor skip)
+    volume_available = has_volume_data(df)
+    volume_avg_20 = df["volume"].tail(20).mean() if volume_available else 0.0
+    latest_volume = df["volume"].iloc[-1] if volume_available else 0.0
     volume_multiplier = latest_volume / volume_avg_20 if volume_avg_20 > 0 else 0
 
     # --- Scoring har factor ka (0.0 to 1.0 scale, phir weight se multiply) ---
@@ -215,7 +251,14 @@ def evaluate(
         conflicting_evidence.append(f"Regime '{current_regime}' Strong Trend nahi hai")
 
     # 4. Volume confirmation
-    if volume_multiplier >= cfg["MIN_VOLUME_MULTIPLIER"]:
+    weights = dict(cfg["CONFIDENCE_WEIGHTS"])  # copy taaki original na badle
+    if not volume_available:
+        redistribute_weight(weights, "volume")
+        conflicting_evidence.append(
+            "⚠️ Volume data available nahi tha (index spot candles mein "
+            "volume 0 aata hai) — factor skip, weight redistribute."
+        )
+    elif volume_multiplier >= cfg["MIN_VOLUME_MULTIPLIER"]:
         volume_direction = scores["supertrend"] if scores["supertrend"] != 0 else 1.0
         scores["volume"] = volume_direction
         reasoning_tags.append(f"Volume {volume_multiplier:.1f}x average se")
@@ -226,13 +269,9 @@ def evaluate(
         )
 
     # 5. OI buildup (agar data available hai)
-    weights = dict(cfg["CONFIDENCE_WEIGHTS"])  # copy taaki original na badle
     if oi_buildup_confirmed is None:
         # OI factor skip — uska weight baaki factors mein proportionally redistribute
-        oi_weight = weights.pop("oi")
-        remaining_total = sum(weights.values())
-        for k in weights:
-            weights[k] += oi_weight * (weights[k] / remaining_total)
+        redistribute_weight(weights, "oi")
         conflicting_evidence.append(
             "⚠️ OI data available nahi tha — is factor ko skip karke baaki "
             "weights proportionally badhaye gaye hain. Confidence score "
@@ -266,6 +305,7 @@ def evaluate(
         "reasoning_tags": reasoning_tags,
         "conflicting_evidence": conflicting_evidence,
         "regime_fit": regime_fit,
+        "data_available": True,
     }
 
 

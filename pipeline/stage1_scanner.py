@@ -26,6 +26,8 @@ except ImportError:
 
 def run_scanner(
     df,
+    score_threshold=None,
+    min_stage1_confidence=None,
     vix_series=None,
     oi_buildup_confirmed=None,
     near_fresh_zone=None,
@@ -109,19 +111,29 @@ def run_scanner(
         sub_brain_votes["vol_arb"] = {
             "vote": "NO_TRADE", "confidence": 0, "reasoning_tags": [],
             "conflicting_evidence": ["IV data missing"], "regime_fit": 0,
-            "hard_veto": False,
+            "hard_veto": False, "data_available": False,
         }
 
     # --- STEP 3: Meta-Brain Se Final Decision ---
-    meta_result = meta_brain_decide(sub_brain_votes, current_regime)
+    if score_threshold is None:
+        meta_result = meta_brain_decide(sub_brain_votes, current_regime)
+    else:
+        meta_result = meta_brain_decide(
+            sub_brain_votes, current_regime, score_threshold=score_threshold
+        )
 
     # --- STEP 4: Stage 1 Pass/Fail Check (Section 25) ---
-    passed = meta_result["final_score"] >= PIPELINE["STAGE1_MIN_CONFIDENCE"]
+    stage1_min = (
+        PIPELINE["STAGE1_MIN_CONFIDENCE"]
+        if min_stage1_confidence is None
+        else min_stage1_confidence
+    )
+    passed = meta_result["final_score"] >= stage1_min
 
     if not passed:
         stage1_notes.append(
             f"Stage 1 FAIL: score {meta_result['final_score']} < threshold "
-            f"{PIPELINE['STAGE1_MIN_CONFIDENCE']}"
+            f"{stage1_min}"
         )
 
     return {
