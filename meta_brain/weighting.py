@@ -146,7 +146,9 @@ def decide(
         final_score = round(abs(raw_weighted_sum), 2)
 
     # --- STEP 4: Final Decision (Section 5.2) ---
-    if final_score >= score_threshold:
+    # raw sum 0 ka matlab kisi ne direction di hi nahi — threshold 0 ho to
+    # bhi ise SELL nahi banana
+    if final_score >= score_threshold and raw_weighted_sum != 0:
         final_decision = "BUY" if raw_weighted_sum > 0 else "SELL"
     else:
         final_decision = "NO_TRADE"

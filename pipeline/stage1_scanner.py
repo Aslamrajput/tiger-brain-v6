@@ -26,8 +26,6 @@ except ImportError:
 
 def run_scanner(
     df,
-    score_threshold=None,
-    min_stage1_confidence=None,
     vix_series=None,
     oi_buildup_confirmed=None,
     near_fresh_zone=None,
@@ -38,6 +36,8 @@ def run_scanner(
     call_iv=None,
     bid_ask_spread_normal=True,
     is_index=True,
+    score_threshold=None,
+    min_stage1_confidence=None,
 ) -> dict:
     """
     Ek candidate (symbol) ka pura Stage-1 research karta hai.

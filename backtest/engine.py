@@ -90,6 +90,8 @@ def _record_gate_stats(stats: dict, result: dict, score_threshold: float) -> Non
         )
 
     if meta["final_decision"] != "NO_TRADE":
+        if not result.get("passed_stage1", True):
+            stats["blocked_by"]["stage1_min_confidence"] += 1
         return
     if meta.get("veto_triggered", False):
         stats["blocked_by"]["vol_arb_hard_veto"] += 1
@@ -207,6 +209,11 @@ def backtest_range(
 
         if decision == "NO_TRADE":
             continue  # NO_TRADE ko "trade" nahi ginte, accuracy mein shamil nahi
+
+        # Stage 1 apna alag cutoff rakhta hai (stage1_min > score_threshold ho
+        # sakta hai) — wahan fail hua candidate trade log mein nahi jaana chahiye
+        if not result.get("passed_stage1", True):
+            continue
 
         # Agle din ka actual price move dekho (ye sirf ab, checking ke
         # liye use ho raha hai — decision lete waqt nahi dekha gaya tha)

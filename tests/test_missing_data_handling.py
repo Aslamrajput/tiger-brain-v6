@@ -13,8 +13,9 @@ Yahan ye pakka karte hain ki:
 import numpy as np
 import pandas as pd
 
-from backtest.engine import new_gate_stats, _record_gate_stats
+from backtest.engine import backtest_range, new_gate_stats, _record_gate_stats
 from meta_brain.weighting import decide
+from pipeline.stage1_scanner import run_scanner
 from subbrains import breakout, mean_reversion, trend_follow
 
 
@@ -140,6 +141,41 @@ def test_custom_score_threshold_is_respected():
     loose = decide(votes, "STRONG_TREND", score_threshold=40)
     assert strict["final_decision"] == "NO_TRADE"
     assert loose["final_decision"] == "BUY"
+
+
+def test_zero_threshold_does_not_invent_a_direction():
+    """Sab NO_TRADE ka raw sum 0 hai — threshold 0 pe bhi SELL nahi banna chahiye."""
+    votes = {"trend_follow": _vote("NO_TRADE", 0)}
+    result = decide(votes, "STRONG_TREND", score_threshold=0)
+    assert result["final_decision"] == "NO_TRADE"
+
+
+def test_run_scanner_accepts_vix_positionally():
+    """vix_series ka positional contract naye params se toota nahi chahiye."""
+    df = make_ohlcv(volume=0)
+    vix = pd.Series(14.0, index=df.index)
+    result = run_scanner(df, vix)
+    assert result["meta_brain_result"] is not None
+
+
+def test_stage1_failure_is_not_logged_as_trade(monkeypatch):
+    """stage1_min > score_threshold ho to Stage-1 pe ruka candidate trade nahi hai."""
+    df = make_ohlcv(n=40)
+
+    def fake_scanner(df_till_today, **kwargs):
+        return {
+            "passed_stage1": False,
+            "regime": {"regime": "STRONG_TREND"},
+            "sub_brain_votes": {},
+            "meta_brain_result": {
+                "final_decision": "BUY", "final_score": 50.0, "veto_triggered": False,
+            },
+        }
+
+    monkeypatch.setattr("backtest.engine.run_scanner", fake_scanner)
+    result = backtest_range(df, 30, len(df) - 1, score_threshold=40, stage1_min=90)
+    assert result["total_trades"] == 0
+    assert result["gate_stats"]["blocked_by"]["stage1_min_confidence"] > 0
 
 
 def test_gate_stats_attributes_block_reason():
