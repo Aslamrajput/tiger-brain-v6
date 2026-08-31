@@ -35,6 +35,37 @@ ki system sirf ek lucky period mein chala tha.
   `config/thresholds.py` mein fixed hain), isliye ye classic walk-forward
   *optimization* nahi — uska validation-only version hai.
 
+## Gate diagnostics aur sensitivity analysis
+
+```bash
+# Kaun sa gate kitne din NO_TRADE kara raha hai
+python3 -m backtest.cli --source csv --csv-path nifty_2y.csv --diagnose
+
+# Ek hi dataset pe kai score-thresholds ka signal-count/accuracy
+python3 -c "from backtest.cli import load_from_csv; \
+from backtest.sensitivity import run_threshold_sweep, print_sweep_report; \
+print_sweep_report(run_threshold_sweep(load_from_csv('nifty_2y.csv')))"
+```
+
+`--diagnose` regime distribution, final decisions, har NO_TRADE din ka
+blocking gate (hard veto vs score cutoff), score distribution aur per
+sub-brain vote counts chhaapta hai. `--score-threshold` / `--stage1-min`
+se cutoff bina code badle override ho sakta hai.
+
+**Index data ka volume 0 hota hai:** Angel ka NIFTY spot token har candle
+pe `volume = 0` deta hai. Pehle sub-brains ise "volume confirmation fail"
+maante the, isliye har din confidence structurally kat rahi thi aur 2 saal
+ke real data pe **0 trades** aaye. Ab volume-0 ko "data available nahi"
+maana jaata hai: us factor ka weight baaki factors mein redistribute hota
+hai (waisa hi jaisa OI/zone gaps ke liye pehle se hota tha), VWAP rolling
+window pe banta hai, aur Meta-Brain ka score sirf *participating* brains ke
+weight se normalise hota hai — yani IV feed ke bina chup baitha Vol-Arb ab
+score ko structurally cap nahi karta.
+
+⚠️ Sweep se sabse acchi accuracy wala threshold utha kar production mein
+daalna overfitting hai — sweep sirf ye dikhata hai ki gate kis level pe
+khulta hai. `DECISION_SCORE_THRESHOLD` abhi bhi 65 (conservative) hai.
+
 ## Options P&L simulation (`--options-pnl`)
 
 Har directional decision ko ek option trade ki tarah simulate karta hai:

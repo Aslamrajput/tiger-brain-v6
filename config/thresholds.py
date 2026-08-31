@@ -50,6 +50,7 @@ VOLUME = {
 }
 
 VWAP = {
+    "ROLLING_CANDLES": 20,
     "MEANINGFUL_DISTANCE_INDEX_PCT": 0.3,
     "MEANINGFUL_DISTANCE_STOCK_PCT": 0.5,
     "EXTREME_DISTANCE_PCT": 1.5,
@@ -151,6 +152,17 @@ META_BRAIN_WEIGHTS = {
 }
 
 DECISION_SCORE_THRESHOLD = 65
+
+# Meta-Brain ka score sab weights ka weighted average hai. Agar koi
+# sub-brain data hi na hone ki wajah se chup hai (jaise Vol-Arb bina IV
+# feed ke), to uska weight score ko neeche kheenchta hai aur threshold
+# structurally kabhi cross nahi hota. Isliye score ko sirf un brains ke
+# weight se normalise karte hain jinke paas data hai aur jinka regime-fit
+# minimum se upar hai.
+META_BRAIN = {
+    "NORMALISE_BY_PARTICIPATING_WEIGHT": True,
+    "MIN_REGIME_FIT_TO_PARTICIPATE": 20,
+}
 
 PIPELINE = {
     "STAGE1_MIN_CONFIDENCE": 50,
