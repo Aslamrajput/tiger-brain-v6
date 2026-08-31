@@ -146,7 +146,8 @@ def test_custom_score_threshold_is_respected():
 def test_zero_threshold_does_not_invent_a_direction():
     """Sab NO_TRADE ka raw sum 0 hai — threshold 0 pe bhi SELL nahi banna chahiye."""
     votes = {"trend_follow": _vote("NO_TRADE", 0)}
-    assert decide(votes, "STRONG_TREND", score_threshold=0)["final_decision"] == "NO_TRADE"
+    flat = decide(votes, "STRONG_TREND", score_threshold=0)
+    assert flat["final_decision"] == "NO_TRADE"
 
     # cancel hote votes bhi direction nahi bante (float residue ke saath bhi)
     # RANGE weights: trend_follow 0.10, mean_reversion 0.35 → 3.5*0.10 == 1.0*0.35
