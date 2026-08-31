@@ -19,6 +19,8 @@ mein), lekin humne abhi tak broker se live OI data connect nahi kiya hai
     chhupaya nahi ja raha.
 """
 
+from __future__ import annotations
+
 import numpy as np
 import pandas as pd
 

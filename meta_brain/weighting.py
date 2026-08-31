@@ -11,6 +11,8 @@ Formula (Section 5.2):
     Clear winner nahi -> NO_TRADE
 """
 
+from __future__ import annotations
+
 try:
     from config.thresholds import META_BRAIN_WEIGHTS, DECISION_SCORE_THRESHOLD
 except ImportError:

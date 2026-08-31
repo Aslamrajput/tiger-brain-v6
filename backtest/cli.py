@@ -40,6 +40,8 @@ regime classification VIX-based rules ke bina thoda kamzor hoga, aur
 report mein ye batata hai.
 """
 
+from __future__ import annotations
+
 import argparse
 import logging
 import sys

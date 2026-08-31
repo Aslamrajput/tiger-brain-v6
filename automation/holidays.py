@@ -17,6 +17,8 @@ list dobara update karni hogi — NSE ki site ya apne broker ki holiday
 calendar page check karke.
 """
 
+from __future__ import annotations
+
 from datetime import date
 
 # 2026 NSE Equity/F&O trading holidays (jab exchange PURA band rehta hai)
