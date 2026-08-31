@@ -1,0 +1,184 @@
+"""
+Intraday data layer ke offline tests — koi network/broker nahi.
+Chalane ka tarika (repo ROOT se): python3 -m pytest tests/test_intraday.py
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+
+import pandas as pd
+import pytest
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from data.intraday import (  # noqa: E402
+    candle_quality_report,
+    candles_per_session,
+    clean_intraday,
+    load_cached,
+    load_intraday,
+    merge_candles,
+    resample_candles,
+    save_cache,
+)
+
+
+def make_session(day: str, n: int = 75, freq: str = "5min", volume: int = 100):
+    """Ek trading din ki candles (09:15 se), default 5-min × 75 = poora din."""
+    index = pd.date_range(f"{day} 09:15", periods=n, freq=freq)
+    return pd.DataFrame(
+        {
+            "open": range(1, n + 1),
+            "high": range(2, n + 2),
+            "low": range(0, n),
+            "close": range(1, n + 1),
+            "volume": [volume] * n,
+        },
+        index=index,
+    ).astype(float)
+
+
+def test_expected_candles_per_session():
+    assert candles_per_session("FIVE_MINUTE") == 75
+    assert candles_per_session("ONE_MINUTE") == 375
+    assert candles_per_session("FIFTEEN_MINUTE") == 25
+
+
+def test_clean_drops_rows_outside_market_hours():
+    df = make_session("2026-06-15", n=80)  # 75 candles ke baad 15:30+ chala jaata hai
+    cleaned = clean_intraday(df, "FIVE_MINUTE")
+    assert len(cleaned) == 75
+    assert cleaned.index[-1].strftime("%H:%M") == "15:25"
+
+
+def test_clean_drops_weekends_and_holidays():
+    weekend = make_session("2026-06-13", n=5)  # Saturday
+    holiday = make_session("2026-01-26", n=5)  # Republic Day
+    normal = make_session("2026-06-15", n=5)   # Monday
+    cleaned = clean_intraday(pd.concat([weekend, holiday, normal]), "FIVE_MINUTE")
+    assert len(cleaned) == 5
+    assert set(cleaned.index.date) == {pd.Timestamp("2026-06-15").date()}
+
+
+def test_clean_dedupes_and_sorts():
+    df = make_session("2026-06-15", n=3)
+    dupe = df.iloc[[0]].copy()
+    dupe["close"] = 999.0
+    cleaned = clean_intraday(pd.concat([df.iloc[::-1], dupe]), "FIVE_MINUTE")
+    assert len(cleaned) == 3
+    assert cleaned.index.is_monotonic_increasing
+    assert cleaned["close"].iloc[0] == 999.0
+
+
+def test_clean_strips_timezone():
+    df = make_session("2026-06-15", n=3)
+    df.index = df.index.tz_localize("Asia/Kolkata")
+    assert clean_intraday(df, "FIVE_MINUTE").index.tz is None
+
+
+def test_clean_rejects_missing_columns():
+    df = make_session("2026-06-15", n=3).drop(columns=["volume"])
+    with pytest.raises(ValueError, match="volume"):
+        clean_intraday(df, "FIVE_MINUTE")
+
+
+def test_resample_aggregates_ohlcv_correctly():
+    df = make_session("2026-06-15", n=75)
+    fifteen = resample_candles(df, 15)
+
+    assert len(fifteen) == 25
+    first = fifteen.iloc[0]
+    assert first["open"] == df["open"].iloc[0]
+    assert first["close"] == df["close"].iloc[2]
+    assert first["high"] == df["high"].iloc[:3].max()
+    assert first["low"] == df["low"].iloc[:3].min()
+    assert first["volume"] == df["volume"].iloc[:3].sum()
+
+
+def test_resample_does_not_merge_two_days_into_one_candle():
+    two_days = pd.concat(
+        [make_session("2026-06-15", n=75), make_session("2026-06-16", n=75)]
+    )
+    hourly = resample_candles(two_days, 60)
+
+    per_day = hourly.groupby(hourly.index.normalize()).size()
+    assert len(per_day) == 2
+    assert set(per_day) == {7}  # 375 min / 60 → 6 poori + 1 aakhri chhoti candle
+    assert all(ts.strftime("%H:%M") == "09:15" for ts in per_day.index.map(
+        lambda day: hourly[hourly.index.normalize() == day].index[0]
+    ))
+
+
+def test_resample_rejects_bad_interval():
+    with pytest.raises(ValueError):
+        resample_candles(make_session("2026-06-15", n=5), 0)
+
+
+def test_quality_report_counts_missing_candles():
+    full = make_session("2026-06-15", n=75)
+    partial = make_session("2026-06-16", n=40)
+    report = candle_quality_report(pd.concat([full, partial]), "FIVE_MINUTE")
+
+    assert report["sessions"] == 2
+    assert report["expected_per_session"] == 75
+    assert report["missing_candles"] == 35
+    assert report["incomplete_sessions"] == [("2026-06-16", 40)]
+
+
+def test_quality_report_flags_zero_volume():
+    df = make_session("2026-06-15", n=10, volume=0)
+    assert candle_quality_report(df, "FIVE_MINUTE")["zero_volume_pct"] == 100.0
+
+
+def test_quality_report_on_empty_frame():
+    empty = pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
+    report = candle_quality_report(empty, "FIVE_MINUTE")
+    assert report["rows"] == 0
+    assert report["sessions"] == 0
+    assert report["first"] is None
+
+
+def test_merge_prefers_newer_candle_on_overlap():
+    old = make_session("2026-06-15", n=3)
+    new = old.iloc[[2]].copy()
+    new["close"] = 555.0
+    merged = merge_candles(old, new)
+
+    assert len(merged) == 3
+    assert merged["close"].iloc[-1] == 555.0
+
+
+def test_cache_round_trip(tmp_path):
+    df = make_session("2026-06-15", n=5)
+    save_cache(df, "NIFTY", "FIVE_MINUTE", cache_dir=str(tmp_path))
+    loaded = load_cached("NIFTY", "FIVE_MINUTE", cache_dir=str(tmp_path))
+
+    pd.testing.assert_frame_equal(loaded, df, check_freq=False)
+
+
+def test_load_cached_missing_file_is_empty(tmp_path):
+    assert load_cached("NIFTY", "ONE_MINUTE", cache_dir=str(tmp_path)).empty
+
+
+def test_offline_mode_never_touches_network(tmp_path):
+    today = pd.Timestamp.now().normalize()
+    day = today - pd.Timedelta(days=1)
+    while day.dayofweek >= 5:
+        day -= pd.Timedelta(days=1)
+
+    df = make_session(day.strftime("%Y-%m-%d"), n=10)
+    save_cache(df, "NIFTY", "FIVE_MINUTE", cache_dir=str(tmp_path))
+
+    loaded = load_intraday(
+        interval="FIVE_MINUTE", days=5, cache_dir=str(tmp_path), offline=True
+    )
+    assert len(loaded) == 10
+
+
+def test_load_intraday_validates_arguments(tmp_path):
+    with pytest.raises(ValueError, match="Interval"):
+        load_intraday(interval="TWO_MINUTE", cache_dir=str(tmp_path), offline=True)
+    with pytest.raises(ValueError, match="days"):
+        load_intraday(days=0, cache_dir=str(tmp_path), offline=True)

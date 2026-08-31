@@ -216,3 +216,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Tiger Brain: intraday candle cache (downloaded data, code nahi)
+data_cache/
