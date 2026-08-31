@@ -50,7 +50,12 @@ from datetime import datetime, timedelta
 import pandas as pd
 
 try:
-    from backtest.engine import print_backtest_report, run_backtest_with_split
+    from backtest.engine import (
+        merge_gate_stats,
+        new_gate_stats,
+        print_backtest_report,
+        run_backtest_with_split,
+    )
     from backtest.options_sim import (
         DEFAULT_EXPIRY_WEEKDAY,
         DEFAULT_LOT_SIZE,
@@ -64,6 +69,7 @@ try:
         print_walk_forward_report,
         run_walk_forward,
     )
+    from config.thresholds import DECISION_SCORE_THRESHOLD, PIPELINE
 except ImportError:
     raise ImportError("Repo ROOT se chalao: python3 -m backtest.cli")
 
@@ -199,6 +205,19 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-vix", action="store_true", help="India VIX fetch mat karo"
     )
     parser.add_argument(
+        "--score-threshold", type=float, default=DECISION_SCORE_THRESHOLD,
+        help="Meta-Brain ka BUY/SELL cutoff (default: "
+             f"{DECISION_SCORE_THRESHOLD}) — sensitivity analysis ke liye",
+    )
+    parser.add_argument(
+        "--stage1-min", type=float, default=PIPELINE["STAGE1_MIN_CONFIDENCE"],
+        help=f"Stage-1 pass cutoff (default: {PIPELINE['STAGE1_MIN_CONFIDENCE']})",
+    )
+    parser.add_argument(
+        "--diagnose", action="store_true",
+        help="Gate diagnostics chhapo — kaun sa gate kitne din block kar raha hai",
+    )
+    parser.add_argument(
         "--options-pnl", action="store_true",
         help="Directional decisions ko simulated ATM option trades mein badalke "
              "rupee P&L bhi nikalo (theta + costs shaamil)",
@@ -260,11 +279,18 @@ def main(argv: list[str] | None = None) -> int:
         results = run_walk_forward(
             df, vix_series=vix, train_days=args.train_days,
             test_days=args.test_days, anchored=args.anchored,
+            score_threshold=args.score_threshold, stage1_min=args.stage1_min,
         )
         print_walk_forward_report(results)
     else:
-        results = run_backtest_with_split(df, vix, in_sample_pct=args.in_sample_pct)
+        results = run_backtest_with_split(
+            df, vix, in_sample_pct=args.in_sample_pct,
+            score_threshold=args.score_threshold, stage1_min=args.stage1_min,
+        )
         print_backtest_report(results)
+
+    if args.diagnose:
+        print_gate_diagnostics(_collect_gate_stats(results, args.mode), args)
 
     if args.options_pnl:
         _run_options_sim(df, results, vix, args)
@@ -278,6 +304,70 @@ def _collect_trade_log(results: dict, mode: str) -> list:
         return [t for fold in results["folds"] for t in fold["trade_log"]]
     # split mode: sirf OUT-OF-SAMPLE trades — in-sample P&L pe bharosa nahi
     return list(results["out_of_sample"]["trade_log"])
+
+
+def _collect_gate_stats(results: dict, mode: str) -> dict:
+    """Dono modes ke result-shapes se ek hi gate-stats dict."""
+    if mode == "walkforward":
+        return results["gate_stats"]
+    merged = new_gate_stats()
+    merge_gate_stats(merged, results["in_sample"]["gate_stats"])
+    merge_gate_stats(merged, results["out_of_sample"]["gate_stats"])
+    return merged
+
+
+def print_gate_diagnostics(stats: dict, args) -> None:
+    """
+    Kaun sa gate signals rok raha hai — bina iske threshold badalna
+    andhera mein teer chalana hai.
+    """
+    print("\n" + "=" * 66)
+    print("GATE DIAGNOSTICS (kaun kis wajah se rok raha hai)")
+    print("=" * 66)
+    print(f"Din evaluate hue      : {stats['days']}")
+    print(f"Score threshold        : {args.score_threshold}")
+
+    if not stats["days"]:
+        print("Koi din evaluate nahi hua — diagnostics khaali.")
+        return
+
+    print("\n--- Regime distribution ---")
+    for regime, count in stats["regimes"].most_common():
+        print(f"  {regime:<14} {count:>5} din ({count / stats['days'] * 100:.1f}%)")
+
+    print("\n--- Final decisions ---")
+    for decision, count in stats["decisions"].most_common():
+        print(f"  {decision:<14} {count:>5}")
+
+    print("\n--- NO_TRADE kis gate pe ruka ---")
+    for reason, count in stats["blocked_by"].most_common():
+        print(f"  {reason:<24} {count:>5}")
+
+    scores = pd.Series(stats["scores"])
+    print("\n--- Meta-Brain score distribution ---")
+    print(
+        f"  median {scores.median():.1f} | p90 {scores.quantile(0.9):.1f} | "
+        f"max {scores.max():.1f}"
+    )
+    if scores.max() < args.score_threshold:
+        print(
+            f"  ⚠️ Max score ({scores.max():.1f}) threshold "
+            f"({args.score_threshold}) se neeche hai — ye gate structurally "
+            "band hai, tuning se pehle iski wajah dekho."
+        )
+
+    print("\n--- Sub-brain votes (max confidence ke saath) ---")
+    for brain in sorted(stats["brain_max_confidence"]):
+        votes = {
+            key.split(":")[1]: count
+            for key, count in stats["brain_votes"].items()
+            if key.startswith(f"{brain}:")
+        }
+        print(
+            f"  {brain:<15} max_conf {stats['brain_max_confidence'][brain]:>5.1f} | "
+            f"{votes}"
+        )
+    print("=" * 66)
 
 
 def _run_options_sim(df: pd.DataFrame, results: dict, vix, args) -> None:

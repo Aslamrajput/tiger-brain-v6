@@ -23,7 +23,11 @@ import pandas as pd
 
 try:
     from config.thresholds import SUBBRAIN_MEAN_REVERSION
-    from subbrains.trend_follow import calculate_vwap
+    from subbrains.trend_follow import (
+        calculate_vwap,
+        has_volume_data,
+        redistribute_weight,
+    )
 except ImportError:
     raise ImportError(
         "Imports fail hue. Is script ko repo ke ROOT folder se chalao, "
@@ -105,6 +109,7 @@ def evaluate(
             "reasoning_tags": [],
             "conflicting_evidence": ["Insufficient data — kam se kam 30 rows chahiye"],
             "regime_fit": regime_fit,
+            "data_available": False,
         }
 
     # --- Indicator Calculations ---
@@ -150,10 +155,7 @@ def evaluate(
     # 3. Zone freshness (agar data available hai)
     weights = dict(cfg["CONFIDENCE_WEIGHTS"])
     if near_fresh_zone is None:
-        zone_weight = weights.pop("zone_freshness")
-        remaining_total = sum(weights.values())
-        for k in weights:
-            weights[k] += zone_weight * (weights[k] / remaining_total)
+        redistribute_weight(weights, "zone_freshness")
         conflicting_evidence.append(
             "⚠️ Supply-Demand zone data available nahi tha — is factor ko "
             "skip karke baaki weights proportionally badhaye gaye hain. "
@@ -169,11 +171,18 @@ def evaluate(
             conflicting_evidence.append("Koi fresh zone nearby nahi hai")
 
     # 4. Volume (simple check — bahut low volume pe reversal trust nahi karna)
-    volume_avg_20 = df["volume"].tail(20).mean()
-    latest_volume = df["volume"].iloc[-1]
+    volume_available = has_volume_data(df)
+    volume_avg_20 = df["volume"].tail(20).mean() if volume_available else 0.0
+    latest_volume = df["volume"].iloc[-1] if volume_available else 0.0
     volume_ratio = latest_volume / volume_avg_20 if volume_avg_20 > 0 else 0
 
-    if volume_ratio >= 0.5:  # bahut kam nahi hai
+    if not volume_available:
+        redistribute_weight(weights, "volume")
+        conflicting_evidence.append(
+            "⚠️ Volume data available nahi tha (index spot candles) — "
+            "factor skip, weight redistribute."
+        )
+    elif volume_ratio >= 0.5:  # bahut kam nahi hai
         primary_direction = scores["rsi_extreme"] if scores["rsi_extreme"] != 0 else scores["vwap_distance"]
         scores["volume"] = primary_direction * min(volume_ratio, 1.5) / 1.5
         reasoning_tags.append(f"Volume {volume_ratio:.1f}x avg — reasonable support")
@@ -199,6 +208,7 @@ def evaluate(
         "reasoning_tags": reasoning_tags,
         "conflicting_evidence": conflicting_evidence,
         "regime_fit": regime_fit,
+        "data_available": True,
     }
 
 

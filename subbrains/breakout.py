@@ -15,6 +15,7 @@ import pandas as pd
 
 try:
     from config.thresholds import SUBBRAIN_BREAKOUT, REGIME
+    from subbrains.trend_follow import has_volume_data, redistribute_weight
 except ImportError:
     raise ImportError("Repo ROOT se chalao, 'subbrains/' ke andar se nahi.")
 
@@ -49,6 +50,7 @@ def evaluate(
             "vote": "NO_TRADE", "confidence": 0, "reasoning_tags": [],
             "conflicting_evidence": ["Insufficient data — kam se kam 30 rows chahiye"],
             "regime_fit": regime_fit,
+            "data_available": False,
         }
 
     upper_band, lower_band, bb_width = calculate_bollinger_bands(df)
@@ -59,8 +61,9 @@ def evaluate(
     latest_width = bb_width.iloc[-1]
     avg_width_20 = bb_width.tail(20).mean()
 
-    volume_avg_20 = df["volume"].tail(20).mean()
-    latest_volume = df["volume"].iloc[-1]
+    volume_available = has_volume_data(df)
+    volume_avg_20 = df["volume"].tail(20).mean() if volume_available else 0.0
+    latest_volume = df["volume"].iloc[-1] if volume_available else 0.0
     volume_multiplier = latest_volume / volume_avg_20 if volume_avg_20 > 0 else 0
 
     scores = {}
@@ -98,7 +101,14 @@ def evaluate(
     scores["range_boundary_clarity"] = boundary_direction
 
     # 3. Volume spike confirmation
-    if volume_multiplier >= cfg["MIN_VOLUME_MULTIPLIER"]:
+    weights = dict(cfg["CONFIDENCE_WEIGHTS"])
+    if not volume_available:
+        redistribute_weight(weights, "volume_spike")
+        conflicting_evidence.append(
+            "⚠️ Volume data available nahi tha (index spot candles) — "
+            "breakout confirmation factor skip, weight redistribute."
+        )
+    elif volume_multiplier >= cfg["MIN_VOLUME_MULTIPLIER"]:
         scores["volume_spike"] = boundary_direction if boundary_direction != 0 else 1.0
         reasoning_tags.append(f"Volume {volume_multiplier:.1f}x avg — breakout confirm")
     else:
@@ -109,12 +119,8 @@ def evaluate(
         )
 
     # 4. OI confirm (agar data available)
-    weights = dict(cfg["CONFIDENCE_WEIGHTS"])
     if oi_new_buildup_confirmed is None:
-        oi_weight = weights.pop("oi_confirm")
-        remaining_total = sum(weights.values())
-        for k in weights:
-            weights[k] += oi_weight * (weights[k] / remaining_total)
+        redistribute_weight(weights, "oi_confirm")
         conflicting_evidence.append(
             "⚠️ OI data available nahi tha — is factor ko skip karke baaki "
             "weights proportionally badhaye gaye hain (known gap, jaisa "
@@ -143,6 +149,7 @@ def evaluate(
         "reasoning_tags": reasoning_tags,
         "conflicting_evidence": conflicting_evidence,
         "regime_fit": regime_fit,
+        "data_available": True,
     }
 
 
