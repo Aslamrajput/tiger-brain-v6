@@ -6,6 +6,8 @@ nahi (No-Confusion Rule). Position size bhi yahin tay hoti hai. Output:
 ek final "Trade Instruction Packet" — abhi tak koi order nahi bheja gaya.
 """
 
+from __future__ import annotations
+
 try:
     from config.thresholds import PIPELINE, RISK
 except ImportError:

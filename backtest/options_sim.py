@@ -39,6 +39,8 @@ hoga. Aur positive aane ka matlab bhi "profitable system" nahi —
 sirf "aage paper trading test karne layak" hai.
 """
 
+from __future__ import annotations
+
 import logging
 import math
 

@@ -21,6 +21,8 @@ hardcoded NAHI hain. Kisi bhi threshold ko badalna ho, sirf config file
 mein badlo.
 """
 
+from __future__ import annotations
+
 import numpy as np
 import pandas as pd
 
