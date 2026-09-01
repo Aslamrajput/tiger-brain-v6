@@ -109,7 +109,7 @@ def evaluate(
             "breakout confirmation factor skip, weight redistribute."
         )
     elif volume_multiplier >= cfg["MIN_VOLUME_MULTIPLIER"]:
-        scores["volume_spike"] = boundary_direction if boundary_direction != 0 else 1.0
+        scores["volume_spike"] = boundary_direction if boundary_direction != 0 else 0.0
         reasoning_tags.append(f"Volume {volume_multiplier:.1f}x avg — breakout confirm")
     else:
         scores["volume_spike"] = 0.0
@@ -127,7 +127,7 @@ def evaluate(
             "trend_follow.py mein bhi hai)."
         )
     else:
-        direction = boundary_direction if boundary_direction != 0 else 1.0
+        direction = boundary_direction if boundary_direction != 0 else 0.0
         scores["oi_confirm"] = direction if oi_new_buildup_confirmed else 0.0
         if oi_new_buildup_confirmed:
             reasoning_tags.append("OI new buildup usi direction mein — genuine breakout ka sign")

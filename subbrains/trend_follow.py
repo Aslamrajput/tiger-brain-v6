@@ -261,7 +261,7 @@ def evaluate(
             "volume 0 aata hai) — factor skip, weight redistribute."
         )
     elif volume_multiplier >= cfg["MIN_VOLUME_MULTIPLIER"]:
-        volume_direction = scores["supertrend"] if scores["supertrend"] != 0 else 1.0
+        volume_direction = scores["supertrend"] if scores["supertrend"] != 0 else 0.0
         scores["volume"] = volume_direction
         reasoning_tags.append(f"Volume {volume_multiplier:.1f}x average se")
     else:
@@ -281,7 +281,7 @@ def evaluate(
             "nahi hona chahiye' abhi 100% follow nahi ho raha)."
         )
     else:
-        direction = scores["supertrend"] if scores["supertrend"] != 0 else 1.0
+        direction = scores["supertrend"] if scores["supertrend"] != 0 else 0.0
         scores["oi"] = direction if oi_buildup_confirmed else 0.0
         if oi_buildup_confirmed:
             reasoning_tags.append("OI buildup confirm ho raha hai trend ki disha mein")
