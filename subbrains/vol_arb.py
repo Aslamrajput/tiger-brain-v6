@@ -91,7 +91,7 @@ def evaluate(
     if iv_percentile <= cfg["BUY_FAVORABLE_IV_PERCENTILE_MAX"] and (
         hours_to_next_event is not None and hours_to_next_event <= cfg["BUY_FAVORABLE_EVENT_HOURS"]
     ):
-        vote = "BUY"
+        vote = "FAVORABLE"
         confidence = 75.0
         reasoning_tags.append(
             f"IV percentile {iv_percentile:.1f} — kam hai, aur event {hours_to_next_event:.1f}hr "
