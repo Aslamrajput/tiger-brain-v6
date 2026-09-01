@@ -172,8 +172,10 @@ def build_atm_iv_series(
     if sample_every_bars == 1:
         return sampled.reindex(df.index)
     # Beech ke bars: aakhri ASLI reading carry hoti hai — future se kuch
-    # nahi aata (ffill sirf peeche se aage jaata hai)
-    return sampled.reindex(df.index).ffill()
+    # nahi aata (ffill sirf peeche se aage jaata hai). Carry sirf agle
+    # scheduled sample tak chalti hai: agar wo lookup fail ho gaya to
+    # purani reading uske paar stale data ban kar nahi chalni chahiye.
+    return sampled.reindex(df.index).ffill(limit=sample_every_bars - 1)
 
 
 # ============================================================

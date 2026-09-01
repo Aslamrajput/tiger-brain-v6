@@ -81,14 +81,22 @@ OI_MAX_RETRIES = 4
 OI_RETRY_BACKOFF_SEC = 5.0
 OI_CHUNK_PAUSE_SEC = 1.0
 
-# OI buildup ka matlab: naye positions ban rahe hain. Trend confirmation
-# ke liye ghante bhar ka rise dekhte hain, breakout ke liye chhoti aur
-# tez window (fresh buildup) — dono thresholds config nahi, yahi defaults
-# hain aur CLI se badle ja sakte hain
-TREND_OI_LOOKBACK_BARS = 12
+# OI buildup ka matlab: naye positions ban rahe hain. Horizon BARS mein
+# nahi, MINUTES mein define hota hai — warna 1-min run pe "12 bars" 12
+# minute ka hota aur 1-hour run pe 12 ghante ka, yani same market move
+# alag-alag confirmation deta.
+TREND_OI_LOOKBACK_MINUTES = 60
 TREND_OI_MIN_CHANGE_PCT = 0.5
-BREAKOUT_OI_LOOKBACK_BARS = 6
+BREAKOUT_OI_LOOKBACK_MINUTES = 30
 BREAKOUT_OI_MIN_CHANGE_PCT = 1.0
+DEFAULT_INTERVAL = "FIVE_MINUTE"
+
+
+def lookback_bars_for_interval(minutes: int, interval: str) -> int:
+    """Minute-horizon → us interval ke bars (kam se kam 1 bar)."""
+    if interval not in INTRADAY_INTERVAL_MINUTES:
+        raise ValueError(f"Interval '{interval}' support nahi hai")
+    return max(1, round(minutes / INTRADAY_INTERVAL_MINUTES[interval]))
 
 
 # ============================================================
@@ -171,14 +179,38 @@ def refresh_futures_registry(
     return registry
 
 
+def futures_coverage_start(registry: dict) -> date | None:
+    """
+    Pehla din jis se registry par bharosa kiya ja sakta hai (pehla
+    refresh). Usse pehle ke din ka asli front contract expire ho kar
+    master se gayab ho chuka tha — us din ke liye jo contract registry
+    mein bacha hai wo ek ALAG (aage ka) contract hai.
+
+    Purani registries mein `first_seen` nahi hota — tab None, yani koi
+    guard nahi (backward compatible).
+    """
+    seen = [
+        date.fromisoformat(c["first_seen"])
+        for c in registry.values()
+        if c.get("first_seen")
+    ]
+    return min(seen) if seen else None
+
+
 def select_futures_contract(
-    registry: dict, day: date, roll_days: int = FUTURES_ROLL_DAYS
+    registry: dict, day: date, roll_days: int = FUTURES_ROLL_DAYS,
+    coverage_start: date | None = None,
 ) -> dict | None:
     """
     Us din ka FRONT contract — pehla contract jiski expiry `roll_days`
     door ya usse zyada ho. Expiry ke ekdum kareeb wala contract chhod
     dete hain kyunki tab volume/OI agle contract mein chala jaata hai.
+
+    Registry coverage se pehle ke din pe kuch nahi lautata — galat
+    contract ka volume/OI dena us din ke market ko jhoothla dena hai.
     """
+    if coverage_start is not None and day < coverage_start:
+        return None
     candidates = sorted(
         registry.values(), key=lambda c: date.fromisoformat(c["expiry"])
     )
@@ -190,9 +222,12 @@ def select_futures_contract(
 
 def _contract_day_map(registry: dict, days: list, roll_days: int) -> dict:
     """{trading day: contract} — kis din kaunsa front contract chalega."""
+    coverage_start = futures_coverage_start(registry)
     mapping = {}
     for day in days:
-        contract = select_futures_contract(registry, day, roll_days)
+        contract = select_futures_contract(
+            registry, day, roll_days, coverage_start
+        )
         if contract is not None:
             mapping[day] = contract
     return mapping
@@ -524,9 +559,10 @@ def contract_ids_for_index(
 
 def oi_buildup_flags(
     oi_series: pd.Series,
-    lookback_bars: int = TREND_OI_LOOKBACK_BARS,
+    lookback_bars: int,
     min_change_pct: float = TREND_OI_MIN_CHANGE_PCT,
     contract_ids: pd.Series | None = None,
+    same_session_only: bool = True,
 ) -> pd.Series:
     """
     Har bar pe: pichhle `lookback_bars` mein OI itna % bada kya?
@@ -536,7 +572,9 @@ def oi_buildup_flags(
     NaN   = us bar pe OI data hi nahi (missing, "False" nahi)
 
     Contract roll wale bar pe comparison nahi hota — do alag contracts ka
-    OI compare karna bakwaas number deta hai.
+    OI compare karna bakwaas number deta hai. Usi tarah horizon intraday
+    hai, isliye default se session ke paar bhi compare nahi hota (raat
+    bhar ka OI change intraday buildup nahi hai).
     """
     if oi_series.empty:
         return pd.Series(dtype="object")
@@ -552,6 +590,12 @@ def oi_buildup_flags(
         ids = contract_ids.reindex(oi_series.index)
         same_contract = ids == ids.shift(lookback_bars)
         flags = flags.where(same_contract.fillna(False))
+
+    if same_session_only:
+        sessions = pd.Series(
+            pd.DatetimeIndex(oi_series.index).normalize(), index=oi_series.index
+        )
+        flags = flags.where(sessions == sessions.shift(lookback_bars))
     return flags.astype("object").where(flags.notna())
 
 
@@ -568,30 +612,40 @@ class DerivativeContext:
     factor ka weight redistribute karta hai aur reason batata hai.
     """
 
-    MIN_IV_POINTS = 20  # vol_arb isse kam pe khud NO_TRADE deta hai
+    MIN_IV_POINTS = 20  # vol_arb isse kam pe khud NO_TRADE deta hai (DIN)
 
     def __init__(
         self,
         oi_series: pd.Series | None = None,
         iv_frame: pd.DataFrame | None = None,
         contract_ids: pd.Series | None = None,
-        trend_lookback_bars: int = TREND_OI_LOOKBACK_BARS,
+        interval: str = DEFAULT_INTERVAL,
+        trend_lookback_bars: int | None = None,
         trend_min_change_pct: float = TREND_OI_MIN_CHANGE_PCT,
-        breakout_lookback_bars: int = BREAKOUT_OI_LOOKBACK_BARS,
+        breakout_lookback_bars: int | None = None,
         breakout_min_change_pct: float = BREAKOUT_OI_MIN_CHANGE_PCT,
         volume_coverage: dict | None = None,
     ):
         self.oi_series = oi_series
         self.iv_frame = iv_frame
+        self.interval = interval
         self.volume_coverage = volume_coverage or {}
+        # Horizon minutes mein tay hota hai; bars interval se nikalte hain
+        self.trend_lookback_bars = trend_lookback_bars or lookback_bars_for_interval(
+            TREND_OI_LOOKBACK_MINUTES, interval
+        )
+        self.breakout_lookback_bars = (
+            breakout_lookback_bars
+            or lookback_bars_for_interval(BREAKOUT_OI_LOOKBACK_MINUTES, interval)
+        )
 
         if oi_series is not None and not oi_series.empty:
             self.trend_flags = oi_buildup_flags(
-                oi_series, trend_lookback_bars, trend_min_change_pct,
+                oi_series, self.trend_lookback_bars, trend_min_change_pct,
                 contract_ids,
             )
             self.breakout_flags = oi_buildup_flags(
-                oi_series, breakout_lookback_bars, breakout_min_change_pct,
+                oi_series, self.breakout_lookback_bars, breakout_min_change_pct,
                 contract_ids,
             )
         else:
@@ -611,6 +665,26 @@ class DerivativeContext:
         if pd.isna(value):
             return None
         return bool(value)
+
+    @staticmethod
+    def _daily_iv(atm: pd.Series) -> pd.Series:
+        """
+        Intraday IV bars → DAILY history.
+
+        `vol_arb` ka minimum (20) aur `PERCENTILE_LOOKBACK_DAYS` dono
+        **din** mein hain. Har 5-min bar ko ek "din" ginne se percentile
+        do ghante mein hi bharam se activate ho jaata hai.
+
+        Har session ka aakhri available observation ek din ginta hai;
+        chalu (aadha) din bhi apne ab tak ke aakhri IV se ek observation
+        deta hai (us bar tak ka hi data — lookahead nahi).
+        """
+        if atm.empty:
+            return atm
+        sessions = pd.DatetimeIndex(atm.index).normalize()
+        daily = atm.groupby(sessions).last()
+        daily.index = pd.DatetimeIndex(daily.index)
+        return daily.sort_index()
 
     def _iv_upto(self, timestamp) -> pd.DataFrame | None:
         """Sirf `timestamp` tak ka IV — aage ka bilkul nahi (no lookahead)."""
@@ -635,9 +709,9 @@ class DerivativeContext:
         if iv_window is None:
             return kwargs
 
-        atm = iv_window["atm_iv"].dropna()
-        if len(atm) >= self.MIN_IV_POINTS:
-            kwargs["iv_series"] = atm
+        daily_atm = self._daily_iv(iv_window["atm_iv"].dropna())
+        if len(daily_atm) >= self.MIN_IV_POINTS:
+            kwargs["iv_series"] = daily_atm
             self.used["iv_bars"] += 1
         for column, key in (("call_iv", "call_iv"), ("put_iv", "put_iv")):
             if column in iv_window.columns:

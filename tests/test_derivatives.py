@@ -9,7 +9,7 @@ Yahan jo cheezein PIN ki gayi hain wo teen hain:
   3. Contract roll pe do alag contracts ka OI compare na ho.
 """
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 import pandas as pd
 import pytest
@@ -106,6 +106,38 @@ def test_no_contract_after_registry_runs_out():
     ) is None
 
 
+def test_no_contract_before_the_registry_started_covering(tmp_path):
+    """
+    Registry banne se pehle ka asli front contract expire ho kar master
+    se gayab tha. Us din ke liye jo contract bacha hai wo ek ALAG
+    contract hai — uska volume/OI "us din ka market" nahi hai.
+    """
+    registry = derivatives.refresh_futures_registry(
+        cache_dir=str(tmp_path), master=SAMPLE_MASTER
+    )
+    coverage_start = derivatives.futures_coverage_start(registry)
+
+    assert coverage_start is not None
+    assert derivatives.select_futures_contract(
+        registry, coverage_start - timedelta(days=1),
+        coverage_start=coverage_start,
+    ) is None
+    assert derivatives.select_futures_contract(
+        registry, coverage_start, coverage_start=coverage_start
+    ) is not None
+
+
+def test_legacy_registry_without_first_seen_is_still_usable():
+    """Purani registry files mein `first_seen` nahi hai — guard tab off."""
+    registry = sample_registry()
+
+    assert derivatives.futures_coverage_start(registry) is None
+    assert derivatives.select_futures_contract(
+        registry, date(2026, 9, 10),
+        coverage_start=derivatives.futures_coverage_start(registry),
+    )["symbol"] == "NIFTY29SEP26FUT"
+
+
 # ----------------------- futures volume -----------------------
 
 def test_futures_volume_replaces_spot_zero_volume_but_not_price():
@@ -134,6 +166,23 @@ def test_bars_without_a_futures_candle_stay_missing_not_zero():
     assert merged["volume"].isna().sum() == 2
     assert coverage["matched"] == 2
     assert coverage["matched_pct"] == 50.0
+
+
+def test_missing_current_futures_bar_makes_the_volume_factor_unavailable():
+    """
+    Sirf ISS bar ka futures data missing hai — purane bars ke volume se
+    factor ko "confirmation fail" maan lena galat hai (weight
+    redistribute hona chahiye, score girna nahi).
+    """
+    from subbrains.trend_follow import has_current_volume, has_volume_data
+
+    spot = bars("2026-09-01 09:15", 30, price=24000.0)
+    futures = bars("2026-09-01 09:15", 29, volume=1500, price=24050.0)
+    merged, _ = derivatives.attach_futures_volume(spot, futures)
+
+    assert has_volume_data(merged)          # history hai (VWAP chal sakta hai)
+    assert has_current_volume(merged) is False
+    assert has_current_volume(merged.iloc[:-1]) is True
 
 
 def test_no_futures_data_leaves_spot_untouched():
@@ -217,6 +266,40 @@ def test_bars_without_enough_lookback_have_no_flag_not_false():
     assert pd.isna(flags.iloc[0]) and pd.isna(flags.iloc[1])
 
 
+def test_oi_buildup_is_not_compared_across_sessions():
+    """
+    Horizon intraday hai — raat bhar ka OI change intraday buildup nahi
+    hai (aur beech mein poora session hota hai).
+    """
+    index = pd.DatetimeIndex([
+        pd.Timestamp("2026-09-01 15:20"), pd.Timestamp("2026-09-01 15:25"),
+        pd.Timestamp("2026-09-02 09:15"), pd.Timestamp("2026-09-02 09:20"),
+    ])
+    series = pd.Series([100.0, 101.0, 130.0, 131.0], index=index)
+
+    flags = derivatives.oi_buildup_flags(
+        series, lookback_bars=2, min_change_pct=1.0
+    )
+
+    assert pd.isna(flags.iloc[2])  # kal ke bar se compare nahi
+    assert pd.isna(flags.iloc[3])
+
+
+@pytest.mark.parametrize("interval,expected", [
+    ("ONE_MINUTE", 60), ("FIVE_MINUTE", 12), ("ONE_HOUR", 1),
+])
+def test_oi_lookback_is_the_same_elapsed_time_on_every_interval(
+    interval, expected
+):
+    """Wahi market move alag candle size pe alag confirmation na de."""
+    assert derivatives.lookback_bars_for_interval(
+        derivatives.TREND_OI_LOOKBACK_MINUTES, interval
+    ) == expected
+
+    context = derivatives.DerivativeContext(interval=interval)
+    assert context.trend_lookback_bars == expected
+
+
 def test_oi_across_a_contract_roll_is_not_compared():
     """Naye contract ka OI base alag hota hai — us jump ko buildup maan
     lena poora factor jhootha kar deta hai."""
@@ -240,6 +323,25 @@ def iv_frame(values, start="2026-09-01 09:15"):
         {"atm_iv": values, "call_iv": values, "put_iv": [v + 1 for v in values]},
         index=index,
     )
+
+
+def session_iv_frame(
+    session_values, bars_per_session=2, start="2026-07-01 09:15"
+):
+    """Har SESSION ke `bars_per_session` bars; aakhri bar ka IV = value."""
+    rows = {}
+    day = pd.Timestamp(start)
+    for value in session_values:
+        for bar in range(bars_per_session):
+            timestamp = day + pd.Timedelta(minutes=5 * bar)
+            rows[timestamp] = value - (bars_per_session - 1 - bar) * 0.1
+        day = (day + pd.Timedelta(days=1))
+        while day.weekday() >= 5:
+            day += pd.Timedelta(days=1)
+    series = pd.Series(rows).sort_index()
+    return pd.DataFrame({
+        "atm_iv": series, "call_iv": series, "put_iv": series + 1,
+    })
 
 
 def test_context_without_any_feed_reports_everything_missing():
@@ -268,40 +370,62 @@ def test_context_passes_oi_flags_for_that_bar_only():
 
 
 def test_iv_context_never_shows_future_bars():
-    frame = iv_frame([float(v) for v in range(30)])
+    frame = session_iv_frame([float(v) for v in range(30)])
     context = derivatives.DerivativeContext(iv_frame=frame)
 
-    cutoff = frame.index[24]
+    cutoff = frame.index[49]   # 25ve session ka aakhri bar
     kwargs = context.scanner_kwargs(cutoff)
 
-    assert kwargs["iv_series"].index.max() == cutoff
+    assert kwargs["iv_series"].index.max() == cutoff.normalize()
     assert len(kwargs["iv_series"]) == 25
     assert kwargs["call_iv"] == frame["call_iv"].loc[cutoff]
     assert kwargs["put_iv"] == frame["put_iv"].loc[cutoff]
 
 
+def test_iv_history_is_counted_in_days_not_bars():
+    """
+    `vol_arb` ka minimum (20) aur PERCENTILE_LOOKBACK_DAYS dono **din**
+    mein hain. Ek hi din ke 30 intraday bars 30 "din" nahi hain.
+    """
+    one_day = iv_frame([float(v) for v in range(30)])
+    context = derivatives.DerivativeContext(iv_frame=one_day)
+
+    assert "iv_series" not in context.scanner_kwargs(one_day.index[-1])
+
+    twenty_days = session_iv_frame([float(v) for v in range(20)])
+    context = derivatives.DerivativeContext(iv_frame=twenty_days)
+    kwargs = context.scanner_kwargs(twenty_days.index[-1])
+
+    assert len(kwargs["iv_series"]) == 20
+    # har session se ek hi observation — uska aakhri IV
+    assert kwargs["iv_series"].iloc[-1] == twenty_days["atm_iv"].iloc[-1]
+
+
 def test_iv_series_is_withheld_until_vol_arb_has_enough_points():
-    frame = iv_frame([float(v) for v in range(30)])
+    frame = session_iv_frame([float(v) for v in range(30)])
     context = derivatives.DerivativeContext(iv_frame=frame)
 
-    kwargs = context.scanner_kwargs(frame.index[5])
-    assert "iv_series" not in kwargs        # 6 points — Vol-Arb ke liye kam
+    kwargs = context.scanner_kwargs(frame.index[10])   # 6 sessions
+    assert "iv_series" not in kwargs        # Vol-Arb ke liye kam
     assert kwargs["call_iv"] is not None    # aaj ka IV phir bhi bata sakte hain
 
 
 def test_summary_counts_what_actually_reached_the_scanner():
-    frame = iv_frame([float(v) for v in range(30)])
+    frame = session_iv_frame([float(v) for v in range(30)])
+    oi = pd.Series(
+        [100.0 + i for i in range(len(frame))], index=frame.index
+    )
     context = derivatives.DerivativeContext(
-        oi_series=oi_series([100 + i for i in range(30)]),
-        iv_frame=frame, trend_lookback_bars=2, trend_min_change_pct=0.1,
+        oi_series=oi, iv_frame=frame,
+        trend_lookback_bars=1, trend_min_change_pct=0.1,
     )
     for timestamp in frame.index:
         context.scanner_kwargs(timestamp)
 
     summary = context.summary()
-    assert summary["bars_evaluated"] == 30
-    assert summary["bars_with_oi"] == 28   # pehle 2 bars pe lookback nahi
-    assert summary["bars_with_iv"] == 11   # 20th point wale bar se aage
+    assert summary["bars_evaluated"] == 60          # 30 sessions x 2 bars
+    assert summary["bars_with_oi"] == 30            # session ka pehla bar skip
+    assert summary["bars_with_iv"] == 22            # 20ve session se aage
 
 
 # ----------------------- engine wiring -----------------------
@@ -385,6 +509,20 @@ def test_bars_without_a_real_option_price_stay_nan():
 
     assert frame["atm_iv"].notna().sum() == 2
     assert frame["atm_iv"].iloc[-1] != frame["atm_iv"].iloc[-1]  # NaN
+
+
+def test_a_failed_sample_stops_the_carry_instead_of_going_stale():
+    """
+    Agla scheduled lookup fail ho jaye to purani reading uske paar chal
+    kar poore run ko ek hi IV se nahi bhar sakti.
+    """
+    df = bars("2026-09-01 09:15", 9, price=24000.0)
+    frame = iv_series.build_atm_iv_series(
+        df, FakeProvider(df.index[:1]), sample_every_bars=3
+    )
+
+    assert frame["atm_iv"].iloc[:3].notna().all()   # sample + uska carry
+    assert frame["atm_iv"].iloc[3:].isna().all()    # agla sample fail → khatam
 
 
 def test_sampling_carries_the_last_real_reading_forward_only():

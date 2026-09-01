@@ -539,7 +539,7 @@ def _build_derivative_context(df: pd.DataFrame, args):
 
     return df, DerivativeContext(
         oi_series=oi_series, iv_frame=iv_frame, contract_ids=contract_ids,
-        volume_coverage=volume_coverage,
+        interval=args.interval, volume_coverage=volume_coverage,
     )
 
 
