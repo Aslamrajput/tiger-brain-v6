@@ -17,8 +17,14 @@ Flow (ek trade):
     T             -> weekly expiry tak ke din (exit pe 1 din kam)
     cost          -> slippage (% of premium) + flat brokerage, dono side
 
-⚠️ HONESTY GUARDRAILS — ye SIMULATED premiums hain, real option-chain
-quotes nahi. Isliye ye numbers "indicative" hain, "actual" nahi:
+✅ REAL PRICES ka raasta ab maujood hai: `price_provider` do (jaise
+`data.option_chain.AngelOptionChain`) to jis trade ke DONO legs ka asli
+NFO candle mil jaata hai, wo trade market ke bhaav pe chalta hai — us
+par neeche wali koi baat lagu nahi hoti. Har trade dict mein `pricing`
+('real' ya 'model') likha hota hai aur report dono ka count dikhati hai.
+
+⚠️ HONESTY GUARDRAILS — jin trades ka real bhaav nahi milta, unke
+premiums SIMULATED hain. Un par ye baatein lagu hoti hain:
 
 1. IV — hum India VIX (index-level IV) ko har strike pe laga rahe hain.
    Real chain mein har strike ka apna IV hota hai (skew/smile), aur
@@ -197,6 +203,7 @@ def simulate_trade_log(
     brokerage_per_order: float = DEFAULT_BROKERAGE_PER_ORDER,
     fallback_iv_pct: float = DEFAULT_FALLBACK_IV_PCT,
     iv_crush_pct: float = DEFAULT_IV_CRUSH_PCT,
+    price_provider=None,
 ) -> dict:
     """
     MAIN ENTRY POINT — backtest ke trade_log ko option trades mein
@@ -217,6 +224,10 @@ def simulate_trade_log(
         fallback_iv_pct: jab us din ka VIX na mile
         iv_crush_pct: exit IV pe % haircut (0-100) — VIX se upar ka extra
                       crush jo weekly ATM option event ke baad khaata hai
+        price_provider: object with `premium(timestamp, strike, option_type)`
+                        (jaise `data.option_chain.AngelOptionChain`). Jab
+                        DONO legs ka asli bhaav mil jaaye, us trade pe
+                        Black-Scholes aur IV crush dono bypass ho jaate hain.
 
     Returns:
         dict:
@@ -281,12 +292,23 @@ def simulate_trade_log(
         )
         dte_out = max(dte_in - holding_days, 0.0)
 
-        premium_in = black_scholes_price(
-            spot_in, strike, dte_in / 365, iv_in, option_type
-        )
-        premium_out = black_scholes_price(
-            spot_out, strike, dte_out / 365, iv_out, option_type
-        )
+        # Dono legs ka asli bhaav mile tabhi real pricing — ek leg market
+        # ka aur doosra model ka mila-jula P&L sabse bhramak number hota
+        # hai, isliye adhoora mila to poora trade model pe chalta hai
+        real_in = _provider_premium(price_provider, entry_date, strike, option_type)
+        real_out = _provider_premium(price_provider, exit_date, strike, option_type)
+
+        if real_in is not None and real_out is not None:
+            premium_in, premium_out = real_in, real_out
+            pricing = "real"
+        else:
+            premium_in = black_scholes_price(
+                spot_in, strike, dte_in / 365, iv_in, option_type
+            )
+            premium_out = black_scholes_price(
+                spot_out, strike, dte_out / 365, iv_out, option_type
+            )
+            pricing = "model"
 
         slippage = (premium_in + premium_out) * (slippage_pct / 100) * lot_size
         costs = slippage + 2 * brokerage_per_order
@@ -302,6 +324,7 @@ def simulate_trade_log(
             "decision": entry["decision"],
             "option_type": option_type,
             "strike": strike,
+            "pricing": pricing,
             "iv_pct": round(iv_in * 100, 2),
             "iv_out_pct": round(iv_out * 100, 2),
             "days_to_expiry": dte_in,
@@ -315,6 +338,21 @@ def simulate_trade_log(
         })
 
     return _summarise(trades, equity_curve, vix_series, iv_crush_pct)
+
+
+def _provider_premium(provider, timestamp, strike: float, option_type: str):
+    """Provider se asli bhaav; na ho ya fail ho jaaye to None (model fallback)."""
+    if provider is None:
+        return None
+    try:
+        value = provider.premium(timestamp, strike, option_type)
+    except Exception as exc:  # data layer ka issue poora backtest na girae
+        logger.warning(f"Option-chain lookup fail ({timestamp}, {strike}): {exc}")
+        return None
+    if value is None:
+        return None
+    value = float(value)
+    return value if value > 0 else None
 
 
 def crush_sensitivity(
@@ -345,28 +383,55 @@ def crush_sensitivity(
     return rows
 
 
+def _pricing_counts(trades: list) -> dict:
+    real = sum(1 for t in trades if t.get("pricing") == "real")
+    return {"real": real, "model": len(trades) - real}
+
+
 def _summarise(
     trades: list, equity_curve: list, vix_series,
     iv_crush_pct: float = DEFAULT_IV_CRUSH_PCT,
 ) -> dict:
-    warnings = [
-        "Ye SIMULATED option premiums hain (Black-Scholes + India VIX), "
-        "real option-chain quotes nahi — module docstring mein poori list hai.",
-    ]
-    if iv_crush_pct > 0:
+    pricing = _pricing_counts(trades)
+    all_real = bool(trades) and pricing["model"] == 0
+
+    warnings = []
+    if pricing["real"]:
         warnings.append(
-            f"Exit IV pe {iv_crush_pct}% crush maana gaya hai — ye ek "
-            f"assumption hai, mapa hua number nahi. Sensitivity table dekho."
+            f"{pricing['real']}/{len(trades)} trades ASLI option-chain candles "
+            f"pe price hue (in par na Black-Scholes lagta hai, na IV-crush "
+            f"assumption)."
         )
-    else:
+    if not all_real:
         warnings.append(
-            "IV ab entry/exit dono pe us waqt ke VIX se aata hai, par uske "
-            "upar koi crush nahi maana (--iv-crush-pct 0). Weekly ATM option "
-            "pe event ke baad ka crush VIX se bada hota hai, isliye ye result "
-            "OPTIMISTIC side pe hai."
+            f"{pricing['model']}/{len(trades)} trades ke premiums SIMULATED "
+            f"hain (Black-Scholes + India VIX) — module docstring mein poori "
+            f"list hai."
+        )
+    if pricing["real"] and pricing["model"]:
+        warnings.append(
+            "Ye MIXED run hai — kuch trades market ke bhaav pe, kuch model pe. "
+            "Dono ko ek hi P&L number mein mat padho; registry purani hone par "
+            "real share badhega."
         )
 
-    if vix_series is None:
+    # Real-priced trades pe IV/crush ki koi assumption lagti hi nahi —
+    # ye warnings sirf model wale hisse ke liye hain
+    if not all_real:
+        if iv_crush_pct > 0:
+            warnings.append(
+                f"Exit IV pe {iv_crush_pct}% crush maana gaya hai — ye ek "
+                f"assumption hai, mapa hua number nahi. Sensitivity table dekho."
+            )
+        else:
+            warnings.append(
+                "Model wale trades pe IV entry/exit dono pe us waqt ke VIX se "
+                "aata hai, par uske upar koi crush nahi maana "
+                "(--iv-crush-pct 0). Weekly ATM option pe event ke baad ka "
+                "crush VIX se bada hota hai, isliye wo hissa OPTIMISTIC hai."
+            )
+
+    if vix_series is None and not all_real:
         warnings.append(
             f"India VIX nahi mila — har trade pe flat {DEFAULT_FALLBACK_IV_PCT}% IV "
             f"maana gaya. Ye sabse kamzor assumption hai is run mein."
@@ -374,7 +439,7 @@ def _summarise(
 
     if not trades:
         return {
-            "trades": [], "iv_crush_pct": iv_crush_pct,
+            "trades": [], "iv_crush_pct": iv_crush_pct, "pricing": pricing,
             "total_pnl": 0.0, "gross_pnl": 0.0, "total_costs": 0.0,
             "win_rate_pct": 0.0, "avg_win": 0.0, "avg_loss": 0.0,
             "profit_factor": 0.0, "expectancy": 0.0, "max_drawdown": 0.0,
@@ -418,6 +483,7 @@ def _summarise(
     return {
         "trades": trades,
         "iv_crush_pct": iv_crush_pct,
+        "pricing": pricing,
         "total_pnl": round(total_pnl, 2),
         "gross_pnl": round(gross_pnl, 2),
         "total_costs": round(total_costs, 2),
@@ -441,7 +507,11 @@ def print_options_report(result: dict, lot_size: int = DEFAULT_LOT_SIZE):
     print("\n" + "=" * 66)
     print("OPTIONS P&L SIMULATION (1 lot ATM, close-to-close)")
     print("=" * 66)
+    pricing = result.get("pricing", {"real": 0, "model": len(result["trades"])})
     print(f"Simulated trades       : {len(result['trades'])} (lot size {lot_size})")
+    print(
+        f"  real-chain / model   : {pricing['real']} / {pricing['model']}"
+    )
     print(f"Net P&L                : ₹{result['total_pnl']:,.2f}")
     print(f"  gross                : ₹{result['gross_pnl']:,.2f}")
     print(f"  costs (slip+broker)  : ₹{result['total_costs']:,.2f}")
