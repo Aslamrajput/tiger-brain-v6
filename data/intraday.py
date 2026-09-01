@@ -385,6 +385,32 @@ def merge_candles(old: pd.DataFrame, new: pd.DataFrame) -> pd.DataFrame:
     return combined[~combined.index.duplicated(keep="last")].sort_index()
 
 
+def missing_ranges(cached: pd.DataFrame, start: datetime, end: datetime) -> list:
+    """
+    Maangi hui window ke jo hisse cache mein nahi hain, unke fetch-ranges.
+
+    Cache sirf aage nahi badhta — agar pehle 20 din cache kiye the aur ab
+    60 din ka backtest chahiye, to shuruaat ka missing hissa (backfill)
+    bhi maangna padta hai, warna run chupchaap chhote dataset pe chalta
+    hai. Cache ka pehla aur aakhri DIN dobara maanga jaata hai kyunki
+    unka session adhoora cache hua ho sakta hai.
+    """
+    if cached.empty:
+        return [(start, end)]
+
+    ranges = []
+    first_day = cached.index[0].normalize().to_pydatetime()
+    if first_day > start:
+        backfill_end = min(first_day + timedelta(days=1), end)
+        if backfill_end > start:
+            ranges.append((start, backfill_end))
+
+    tail_start = max(cached.index[-1].normalize().to_pydatetime(), start)
+    if end > tail_start:
+        ranges.append((tail_start, end))
+    return ranges
+
+
 def load_intraday(
     symbol: str = "NIFTY",
     interval: str = "FIVE_MINUTE",
@@ -430,16 +456,12 @@ def load_intraday(
             )
         return cached[cached.index >= start]
 
-    fetch_start = start
-    if not cached.empty and cached.index[-1] > start:
-        # Aakhri cached din dobara maangte hain — us din ka session
-        # adhoora cache hua ho sakta hai
-        fetch_start = cached.index[-1].normalize().to_pydatetime()
-
-    fetched = _fetch_from_angel(
-        broker, exchange, symbol_token, interval, fetch_start, end
-    )
-    merged = merge_candles(cached, clean_intraday(fetched, interval))
+    merged = cached
+    for fetch_start, fetch_end in missing_ranges(cached, start, end):
+        fetched = _fetch_from_angel(
+            broker, exchange, symbol_token, interval, fetch_start, fetch_end
+        )
+        merged = merge_candles(merged, clean_intraday(fetched, interval))
 
     if not merged.empty:
         save_cache(merged, symbol, interval, cache_dir, exchange, symbol_token)

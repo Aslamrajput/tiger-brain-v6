@@ -23,6 +23,7 @@ from data.intraday import (  # noqa: E402
     load_cached,
     load_intraday,
     merge_candles,
+    missing_ranges,
     now_ist,
     resample_candles,
     save_cache,
@@ -303,6 +304,43 @@ def test_fetch_window_starts_at_midnight_ist(monkeypatch, tmp_path):
 
     assert captured["start"].hour == 0 and captured["start"].minute == 0
     assert (captured["end"] - captured["start"]).days >= 45
+
+
+def test_missing_ranges_backfills_history_older_than_cache():
+    cached = make_session("2026-08-31")
+    start = datetime(2026, 7, 1)
+    end = datetime(2026, 9, 1, 15, 30)
+
+    ranges = missing_ranges(cached, start, end)
+
+    assert len(ranges) == 2
+    assert ranges[0][0] == start                      # purana hissa backfill
+    assert ranges[0][1] == datetime(2026, 9, 1)
+    assert ranges[1] == (datetime(2026, 8, 31), end)  # aakhri din + tail
+
+
+def test_missing_ranges_only_fetches_tail_when_cache_covers_start():
+    cached = make_session("2026-08-31")
+    start = datetime(2026, 8, 31)
+    end = datetime(2026, 9, 1, 15, 30)
+
+    assert missing_ranges(cached, start, end) == [(start, end)]
+
+
+def test_load_intraday_backfills_older_window(monkeypatch, tmp_path):
+    """20 din cache karke 60 din maango to purana hissa bhi fetch ho."""
+    save_cache(make_session("2026-08-31"), "NIFTY", "FIVE_MINUTE", str(tmp_path))
+    calls = []
+
+    def fake_fetch(broker, exchange, token, interval, start, end):
+        calls.append((start, end))
+        return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
+
+    monkeypatch.setattr(intraday, "_fetch_from_angel", fake_fetch)
+    load_intraday(interval="FIVE_MINUTE", days=60, cache_dir=str(tmp_path))
+
+    assert len(calls) == 2
+    assert (calls[0][1] - calls[0][0]).days >= 55
 
 
 def test_load_intraday_validates_arguments(tmp_path):
