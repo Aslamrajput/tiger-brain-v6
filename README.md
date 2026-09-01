@@ -20,7 +20,19 @@ python3 -m backtest.cli --source csv --csv-path nifty_2y.csv --mode split
 
 # Directional accuracy ke saath simulated options P&L (theta + costs)
 python3 -m backtest.cli --source csv --csv-path nifty_2y.csv --options-pnl
+
+# Intraday backtest — 30 din ka 5-min data (cache-first, data/intraday.py se)
+python3 -m backtest.cli --interval FIVE_MINUTE --intraday-days 30 --options-pnl
 ```
+
+`--interval` ONE_DAY (default) chhodkar kuch bhi ho to run intraday ban jaata
+hai: ek din mein kai bars, isliye kai decisions. Tab teen cheezein apne aap
+badalti hain — walk-forward ke `--train-days`/`--test-days` bars mein convert
+hote hain (5-min = 75 bars/din), har session ka **aakhri bar skip** hota hai
+(position overnight nahi rakhi jaati, warna overnight gap intraday move gina
+jaata), aur India VIX har bar ko **pichhle session** ka close deta hai (us din
+ka VIX close intraday decision mein lookahead hota). Options P&L ab asli
+holding period se theta lagata hai, isliye intraday exit pe decay kam hai.
 
 `--mode walkforward` (default) data ko kai sequential folds mein todta hai —
 har fold ka test window ek alag, unseen period hota hai. Report per-fold

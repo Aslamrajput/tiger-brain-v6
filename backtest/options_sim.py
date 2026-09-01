@@ -167,10 +167,16 @@ def _iv_for_date(vix_series: pd.Series, date, fallback_pct: float) -> float:
         key = pd.Timestamp(date)
         if key.tz is not None:
             key = key.tz_localize(None)
-        if key in vix_series.index:
-            value = vix_series.loc[key]
-            if pd.notna(value) and float(value) > 0:
-                return float(value) / 100.0
+        # Intraday bars ka exact timestamp daily VIX index mein nahi hota —
+        # tab us din ki midnight key try karte hain, warna har intraday
+        # trade chupchaap fallback IV pe price hota
+        for candidate in (key, key.normalize()):
+            if candidate in vix_series.index:
+                value = vix_series.loc[candidate]
+                if isinstance(value, pd.Series):
+                    value = value.iloc[0]
+                if pd.notna(value) and float(value) > 0:
+                    return float(value) / 100.0
     return fallback_pct / 100.0
 
 
@@ -246,9 +252,14 @@ def simulate_trade_log(
         iv = _iv_for_date(vix_series, entry_date, fallback_iv_pct)
 
         dte_in = days_to_expiry(entry_date, expiry_weekday)
-        # Exit agle trading din — calendar gap (weekend) bhi theta khaata hai
-        calendar_gap = max((exit_date - entry_date).days, 1)
-        dte_out = max(dte_in - calendar_gap, 0)
+        # Holding period asli timestamps se — daily bars pe ye 1 (ya
+        # weekend pe 3) din hai, intraday bars pe din ka ek hissa
+        holding_days = max(
+            (pd.Timestamp(exit_date) - pd.Timestamp(entry_date)).total_seconds()
+            / 86400.0,
+            0.0,
+        )
+        dte_out = max(dte_in - holding_days, 0.0)
 
         premium_in = black_scholes_price(spot_in, strike, dte_in / 365, iv, option_type)
         premium_out = black_scholes_price(
@@ -271,6 +282,7 @@ def simulate_trade_log(
             "strike": strike,
             "iv_pct": round(iv * 100, 2),
             "days_to_expiry": dte_in,
+            "holding_days": round(holding_days, 4),
             "premium_in": round(premium_in, 2),
             "premium_out": round(premium_out, 2),
             "gross_pnl": round(gross, 2),

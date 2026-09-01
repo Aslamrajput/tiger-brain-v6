@@ -51,6 +51,7 @@ import pandas as pd
 
 try:
     from backtest.engine import (
+        MIN_WARMUP_DAYS,
         merge_gate_stats,
         new_gate_stats,
         print_backtest_report,
@@ -79,6 +80,31 @@ logging.basicConfig(level=logging.INFO)
 
 NIFTY_SPOT_TOKEN = "99926000"
 OHLCV_COLUMNS = ["open", "high", "low", "close", "volume"]
+
+DAILY_INTERVAL = "ONE_DAY"
+SESSION_MINUTES = 375  # 09:15 se 15:30 tak
+INTRADAY_INTERVALS = {
+    "ONE_MINUTE": 1,
+    "THREE_MINUTE": 3,
+    "FIVE_MINUTE": 5,
+    "TEN_MINUTE": 10,
+    "FIFTEEN_MINUTE": 15,
+    "THIRTY_MINUTE": 30,
+    "ONE_HOUR": 60,
+}
+
+
+# Intraday run ka data chhota hota hai — tab walk-forward windows bhi
+# dino mein chhoti chahiye, warna ek bhi fold nahi banta
+INTRADAY_TRAIN_DAYS = 10
+INTRADAY_TEST_DAYS = 3
+
+
+def bars_per_session(interval: str) -> int:
+    """Ek trading din mein is interval ke kitne bars aate hain."""
+    if interval == DAILY_INTERVAL:
+        return 1
+    return max(SESSION_MINUTES // INTRADAY_INTERVALS[interval], 1)
 
 
 def load_from_csv(path: str) -> pd.DataFrame:
@@ -113,10 +139,30 @@ def load_from_angel(token: str, exchange: str, years: float) -> pd.DataFrame:
     )
 
 
-def load_vix(df: pd.DataFrame) -> pd.Series | None:
+def load_intraday_from_angel(
+    token: str, exchange: str, interval: str, days: int, cache_dir: str
+) -> pd.DataFrame:
+    """Intraday candles — cache-first, missing hissa Angel se (data.intraday)."""
+    from broker.angel_connect import AngelBroker
+    from data.intraday import load_intraday
+
+    broker = AngelBroker()
+    broker.login()
+
+    return load_intraday(
+        interval=interval, days=days, broker=broker,
+        symbol_token=token, exchange=exchange, cache_dir=cache_dir,
+    )
+
+
+def load_vix(df: pd.DataFrame, intraday: bool = False) -> pd.Series | None:
     """
     India VIX ko price data ke index pe align karta hai (regime classifier
     ke liye). Fail ho jaye to None — backtest fir bhi chalega.
+
+    Intraday par ek din ka VIX us din ka CLOSE hota hai — use 09:20 ke
+    decision mein daalna lookahead hai, isliye tab har bar ko PICHHLE
+    session ka VIX milta hai.
     """
     try:
         from data.loader import fetch_india_vix_history
@@ -131,6 +177,8 @@ def load_vix(df: pd.DataFrame) -> pd.Series | None:
             vix = vix.iloc[:, 0]
 
         vix.index = pd.to_datetime(vix.index).tz_localize(None)
+        if intraday:
+            vix.index = vix.index + pd.Timedelta(days=1)
         price_index = pd.to_datetime(df.index).tz_localize(None)
         aligned = vix.reindex(price_index, method="ffill")
 
@@ -185,6 +233,27 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"Angel instrument token (default: NIFTY spot {NIFTY_SPOT_TOKEN})",
     )
     parser.add_argument("--exchange", default="NSE", help="NSE ya NFO (default: NSE)")
+    parser.add_argument(
+        "--interval", default=DAILY_INTERVAL,
+        choices=[DAILY_INTERVAL, *sorted(INTRADAY_INTERVALS)],
+        help="Candle interval. ONE_DAY (default) = purana daily backtest; "
+             "baaki sab intraday — tab ek din mein kai decisions bante hain "
+             "aur position overnight nahi rakhi jaati.",
+    )
+    parser.add_argument(
+        "--intraday-days", type=int, default=30,
+        help="Intraday interval ke saath kitne din ka data (default: 30). "
+             "Angel ki per-interval limit yaad rahe (1-min = 30 din).",
+    )
+    parser.add_argument(
+        "--cache-dir", default="data_cache",
+        help="Intraday candles ka local cache (default: data_cache)",
+    )
+    parser.add_argument(
+        "--warmup-bars", type=int, default=None,
+        help="Decision se pehle kitne bars ki history chahiye (default: daily "
+             "pe 30, intraday pe ek poora session)",
+    )
     parser.add_argument(
         "--train-days", type=int, default=DEFAULT_TRAIN_DAYS,
         help=f"Walk-forward train/history window (default: {DEFAULT_TRAIN_DAYS})",
@@ -249,12 +318,38 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--strike-step 0 se bada hona chahiye")
     if not 0 <= args.expiry_weekday <= 6:
         parser.error("--expiry-weekday 0 (Mon) se 6 (Sun) ke beech hona chahiye")
+    if args.intraday_days <= 0:
+        parser.error("--intraday-days 0 se bada hona chahiye")
+    if args.warmup_bars is not None and args.warmup_bars < 1:
+        parser.error("--warmup-bars kam se kam 1 hona chahiye")
+
+    intraday = args.interval != DAILY_INTERVAL
+    bars_per_day = bars_per_session(args.interval)
+    warmup_bars = args.warmup_bars or (bars_per_day if intraday else MIN_WARMUP_DAYS)
+
+    # Walk-forward windows din mein hain. Intraday run ka data hi kuch
+    # hafton ka hota hai (Angel ki per-interval limit), isliye 250/60 din
+    # ke daily defaults pe ek bhi fold nahi banta.
+    train_days, test_days = args.train_days, args.test_days
+    if intraday:
+        if train_days == DEFAULT_TRAIN_DAYS:
+            train_days = INTRADAY_TRAIN_DAYS
+        if test_days == DEFAULT_TEST_DAYS:
+            test_days = INTRADAY_TEST_DAYS
 
     if args.source == "csv":
         if not args.csv_path:
             print("ERROR: --source csv ke saath --csv-path dena zaroori hai.")
             return 2
         df = load_from_csv(args.csv_path)
+    elif intraday:
+        df = load_intraday_from_angel(
+            args.symbol_token, args.exchange, args.interval,
+            args.intraday_days, args.cache_dir,
+        )
+        if args.save_csv and not df.empty:
+            df.to_csv(args.save_csv)
+            print(f"Data save ho gaya: {args.save_csv}")
     else:
         df = load_from_angel(args.symbol_token, args.exchange, args.years)
         if args.save_csv and not df.empty:
@@ -265,9 +360,16 @@ def main(argv: list[str] | None = None) -> int:
         print("ERROR: Data khali aaya — backtest nahi chal sakta.")
         return 1
 
-    print(f"\nTotal {len(df)} din ka data ({df.index[0]} se {df.index[-1]} tak).")
+    unit = "bars" if intraday else "din"
+    print(f"\nTotal {len(df)} {unit} ka data ({df.index[0]} se {df.index[-1]} tak).")
+    if intraday:
+        print(
+            f"Interval {args.interval}: {bars_per_day} bars/din, warmup "
+            f"{warmup_bars} bars. Har session ka aakhri bar skip hota hai "
+            "(position overnight nahi rakhi jaati)."
+        )
 
-    vix = None if args.no_vix else load_vix(df)
+    vix = None if args.no_vix else load_vix(df, intraday=intraday)
     if vix is None:
         print(
             "⚠️ India VIX data nahi hai — regime classification ke VIX-based "
@@ -277,15 +379,18 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.mode == "walkforward":
         results = run_walk_forward(
-            df, vix_series=vix, train_days=args.train_days,
-            test_days=args.test_days, anchored=args.anchored,
+            df, vix_series=vix, train_days=train_days,
+            test_days=test_days, anchored=args.anchored,
             score_threshold=args.score_threshold, stage1_min=args.stage1_min,
+            bars_per_day=bars_per_day, warmup_bars=warmup_bars,
+            session_aware=intraday,
         )
         print_walk_forward_report(results)
     else:
         results = run_backtest_with_split(
             df, vix, in_sample_pct=args.in_sample_pct,
             score_threshold=args.score_threshold, stage1_min=args.stage1_min,
+            warmup_bars=warmup_bars, session_aware=intraday,
         )
         print_backtest_report(results)
 

@@ -46,7 +46,7 @@ logger = logging.getLogger("tiger_brain.backtest.engine")
 logging.basicConfig(level=logging.INFO)
 
 
-MIN_WARMUP_DAYS = 30  # regime classifier ko ye kam se kam chahiye
+MIN_WARMUP_DAYS = 30  # regime classifier ko ye kam se kam chahiye (bars mein)
 MIN_MEANINGFUL_TRADES = 20  # isse kam trades pe result statistically weak hai
 
 
@@ -108,6 +108,8 @@ def run_single_period_backtest(
     vix_series: pd.Series = None,
     score_threshold: float = DECISION_SCORE_THRESHOLD,
     stage1_min: float = PIPELINE["STAGE1_MIN_CONFIDENCE"],
+    warmup_bars: int = MIN_WARMUP_DAYS,
+    session_aware: bool = False,
 ) -> dict:
     """
     Ek data-period (chahe IN-SAMPLE ho ya OUT-OF-SAMPLE) pe backtest
@@ -126,10 +128,10 @@ def run_single_period_backtest(
             'accuracy_pct': float
             'trade_log': list of per-trade dicts (day, decision, correct?)
     """
-    if len(df) < MIN_WARMUP_DAYS + 2:
+    if len(df) < warmup_bars + 2:
         logger.warning(
-            f"Sirf {len(df)} din ka data hai, kam se kam "
-            f"{MIN_WARMUP_DAYS + 2} chahiye backtest ke liye."
+            f"Sirf {len(df)} bars ka data hai, kam se kam "
+            f"{warmup_bars + 2} chahiye backtest ke liye."
         )
         return {
             "total_days_tested": 0, "total_trades": 0,
@@ -141,12 +143,19 @@ def run_single_period_backtest(
     # din" ka actual outcome chahiye check karne ke liye)
     return backtest_range(
         df,
-        MIN_WARMUP_DAYS,
+        warmup_bars,
         len(df) - 1,
         vix_series=vix_series,
         score_threshold=score_threshold,
         stage1_min=stage1_min,
+        warmup_bars=warmup_bars,
+        session_aware=session_aware,
     )
+
+
+def _same_session(left, right) -> bool:
+    """Do bars ek hi trading din ke hain ya nahi."""
+    return pd.Timestamp(left).date() == pd.Timestamp(right).date()
 
 
 def backtest_range(
@@ -157,6 +166,8 @@ def backtest_range(
     history_start: int = 0,
     score_threshold: float = DECISION_SCORE_THRESHOLD,
     stage1_min: float = PIPELINE["STAGE1_MIN_CONFIDENCE"],
+    warmup_bars: int = MIN_WARMUP_DAYS,
+    session_aware: bool = False,
 ) -> dict:
     """
     Core loop — `df` ke sirf [eval_start, eval_end) wale dino pe decision
@@ -177,6 +188,11 @@ def backtest_range(
         vix_series: optional, same index alignment
         history_start: is index se pehle ka data scanner ko dikhega hi
                        nahi — rolling window ke liye (0 = poori history)
+        warmup_bars: decision lene se pehle kitne bars ki history chahiye
+        session_aware: intraday bars ke liye True — tab session ka aakhri
+                       bar skip hota hai, kyunki uska "agla bar" agle din
+                       ka open hoga aur overnight gap ko intraday move
+                       maan lena galat result deta hai
 
     Returns:
         run_single_period_backtest() jaisa hi dict
@@ -184,10 +200,14 @@ def backtest_range(
     trade_log = []
     gate_stats = new_gate_stats()
 
-    eval_start = max(eval_start, history_start + MIN_WARMUP_DAYS)
+    eval_start = max(eval_start, history_start + warmup_bars)
     eval_end = min(eval_end, len(df) - 1)
 
     for i in range(eval_start, eval_end):
+        if session_aware and not _same_session(df.index[i], df.index[i + 1]):
+            # Session ka aakhri bar — intraday position overnight nahi rakhte
+            continue
+
         # ⚠️ NO LOOKAHEAD: sirf index 0 se i tak ka data (aaj tak),
         # kal/future ka data bilkul nahi diya ja raha
         df_till_today = df.iloc[history_start : i + 1]
@@ -254,6 +274,8 @@ def run_backtest_with_split(
     in_sample_pct: float = 60,
     score_threshold: float = DECISION_SCORE_THRESHOLD,
     stage1_min: float = PIPELINE["STAGE1_MIN_CONFIDENCE"],
+    warmup_bars: int = MIN_WARMUP_DAYS,
+    session_aware: bool = False,
 ) -> dict:
     """
     MAIN ENTRY POINT — poora data ko IN-SAMPLE aur OUT-OF-SAMPLE mein
@@ -288,10 +310,12 @@ def run_backtest_with_split(
     )
 
     in_sample_result = run_single_period_backtest(
-        df_in_sample, vix_in, score_threshold=score_threshold, stage1_min=stage1_min
+        df_in_sample, vix_in, score_threshold=score_threshold, stage1_min=stage1_min,
+        warmup_bars=warmup_bars, session_aware=session_aware,
     )
     out_sample_result = run_single_period_backtest(
-        df_out_sample, vix_out, score_threshold=score_threshold, stage1_min=stage1_min
+        df_out_sample, vix_out, score_threshold=score_threshold, stage1_min=stage1_min,
+        warmup_bars=warmup_bars, session_aware=session_aware,
     )
 
     # --- Overfitting Check ---

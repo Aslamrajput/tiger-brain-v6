@@ -78,6 +78,7 @@ def generate_folds(
     train_days: int = DEFAULT_TRAIN_DAYS,
     test_days: int = DEFAULT_TEST_DAYS,
     anchored: bool = False,
+    bars_per_day: int = 1,
 ) -> list[dict]:
     """
     Sequential (non-overlapping test windows wale) folds banata hai.
@@ -90,33 +91,41 @@ def generate_folds(
                   purana data drop hota jaata hai — recent regime pe
                   zyada focus). True = anchored/expanding (train hamesha
                   din 0 se shuru, lamba hota jaata hai).
+        bars_per_day: intraday data pe ek trading din mein kitne bars
+                      hote hain (5-min = 75). Windows din mein diye
+                      jaate hain, indexes bars mein hote hain.
 
     Returns:
         list of dicts: {'fold', 'train_start', 'train_end', 'test_start',
         'test_end'} — sab integer indexes, test window [test_start,
         test_end) exclusive-end hai.
     """
-    if train_days < MIN_WARMUP_DAYS:
+    if bars_per_day < 1:
+        raise ValueError("bars_per_day kam se kam 1 hona chahiye.")
+    if train_days * bars_per_day < MIN_WARMUP_DAYS:
         raise ValueError(
-            f"train_days ({train_days}) kam se kam MIN_WARMUP_DAYS "
-            f"({MIN_WARMUP_DAYS}) hona chahiye — regime classifier ko "
-            f"itni history chahiye hi chahiye."
+            f"train window ({train_days * bars_per_day} bars) kam se kam "
+            f"MIN_WARMUP_DAYS ({MIN_WARMUP_DAYS}) bars ka hona chahiye — "
+            f"regime classifier ko itni history chahiye hi chahiye."
         )
     if test_days < 1:
         raise ValueError("test_days kam se kam 1 hona chahiye.")
 
+    train_bars = train_days * bars_per_day
+    test_bars = test_days * bars_per_day
+
     folds = []
-    test_start = train_days
+    test_start = train_bars
 
     # Last din ka outcome check nahi ho sakta (agle din ka close chahiye),
     # isliye evaluation `total_len - 1` pe rukta hai
     last_evaluable = total_len - 1
 
     while test_start < last_evaluable:
-        test_end = min(test_start + test_days, last_evaluable)
+        test_end = min(test_start + test_bars, last_evaluable)
         folds.append({
             "fold": len(folds) + 1,
-            "train_start": 0 if anchored else test_start - train_days,
+            "train_start": 0 if anchored else test_start - train_bars,
             "train_end": test_start,
             "test_start": test_start,
             "test_end": test_end,
@@ -134,6 +143,9 @@ def run_walk_forward(
     anchored: bool = False,
     score_threshold: float = DECISION_SCORE_THRESHOLD,
     stage1_min: float = PIPELINE["STAGE1_MIN_CONFIDENCE"],
+    bars_per_day: int = 1,
+    warmup_bars: int = MIN_WARMUP_DAYS,
+    session_aware: bool = False,
 ) -> dict:
     """
     MAIN ENTRY POINT — poore data pe walk-forward validation chalata hai
@@ -149,6 +161,9 @@ def run_walk_forward(
         vix_series: optional India VIX, same index
         train_days / test_days: window size trading-days mein
         anchored: expanding train window (True) ya rolling (False)
+        bars_per_day / warmup_bars / session_aware: intraday runs ke liye
+            — din ko bars mein badalte hain, warmup bars mein maangte hain,
+            aur session ke aakhri bar pe trade nahi lete (no overnight)
 
     Returns:
         dict:
@@ -161,7 +176,9 @@ def run_walk_forward(
     """
     warnings = []
 
-    folds_spec = generate_folds(len(df), train_days, test_days, anchored)
+    folds_spec = generate_folds(
+        len(df), train_days, test_days, anchored, bars_per_day
+    )
 
     if not folds_spec:
         return {
@@ -170,9 +187,9 @@ def run_walk_forward(
             "consistency": None,
             "gate_stats": new_gate_stats(),
             "warnings": [
-                f"Data sirf {len(df)} din ka hai — train_days={train_days} "
+                f"Data sirf {len(df)} bars ka hai — train_days={train_days} "
                 f"+ test_days={test_days} ke liye kam se kam "
-                f"{train_days + test_days + 1} din chahiye. Ek bhi fold "
+                f"{(train_days + test_days) * bars_per_day + 1} bars chahiye. Ek bhi fold "
                 f"nahi ban paya, koi conclusion mat nikalna."
             ],
             "config": _config_dict(train_days, test_days, anchored, len(df)),
@@ -192,6 +209,8 @@ def run_walk_forward(
             history_start=spec["train_start"],
             score_threshold=score_threshold,
             stage1_min=stage1_min,
+            warmup_bars=warmup_bars,
+            session_aware=session_aware,
         )
         merge_gate_stats(gate_stats, result["gate_stats"])
         last_test_index = min(spec["test_end"], len(df) - 1) - 1
