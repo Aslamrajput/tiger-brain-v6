@@ -250,6 +250,21 @@ def test_cache_is_keyed_by_exchange_and_token(tmp_path):
     assert spot["close"].iloc[0] != 999.0
 
 
+def test_cli_prints_report_when_nothing_downloaded(tmp_path, capsys, monkeypatch):
+    """Khaali fetch pe bhi CLI bataye ki kaunse trading din maange gaye the."""
+    monkeypatch.setattr(intraday, "now_ist", lambda: datetime(2026, 6, 19, 16, 0))
+    exit_code = intraday.main([
+        "--offline", "--interval", "FIVE_MINUTE", "--days", "5",
+        "--cache-dir", str(tmp_path),
+    ])
+    out = capsys.readouterr().out
+
+    assert exit_code == 1
+    assert "INTRADAY DATA QUALITY" in out
+    assert "GAYAB sessions" in out
+    assert "Koi intraday candle nahi mili" in out
+
+
 def test_load_cached_missing_file_is_empty(tmp_path):
     assert load_cached("NIFTY", "ONE_MINUTE", cache_dir=str(tmp_path)).empty
 

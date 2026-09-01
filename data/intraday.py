@@ -515,14 +515,16 @@ def main(argv: list[str] | None = None) -> int:
         symbol_token=args.symbol_token, exchange=args.exchange,
         cache_dir=args.cache_dir, offline=args.offline,
     )
-    if df.empty:
-        print("ERROR: Koi intraday candle nahi mili.")
-        return 1
-
     window_start, window_end = intraday_window(args.days)
     print_quality_report(
         candle_quality_report(df, args.interval, window_start, window_end)
     )
+
+    if df.empty:
+        # Report upar chhap chuki hai — usme dikhta hai ki kaunse trading
+        # din maange gaye the aur ek bhi candle kyun nahi mili.
+        print("\nERROR: Koi intraday candle nahi mili.")
+        return 1
 
     if args.resample:
         df = resample_candles(df, args.resample)
