@@ -442,3 +442,31 @@ def test_empty_greek_response_gives_no_iv():
 
     assert greeks.empty
     assert iv_series.live_atm_iv(greeks, spot=24010.0)["atm_iv"] is None
+
+
+# ----------------------- single Angel session -----------------------
+
+def test_cli_logs_in_only_once_per_run(monkeypatch):
+    """
+    Candles aur derivative feeds alag-alag login karein to Angel seedha
+    'exceeding access rate' de deta hai (EC2 pe hua tha).
+    """
+    from backtest import cli
+
+    logins = []
+
+    class FakeBroker:
+        def login(self):
+            logins.append(1)
+
+    monkeypatch.setattr(cli, "_BROKER", None)
+    monkeypatch.setitem(
+        __import__("sys").modules, "broker.angel_connect",
+        type("module", (), {"AngelBroker": FakeBroker}),
+    )
+
+    first = cli._login_broker()
+    second = cli._login_broker()
+
+    assert first is second
+    assert len(logins) == 1

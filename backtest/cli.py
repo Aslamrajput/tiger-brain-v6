@@ -79,6 +79,9 @@ except ImportError:
 logger = logging.getLogger("tiger_brain.backtest.cli")
 logging.basicConfig(level=logging.INFO)
 
+# Ek run = ek Angel session (`_login_broker()` dekhein)
+_BROKER = None
+
 
 NIFTY_SPOT_TOKEN = "99926000"
 OHLCV_COLUMNS = ["open", "high", "low", "close", "volume"]
@@ -126,11 +129,9 @@ def load_from_csv(path: str) -> pd.DataFrame:
 
 def load_from_angel(token: str, exchange: str, years: float) -> pd.DataFrame:
     """Angel One se daily candles — login karke, chunking loader handle karta hai."""
-    from broker.angel_connect import AngelBroker
     from data.loader import fetch_angel_historical_candles
 
-    broker = AngelBroker()
-    broker.login()
+    broker = _login_broker()
 
     end = datetime.now()
     start = end - timedelta(days=int(years * 365))
@@ -145,11 +146,9 @@ def load_intraday_from_angel(
     token: str, exchange: str, interval: str, days: int, cache_dir: str
 ) -> pd.DataFrame:
     """Intraday candles — cache-first, missing hissa Angel se (data.intraday)."""
-    from broker.angel_connect import AngelBroker
     from data.intraday import load_intraday
 
-    broker = AngelBroker()
-    broker.login()
+    broker = _login_broker()
 
     return load_intraday(
         interval=interval, days=days, broker=broker,
@@ -545,11 +544,21 @@ def _build_derivative_context(df: pd.DataFrame, args):
 
 
 def _login_broker():
-    from broker.angel_connect import AngelBroker
+    """
+    Ek hi run mein ek hi Angel session.
 
-    broker = AngelBroker()
-    broker.login()
-    return broker
+    Do baar login karna (ek candles ke liye, ek derivative feeds ke liye)
+    seedha "Access denied because of exceeding access rate" deta hai —
+    Angel login pe bhi rate-limit lagata hai.
+    """
+    global _BROKER
+    if _BROKER is None:
+        from broker.angel_connect import AngelBroker
+
+        broker = AngelBroker()
+        broker.login()
+        _BROKER = broker
+    return _BROKER
 
 
 def _build_iv_frame(df: pd.DataFrame, args, broker, offline: bool):
