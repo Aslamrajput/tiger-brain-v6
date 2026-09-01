@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 import sys
+from datetime import datetime, timezone
 
 import pandas as pd
 import pytest
@@ -141,6 +142,25 @@ def test_quality_report_counts_fully_missing_sessions():
     assert report["incomplete_sessions"] == []
 
 
+def test_quality_report_flags_missing_sessions_at_window_edges():
+    """Window ke shuru/aakhir ka fail hua chunk data se dikhta hi nahi."""
+    df = make_session("2026-06-16", n=75)
+    report = candle_quality_report(
+        df, "FIVE_MINUTE",
+        datetime(2026, 6, 15), datetime(2026, 6, 17, 15, 30),
+    )
+
+    assert report["missing_sessions"] == ["2026-06-15", "2026-06-17"]
+    assert report["missing_candles"] == 150
+
+
+def test_trading_days_ignores_years_without_holiday_calendar():
+    # 2025 ki holiday list repo mein nahi hai — us saal ke weekday holidays
+    # ko jhoota "gayab session" banane se behtar hai kuch na kehna
+    days = trading_days_between(pd.Timestamp("2025-06-15"), pd.Timestamp("2025-06-20"))
+    assert days == []
+
+
 def test_trading_days_skips_weekend_and_holiday():
     days = trading_days_between(pd.Timestamp("2026-01-23"), pd.Timestamp("2026-01-27"))
     dates = [day.date().isoformat() for day in days]
@@ -213,8 +233,6 @@ def test_offline_mode_never_touches_network(tmp_path):
 
 
 def test_now_ist_is_ahead_of_utc():
-    from datetime import datetime, timezone
-
     delta = now_ist() - datetime.now(timezone.utc).replace(tzinfo=None)
     assert 5.4 < delta.total_seconds() / 3600 < 5.6
 
