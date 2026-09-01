@@ -7,6 +7,7 @@ par `pricing` likha hota hai aur coverage report miss ginti hai.
 """
 
 import json
+from datetime import date
 
 import pandas as pd
 import pytest
@@ -240,3 +241,58 @@ def test_provider_failure_falls_back_instead_of_crashing_the_run():
     )
 
     assert result["trades"][0]["pricing"] == "model"
+
+
+def test_registry_start_se_pehle_ka_din_real_nahi_maana_jaata(tmp_path):
+    """
+    Registry banne se pehle ki weekly kabhi dekhi hi nahi gayi. Agli
+    registered expiry 7-8 din door ho to gap-check use pass kar deta hai —
+    par wo ek ALAG contract hai, uska bhaav "real" batana jhooth hoga.
+    """
+    registry = option_chain.refresh_registry(
+        cache_dir=str(tmp_path), master=SAMPLE_MASTER
+    )
+    coverage_start = date(2026, 9, 3)  # 01SEP wali weekly kabhi dekhi hi nahi
+    provider = option_chain.AngelOptionChain(
+        cache_dir=str(tmp_path), registry=registry, offline=True,
+        coverage_start=coverage_start,
+    )
+
+    for day in ("2026-09-01 09:20", "2026-09-02 09:20"):
+        assert provider.contract_for(pd.Timestamp(day), 20000.0, "CE") is None
+    assert provider.contract_for(
+        pd.Timestamp("2026-09-03 09:20"), 20000.0, "CE"
+    )["token"] == "111"
+
+
+def test_coverage_start_registry_ke_pehle_refresh_se_aata_hai():
+    registry = {
+        "A": {"expiry": "2026-09-08", "first_seen": "2026-09-04"},
+        "B": {"expiry": "2026-09-15", "first_seen": "2026-08-28"},
+    }
+    assert option_chain.registry_coverage_start(registry) == date(2026, 8, 28)
+    assert option_chain.registry_coverage_start({}) is None
+
+
+def test_expired_contract_ka_fetch_window_expiry_pe_rukta_hai(monkeypatch, tmp_path):
+    """
+    Post-expiry tail har roz badhta hai; agar window aaj tak khinche to
+    har run wahi khaali hissa dobara download karta hai.
+    """
+    requested = {}
+
+    def fake_load_intraday(**kwargs):
+        requested.update(kwargs)
+        return pd.DataFrame()
+
+    registry = option_chain.refresh_registry(
+        cache_dir=str(tmp_path), master=SAMPLE_MASTER
+    )
+    provider = option_chain.AngelOptionChain(
+        cache_dir=str(tmp_path), registry=registry, offline=True
+    )
+    monkeypatch.setattr(option_chain, "load_intraday", fake_load_intraday)
+    provider._load_contract_candles(registry["NIFTY08SEP2620000CE"])
+
+    assert requested["end"].date() == date(2026, 9, 8)
+    assert requested["days"] == option_chain.MAX_CONTRACT_HISTORY_DAYS

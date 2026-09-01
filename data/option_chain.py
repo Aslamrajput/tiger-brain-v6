@@ -47,7 +47,7 @@ import json
 import logging
 import os
 import sys
-from datetime import date, datetime
+from datetime import date, datetime, time
 
 import pandas as pd
 
@@ -195,6 +195,23 @@ def registry_expiries(registry: dict) -> list:
     return sorted({date.fromisoformat(c["expiry"]) for c in registry.values()})
 
 
+def registry_coverage_start(registry: dict) -> date | None:
+    """
+    Pehla din jab se registry par bharosa kiya ja sakta hai.
+
+    Har refresh us waqt ke SAARE zinda contracts likhta hai, isliye pehle
+    refresh (`first_seen`) ke baad ka har din poora cover hai. Usse pehle
+    ki weekly registry mein hai hi nahi — aur uska ye matlab nahi ki wo
+    thi hi nahi.
+    """
+    seen = [
+        date.fromisoformat(c["first_seen"])
+        for c in registry.values()
+        if c.get("first_seen")
+    ]
+    return min(seen) if seen else None
+
+
 def nearest_expiry_on_or_after(registry: dict, day: date) -> date | None:
     """Us din ke liye 'current weekly' — pehli expiry jo us din ya baad mein ho."""
     for expiry in registry_expiries(registry):
@@ -235,6 +252,7 @@ class AngelOptionChain:
         offline: bool = False,
         registry: dict | None = None,
         max_expiry_gap_days: int = MAX_EXPIRY_GAP_DAYS,
+        coverage_start: date | None = None,
     ):
         if interval not in INTRADAY_INTERVAL_MINUTES:
             raise ValueError(
@@ -251,6 +269,10 @@ class AngelOptionChain:
         self.registry = (
             registry if registry is not None
             else load_registry(registry_path(underlying, exchange, cache_dir))
+        )
+        self.coverage_start = (
+            coverage_start if coverage_start is not None
+            else registry_coverage_start(self.registry)
         )
         self._candles = {}
         self.hits = 0
@@ -278,24 +300,31 @@ class AngelOptionChain:
             return self._candles[token]
 
         expiry = date.fromisoformat(contract["expiry"])
-        # Contract listing se expiry tak hi zinda hota hai; usse aage
-        # maangne ka koi fayda nahi, aur cache bhi chhota rehta hai
-        days_back = (now_ist().date() - min(expiry, now_ist().date())).days
+        # Contract listing se expiry tak hi zinda hota hai. Window ka end
+        # expiry pe rokna zaroori hai — warna har run expiry ke baad ka
+        # (roz badhta) khaali hissa dobara download karta rehta hai.
+        expiry_end = datetime.combine(expiry, time.max)
         df = load_intraday(
             symbol=contract["symbol"],
             interval=self.interval,
-            days=max(days_back, 0) + MAX_CONTRACT_HISTORY_DAYS,
+            days=MAX_CONTRACT_HISTORY_DAYS,
             broker=self._ensure_broker(),
             symbol_token=token,
             exchange=self.exchange,
             cache_dir=self.cache_dir,
             offline=self.offline,
+            end=expiry_end,
         )
         self._candles[token] = df
         return df
 
     def contract_for(self, timestamp, strike: float, option_type: str) -> dict | None:
         day = pd.Timestamp(timestamp).date()
+        # Registry banne se pehle ke din: us din ki asli weekly kabhi dekhi
+        # hi nahi gayi, isliye jo agli expiry registry mein hai wo ek ALAG
+        # contract hai — uska bhaav "real" bata dena jhooth hoga
+        if self.coverage_start is not None and day < self.coverage_start:
+            return None
         expiry = nearest_expiry_on_or_after(self.registry, day)
         if expiry is None or (expiry - day).days > self.max_expiry_gap_days:
             return None
@@ -335,6 +364,9 @@ class AngelOptionChain:
         total = self.hits + sum(self.misses.values())
         return {
             "registry_contracts": len(self.registry),
+            "coverage_start": (
+                self.coverage_start.isoformat() if self.coverage_start else None
+            ),
             "registry_expiries": [
                 e.isoformat() for e in registry_expiries(self.registry)
             ],
@@ -351,6 +383,7 @@ def print_coverage_report(coverage: dict) -> None:
     print("REAL OPTION-CHAIN COVERAGE")
     print("=" * 66)
     print(f"Registry contracts : {coverage['registry_contracts']}")
+    print(f"Registry shuru se  : {coverage.get('coverage_start') or 'pata nahi'}")
     print(f"Premium lookups    : {coverage['lookups']}")
     print(f"Real bhaav mila    : {coverage['hits']} ({coverage['hit_rate_pct']}%)")
     misses = coverage["misses"]
