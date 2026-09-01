@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import io
 import logging
+import time
 from datetime import datetime, timedelta
 
 import pandas as pd
@@ -345,6 +346,71 @@ ANGEL_INTERVAL_MAX_DAYS = {
     "ONE_HOUR": 400, "ONE_DAY": 2000,
 }
 
+# Angel ka historical API rate-limited hai (3 req/sec, aur burst pe
+# "Access denied because of exceeding access rate" bhejta hai). Chunked
+# download mein ye error aana normal hai, isliye har chunk ke beech ruko
+# aur rate-limit wale error pe badhte hue intezaar ke saath retry karo.
+ANGEL_CHUNK_PAUSE_SEC = 1.0
+ANGEL_MAX_RETRIES = 4
+ANGEL_RETRY_BACKOFF_SEC = 5.0
+
+_RATE_LIMIT_MARKERS = (
+    "access rate", "rate limit", "exceeding access", "too many request",
+)
+
+
+def is_rate_limit_error(message: str) -> bool:
+    """Kya ye error rate-limit ka hai (yani retry karne layak)?"""
+    lowered = str(message).lower()
+    return any(marker in lowered for marker in _RATE_LIMIT_MARKERS)
+
+
+def fetch_candle_chunk(
+    broker, params: dict,
+    max_retries: int = ANGEL_MAX_RETRIES,
+    backoff_sec: float = ANGEL_RETRY_BACKOFF_SEC,
+) -> list:
+    """
+    Ek chunk ki candles laata hai, rate-limit pe exponential backoff ke
+    saath retry karte hue.
+
+    Sirf rate-limit errors retry hote hain — baaki errors (galat token,
+    session expire) retry karne se theek nahi honge, isliye wo turant
+    raise ho jaate hain aur caller unhe log karta hai.
+
+    Returns:
+        Raw candle rows ki list (khali list agar data hi na ho).
+    """
+    for attempt in range(max_retries):
+        try:
+            response = broker.smart_api.getCandleData(params)
+        except Exception as exc:
+            # SmartAPI rate-limit ka jawab JSON nahi hota, isliye SDK
+            # exception phenkta hai — usme bhi wahi message hota hai.
+            if not is_rate_limit_error(exc) or attempt == max_retries - 1:
+                raise
+            response = {"message": str(exc)}
+
+        if response.get("status") and response.get("data"):
+            return response["data"]
+
+        message = response.get("message", "unknown")
+        if not is_rate_limit_error(message) or attempt == max_retries - 1:
+            logger.warning(
+                f"Candle chunk {params['fromdate']}-{params['todate']} "
+                f"khali/fail: {message}"
+            )
+            return []
+
+        delay = backoff_sec * (2 ** attempt)
+        logger.warning(
+            f"Angel rate limit ({message}) — {delay:.0f}s baad retry "
+            f"({attempt + 1}/{max_retries - 1})"
+        )
+        time.sleep(delay)
+
+    return []
+
 
 def fetch_angel_historical_candles(
     broker, exchange: str, symboltoken: str, interval: str,
@@ -391,17 +457,12 @@ def fetch_angel_historical_candles(
         }
 
         try:
-            response = broker.smart_api.getCandleData(params)
-            if response.get("status") and response.get("data"):
-                all_candles.extend(response["data"])
+            candles = fetch_candle_chunk(broker, params)
+            if candles:
+                all_candles.extend(candles)
                 logger.info(
                     f"Candles mile: {chunk_start.date()} se {chunk_end.date()} "
-                    f"({len(response['data'])} rows)"
-                )
-            else:
-                logger.warning(
-                    f"Candle chunk {chunk_start.date()}-{chunk_end.date()} "
-                    f"khali/fail: {response.get('message', 'unknown')}"
+                    f"({len(candles)} rows)"
                 )
         except Exception as exc:
             logger.error(
@@ -409,6 +470,8 @@ def fetch_angel_historical_candles(
             )
 
         chunk_start = chunk_end + timedelta(days=1)
+        if chunk_start <= to_date:
+            time.sleep(ANGEL_CHUNK_PAUSE_SEC)
 
     if not all_candles:
         logger.warning("Koi candle data nahi mila poore range mein.")
