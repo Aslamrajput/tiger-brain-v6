@@ -87,6 +87,43 @@ Tuning: `--lot-size`, `--strike-step`, `--expiry-weekday` (0=Mon … 3=Thu).
 Matlab positive P&L bhi "profitable system" ka proof nahi hai — sirf itna
 ki aage paper trading test karne layak hai.
 
+## Intraday data layer (`data/intraday.py`)
+
+Daily candles pe din mein sirf 1 decision ban sakta hai. Intraday trading
+ke liye pehla step ye data layer hai — download + cache + safai + quality
+check:
+
+```bash
+# 30 din ka 5-min NIFTY data (cache-first, sirf missing tail download hoti hai)
+python3 -m data.intraday --interval FIVE_MINUTE --days 30
+
+# ek hi download se badi candles bhi banao, aur CSV mein save karo
+python3 -m data.intraday --interval ONE_MINUTE --days 20 --resample 15 \
+    --save-csv nifty_15min.csv
+
+# bina network ke, sirf cache se (offline reproducible run)
+python3 -m data.intraday --offline --interval FIVE_MINUTE --days 30
+```
+
+Ye layer kya karta hai:
+
+- Cache `data_cache/<SYMBOL>_<INTERVAL>.csv.gz` mein; dobara chalane pe
+  sirf naya hissa fetch hota hai (Angel rate limits bachane ke liye).
+- Market hours (09:15–15:30) ke bahar ki candles, weekends aur NSE
+  holidays hata deta hai; duplicate timestamps mein naya version rakhta
+  hai.
+- `--resample` se 1-min se 5/15/60-min candles banti hain, aur bins
+  session ke andar hi rehti hain (do dino ki candles kabhi ek bin mein
+  nahi milti).
+- Har run pe quality report: kitne sessions, kitni candles missing,
+  kaunse din adhoore, kitna zero-volume.
+
+⚠️ Missing candles ko ye module **bharta nahi** — forward-fill se fake
+candles banti hain aur indicators jhoothe ho jaate hain. Gaps sirf report
+hote hain. Aur ye sirf underlying (index/stock) candles hain — option
+premium history isme nahi hai, isliye intraday options P&L abhi bhi
+simulate hi hoga.
+
 ## Tests
 
 ```bash
