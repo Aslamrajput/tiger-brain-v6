@@ -266,6 +266,29 @@ def test_cli_prints_report_when_nothing_downloaded(tmp_path, capsys, monkeypatch
     assert "Koi intraday candle nahi mili" in out
 
 
+def test_cli_report_window_does_not_drift_with_clock(tmp_path, capsys, monkeypatch):
+    """Fetch ke dauraan ghadi aage badhe to report nayi candles na maange."""
+    ticks = iter([
+        datetime(2026, 6, 19, 10, 15),  # window banti hai
+        datetime(2026, 6, 19, 10, 40),  # fetch ke baad ka waqt
+    ])
+    monkeypatch.setattr(intraday, "now_ist", lambda: next(ticks))
+    cached = pd.concat([
+        make_session("2026-06-18", n=75),   # poora din
+        make_session("2026-06-19", n=12),   # aaj 10:15 tak
+    ])
+    save_cache(cached, "NIFTY", "FIVE_MINUTE", cache_dir=str(tmp_path))
+
+    intraday.main([
+        "--offline", "--interval", "FIVE_MINUTE", "--days", "1",
+        "--cache-dir", str(tmp_path),
+    ])
+    out = capsys.readouterr().out
+
+    assert "Adhoore sessions" not in out
+    assert "Missing candles   : 0" in out
+
+
 def test_load_cached_missing_file_is_empty(tmp_path):
     assert load_cached("NIFTY", "ONE_MINUTE", cache_dir=str(tmp_path)).empty
 

@@ -426,6 +426,7 @@ def load_intraday(
     cache_dir: str = DEFAULT_CACHE_DIR,
     offline: bool = False,
     end: datetime | None = None,
+    window: tuple | None = None,
 ) -> pd.DataFrame:
     """
     Intraday candles ka main entry point — cache-first, incremental fetch.
@@ -441,6 +442,10 @@ def load_intraday(
         end: window ka aakhri waqt (default = abhi). Expire ho chuke
              instrument pe iske bina har run post-expiry khaali tail
              maangta rehta hai.
+        window: poori (start, end) jo maangna hai — `days`/`end` dono ko
+                override karti hai. Caller ise isliye pass karta hai
+                taaki report bilkul WAHI window dekhe jo fetch hui thi;
+                fetch ke dauraan ghadi aage badh jaati hai.
 
     Returns:
         Cleaned OHLCV DataFrame (index=timestamp), maangi hui window ka.
@@ -453,7 +458,7 @@ def load_intraday(
     if days <= 0:
         raise ValueError("days 0 se bada hona chahiye")
 
-    start, end = intraday_window(days, end)
+    start, end = window if window is not None else intraday_window(days, end)
     cached = clean_intraday(
         load_cached(symbol, interval, cache_dir, exchange, symbol_token), interval
     )
@@ -541,12 +546,13 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
 
+    window_start, window_end = intraday_window(args.days)
     df = load_intraday(
         symbol=args.symbol, interval=args.interval, days=args.days,
         symbol_token=args.symbol_token, exchange=args.exchange,
         cache_dir=args.cache_dir, offline=args.offline,
+        window=(window_start, window_end),
     )
-    window_start, window_end = intraday_window(args.days)
     print_quality_report(
         candle_quality_report(df, args.interval, window_start, window_end)
     )
