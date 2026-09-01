@@ -13,15 +13,19 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import data.intraday as intraday  # noqa: E402
 from data.intraday import (  # noqa: E402
+    cache_path,
     candle_quality_report,
     candles_per_session,
     clean_intraday,
     load_cached,
     load_intraday,
     merge_candles,
+    now_ist,
     resample_candles,
     save_cache,
+    trading_days_between,
 )
 
 
@@ -127,6 +131,23 @@ def test_quality_report_counts_missing_candles():
     assert report["incomplete_sessions"] == [("2026-06-16", 40)]
 
 
+def test_quality_report_counts_fully_missing_sessions():
+    # 15 aur 17 June trading din hain; 16 ka data hai hi nahi
+    df = pd.concat([make_session("2026-06-15", n=75), make_session("2026-06-17", n=75)])
+    report = candle_quality_report(df, "FIVE_MINUTE")
+
+    assert report["missing_sessions"] == ["2026-06-16"]
+    assert report["missing_candles"] == 75  # poora gayab din bhi ginta hai
+    assert report["incomplete_sessions"] == []
+
+
+def test_trading_days_skips_weekend_and_holiday():
+    days = trading_days_between(pd.Timestamp("2026-01-23"), pd.Timestamp("2026-01-27"))
+    dates = [day.date().isoformat() for day in days]
+
+    assert dates == ["2026-01-23", "2026-01-27"]  # 24-25 weekend, 26 Republic Day
+
+
 def test_quality_report_flags_zero_volume():
     df = make_session("2026-06-15", n=10, volume=0)
     assert candle_quality_report(df, "FIVE_MINUTE")["zero_volume_pct"] == 100.0
@@ -158,6 +179,20 @@ def test_cache_round_trip(tmp_path):
     pd.testing.assert_frame_equal(loaded, df, check_freq=False)
 
 
+def test_cache_is_keyed_by_exchange_and_token(tmp_path):
+    nifty = make_session("2026-06-15", n=5)
+    other = make_session("2026-06-15", n=5)
+    other["close"] = 999.0
+
+    save_cache(nifty, "NIFTY", "FIVE_MINUTE", str(tmp_path), "NSE", "99926000")
+    save_cache(other, "NIFTY", "FIVE_MINUTE", str(tmp_path), "NFO", "12345")
+
+    assert cache_path("NIFTY", "FIVE_MINUTE", str(tmp_path), "NSE", "99926000") != \
+        cache_path("NIFTY", "FIVE_MINUTE", str(tmp_path), "NFO", "12345")
+    spot = load_cached("NIFTY", "FIVE_MINUTE", str(tmp_path), "NSE", "99926000")
+    assert spot["close"].iloc[0] != 999.0
+
+
 def test_load_cached_missing_file_is_empty(tmp_path):
     assert load_cached("NIFTY", "ONE_MINUTE", cache_dir=str(tmp_path)).empty
 
@@ -175,6 +210,29 @@ def test_offline_mode_never_touches_network(tmp_path):
         interval="FIVE_MINUTE", days=5, cache_dir=str(tmp_path), offline=True
     )
     assert len(loaded) == 10
+
+
+def test_now_ist_is_ahead_of_utc():
+    from datetime import datetime, timezone
+
+    delta = now_ist() - datetime.now(timezone.utc).replace(tzinfo=None)
+    assert 5.4 < delta.total_seconds() / 3600 < 5.6
+
+
+def test_fetch_window_starts_at_midnight_ist(monkeypatch, tmp_path):
+    """Chunk boundaries se subah ki candles na katein, isliye start 00:00 ho."""
+    captured = {}
+
+    def fake_fetch(broker, exchange, token, interval, start, end):
+        captured["start"] = start
+        captured["end"] = end
+        return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
+
+    monkeypatch.setattr(intraday, "_fetch_from_angel", fake_fetch)
+    load_intraday(interval="ONE_MINUTE", days=45, cache_dir=str(tmp_path))
+
+    assert captured["start"].hour == 0 and captured["start"].minute == 0
+    assert (captured["end"] - captured["start"]).days >= 45
 
 
 def test_load_intraday_validates_arguments(tmp_path):

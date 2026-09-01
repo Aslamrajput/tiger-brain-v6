@@ -35,7 +35,7 @@ import argparse
 import logging
 import os
 import sys
-from datetime import datetime, time, timedelta
+from datetime import datetime, time, timedelta, timezone
 
 import pandas as pd
 
@@ -63,6 +63,17 @@ INTRADAY_INTERVAL_MINUTES = {
 OHLCV_COLUMNS = ["open", "high", "low", "close", "volume"]
 DEFAULT_CACHE_DIR = "data_cache"
 NIFTY_SPOT_TOKEN = "99926000"
+
+# Angel ke saare timestamps IST mein hote hain. Server UTC pe chal sakta
+# hai (hamara EC2 UTC hi hai), isliye kabhi bhi seedha `datetime.now()`
+# use mat karo — warna 09:15-15:30 IST wali window galat jagah gir jaati
+# hai aur aaj ka session download hi nahi hota.
+IST = timezone(timedelta(hours=5, minutes=30))
+
+
+def now_ist() -> datetime:
+    """Abhi ka IST time, tz-naive (baaki data bhi tz-naive IST hai)."""
+    return datetime.now(IST).replace(tzinfo=None)
 
 
 def session_bounds() -> tuple:
@@ -155,6 +166,15 @@ def resample_candles(df: pd.DataFrame, target_minutes: int) -> pd.DataFrame:
 # 2. QUALITY REPORT — data pe bharosa karne se pehle
 # ============================================================
 
+def trading_days_between(start: pd.Timestamp, end: pd.Timestamp) -> list:
+    """[start, end] ke beech ke saare NSE trading din (weekend/holiday chhod ke)."""
+    days = pd.date_range(start.normalize(), end.normalize(), freq="D")
+    return [
+        day for day in days
+        if day.dayofweek < 5 and not is_market_holiday(day.date())[0]
+    ]
+
+
 def candle_quality_report(df: pd.DataFrame, interval: str) -> dict:
     """
     Intraday dataset ki sachchai batata hai: kitne sessions hain, har
@@ -169,6 +189,7 @@ def candle_quality_report(df: pd.DataFrame, interval: str) -> dict:
         "expected_per_session": expected,
         "missing_candles": 0,
         "incomplete_sessions": [],
+        "missing_sessions": [],
         "zero_volume_pct": 0.0,
         "first": None,
         "last": None,
@@ -178,7 +199,19 @@ def candle_quality_report(df: pd.DataFrame, interval: str) -> dict:
 
     by_day = df.groupby(df.index.normalize()).size()
     report["sessions"] = int(len(by_day))
-    report["missing_candles"] = int((expected - by_day).clip(lower=0).sum())
+
+    # Sirf maujood dino ko dekhna kaafi nahi — agar ek poora trading din
+    # download hi na hua ho to wo yahan dikhna chahiye, warna adhoora
+    # dataset "clean" lagta hai.
+    present = set(by_day.index)
+    absent = [
+        day for day in trading_days_between(df.index[0], df.index[-1])
+        if day not in present
+    ]
+    report["missing_sessions"] = [day.date().isoformat() for day in absent]
+
+    incomplete_missing = int((expected - by_day).clip(lower=0).sum())
+    report["missing_candles"] = incomplete_missing + expected * len(absent)
     report["incomplete_sessions"] = [
         (day.date().isoformat(), int(count))
         for day, count in by_day.items()
@@ -205,6 +238,16 @@ def print_quality_report(report: dict) -> None:
     )
     print(f"Zero-volume share : {report['zero_volume_pct']}%")
 
+    absent = report["missing_sessions"]
+    if absent:
+        preview = ", ".join(absent[:5])
+        more = f" … +{len(absent) - 5} aur" if len(absent) > 5 else ""
+        print(f"GAYAB sessions    : {len(absent)} — {preview}{more}")
+        print(
+            "⚠️ Ye trading din data mein hain hi nahi (fetch fail hua ya "
+            "broker ne diya hi nahi) — inhe backtest mein 'quiet day' mat samjho."
+        )
+
     incomplete = report["incomplete_sessions"]
     if incomplete:
         preview = ", ".join(f"{day} ({count})" for day, count in incomplete[:5])
@@ -226,15 +269,25 @@ def print_quality_report(report: dict) -> None:
 # 3. CACHE + FETCH
 # ============================================================
 
-def cache_path(symbol: str, interval: str, cache_dir: str = DEFAULT_CACHE_DIR) -> str:
-    return os.path.join(cache_dir, f"{symbol.upper()}_{interval}.csv.gz")
+def cache_path(
+    symbol: str, interval: str, cache_dir: str = DEFAULT_CACHE_DIR,
+    exchange: str = "NSE", symbol_token: str = NIFTY_SPOT_TOKEN,
+) -> str:
+    """
+    Cache file ka naam. Exchange + token bhi naam mein hain, warna alag
+    instrument (jaise BANKNIFTY ya koi option) wahi "NIFTY" naam use
+    karke ek doosre ke bhaav se mix ho jaayein.
+    """
+    name = f"{symbol.upper()}_{exchange.upper()}_{symbol_token}_{interval}.csv.gz"
+    return os.path.join(cache_dir, name)
 
 
 def load_cached(
-    symbol: str, interval: str, cache_dir: str = DEFAULT_CACHE_DIR
+    symbol: str, interval: str, cache_dir: str = DEFAULT_CACHE_DIR,
+    exchange: str = "NSE", symbol_token: str = NIFTY_SPOT_TOKEN,
 ) -> pd.DataFrame:
     """Cache se data padhta hai; na ho to khaali DataFrame."""
-    path = cache_path(symbol, interval, cache_dir)
+    path = cache_path(symbol, interval, cache_dir, exchange, symbol_token)
     if not os.path.exists(path):
         return pd.DataFrame(columns=OHLCV_COLUMNS)
     df = pd.read_csv(path, index_col=0, parse_dates=True)
@@ -242,9 +295,11 @@ def load_cached(
 
 
 def save_cache(
-    df: pd.DataFrame, symbol: str, interval: str, cache_dir: str = DEFAULT_CACHE_DIR
+    df: pd.DataFrame, symbol: str, interval: str,
+    cache_dir: str = DEFAULT_CACHE_DIR,
+    exchange: str = "NSE", symbol_token: str = NIFTY_SPOT_TOKEN,
 ) -> str:
-    path = cache_path(symbol, interval, cache_dir)
+    path = cache_path(symbol, interval, cache_dir, exchange, symbol_token)
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     df.to_csv(path)
     return path
@@ -296,9 +351,17 @@ def load_intraday(
     if days <= 0:
         raise ValueError("days 0 se bada hona chahiye")
 
-    end = datetime.now()
-    start = end - timedelta(days=days)
-    cached = clean_intraday(load_cached(symbol, interval, cache_dir), interval)
+    # Window IST mein banti hai (server UTC ho sakta hai) aur start hamesha
+    # aadhi raat pe — Angel ka chunking din-dar-din aage badhta hai aur
+    # from_date ka TIME har chunk boundary pe repeat hota hai, isliye
+    # 14:32 jaisa start har boundary din ki subah ki candles kha jaata.
+    end = now_ist()
+    start = (end - timedelta(days=days)).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    cached = clean_intraday(
+        load_cached(symbol, interval, cache_dir, exchange, symbol_token), interval
+    )
 
     if offline:
         if cached.empty:
@@ -311,7 +374,7 @@ def load_intraday(
     if not cached.empty and cached.index[-1] > start:
         # Aakhri cached din dobara maangte hain — us din ka session
         # adhoora cache hua ho sakta hai
-        fetch_start = cached.index[-1].normalize()
+        fetch_start = cached.index[-1].normalize().to_pydatetime()
 
     fetched = _fetch_from_angel(
         broker, exchange, symbol_token, interval, fetch_start, end
@@ -319,7 +382,7 @@ def load_intraday(
     merged = merge_candles(cached, clean_intraday(fetched, interval))
 
     if not merged.empty:
-        save_cache(merged, symbol, interval, cache_dir)
+        save_cache(merged, symbol, interval, cache_dir, exchange, symbol_token)
     return merged[merged.index >= start]
 
 
