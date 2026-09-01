@@ -110,6 +110,7 @@ def run_single_period_backtest(
     stage1_min: float = PIPELINE["STAGE1_MIN_CONFIDENCE"],
     warmup_bars: int = MIN_WARMUP_DAYS,
     session_aware: bool = False,
+    context=None,
 ) -> dict:
     """
     Ek data-period (chahe IN-SAMPLE ho ya OUT-OF-SAMPLE) pe backtest
@@ -150,6 +151,7 @@ def run_single_period_backtest(
         stage1_min=stage1_min,
         warmup_bars=warmup_bars,
         session_aware=session_aware,
+        context=context,
     )
 
 
@@ -168,6 +170,7 @@ def backtest_range(
     stage1_min: float = PIPELINE["STAGE1_MIN_CONFIDENCE"],
     warmup_bars: int = MIN_WARMUP_DAYS,
     session_aware: bool = False,
+    context=None,
 ) -> dict:
     """
     Core loop — `df` ke sirf [eval_start, eval_end) wale dino pe decision
@@ -193,6 +196,12 @@ def backtest_range(
                        bar skip hota hai, kyunki uska "agla bar" agle din
                        ka open hoga aur overnight gap ko intraday move
                        maan lena galat result deta hai
+        context: `data.derivatives.DerivativeContext` — us bar tak ka OI
+                 aur IV context (futures OI buildup, ATM IV series). None
+                 = wo feeds available hi nahi (sub-brains khud us factor
+                 ka weight redistribute karte hain). Lookahead yahan bhi
+                 nahi tootta: context sirf `df.index[i]` maangta hai aur
+                 usi tak ka data lautata hai.
 
     Returns:
         run_single_period_backtest() jaisa hi dict
@@ -215,12 +224,17 @@ def backtest_range(
             vix_series.iloc[history_start : i + 1] if vix_series is not None else None
         )
 
+        derivative_kwargs = (
+            context.scanner_kwargs(df.index[i]) if context is not None else {}
+        )
+
         try:
             result = run_scanner(
                 df_till_today,
                 vix_series=vix_till_today,
                 score_threshold=score_threshold,
                 min_stage1_confidence=stage1_min,
+                **derivative_kwargs,
             )
         except Exception as exc:
             logger.warning(f"Day index {i} pe scanner error: {exc}")
@@ -282,6 +296,7 @@ def run_backtest_with_split(
     stage1_min: float = PIPELINE["STAGE1_MIN_CONFIDENCE"],
     warmup_bars: int = MIN_WARMUP_DAYS,
     session_aware: bool = False,
+    context=None,
 ) -> dict:
     """
     MAIN ENTRY POINT — poora data ko IN-SAMPLE aur OUT-OF-SAMPLE mein
@@ -317,11 +332,11 @@ def run_backtest_with_split(
 
     in_sample_result = run_single_period_backtest(
         df_in_sample, vix_in, score_threshold=score_threshold, stage1_min=stage1_min,
-        warmup_bars=warmup_bars, session_aware=session_aware,
+        warmup_bars=warmup_bars, session_aware=session_aware, context=context,
     )
     out_sample_result = run_single_period_backtest(
         df_out_sample, vix_out, score_threshold=score_threshold, stage1_min=stage1_min,
-        warmup_bars=warmup_bars, session_aware=session_aware,
+        warmup_bars=warmup_bars, session_aware=session_aware, context=context,
     )
 
     # --- Overfitting Check ---

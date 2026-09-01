@@ -315,6 +315,28 @@ def build_parser() -> argparse.ArgumentParser:
              "python3 -m data.option_chain --refresh",
     )
     parser.add_argument(
+        "--futures-volume", action="store_true",
+        help="Volume NIFTY FUTURES candles se lo (index spot pe volume 0 "
+             "aata hai, isliye volume-confirmation factor abhi mara hua "
+             "hai). Price spot ka hi rehta hai — sirf volume badalta hai.",
+    )
+    parser.add_argument(
+        "--futures-oi", action="store_true",
+        help="Front futures ka getOIData la kar sub-brains ko OI buildup "
+             "confirmation do (trend_follow + breakout ka OI factor).",
+    )
+    parser.add_argument(
+        "--real-iv-series", action="store_true",
+        help="Asli ATM option candles se IV series banao (reverse "
+             "Black-Scholes) — Vol-Arb sub-brain isi ke bina soya rehta hai. "
+             "Mehenga hai: har sample bar pe do option lookups.",
+    )
+    parser.add_argument(
+        "--iv-sample-bars", type=int, default=1,
+        help="IV har N-ve bar pe naapo (default 1). Beech ke bars pichhli "
+             "ASLI reading carry karte hain — naya data nahi banta.",
+    )
+    parser.add_argument(
         "--iv-crush-pct", type=float, default=DEFAULT_IV_CRUSH_PCT,
         help="Exit IV pe % haircut (default: 0). VIX ka asli move to "
              "hamesha lagta hai; ye uske upar ka event/expiry crush hai. "
@@ -339,6 +361,16 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--iv-crush-pct 0 se 100 ke beech hona chahiye")
     if args.intraday_days <= 0:
         parser.error("--intraday-days 0 se bada hona chahiye")
+    if args.iv_sample_bars <= 0:
+        parser.error("--iv-sample-bars 0 se bada hona chahiye")
+    derivative_flags = (
+        args.futures_volume or args.futures_oi or args.real_iv_series
+    )
+    if derivative_flags and args.interval == DAILY_INTERVAL:
+        parser.error(
+            "Derivative feeds (--futures-volume/--futures-oi/--real-iv-series) "
+            "ke liye intraday --interval chahiye (jaise FIVE_MINUTE)"
+        )
     # Option candles bhi session-time pe cleaned hoti hain; daily (00:00)
     # candles us filter mein bachti hi nahi
     if args.real_option_prices and args.interval == DAILY_INTERVAL:
@@ -397,6 +429,8 @@ def main(argv: list[str] | None = None) -> int:
             "(position overnight nahi rakhi jaati)."
         )
 
+    df, context = _build_derivative_context(df, args)
+
     vix = None if args.no_vix else load_vix(df, intraday=intraday)
     if vix is None:
         print(
@@ -411,16 +445,21 @@ def main(argv: list[str] | None = None) -> int:
             test_days=test_days, anchored=args.anchored,
             score_threshold=args.score_threshold, stage1_min=args.stage1_min,
             bars_per_day=bars_per_day, warmup_bars=warmup_bars,
-            session_aware=intraday,
+            session_aware=intraday, context=context,
         )
         print_walk_forward_report(results)
     else:
         results = run_backtest_with_split(
             df, vix, in_sample_pct=args.in_sample_pct,
             score_threshold=args.score_threshold, stage1_min=args.stage1_min,
-            warmup_bars=warmup_bars, session_aware=intraday,
+            warmup_bars=warmup_bars, session_aware=intraday, context=context,
         )
         print_backtest_report(results)
+
+    if context is not None:
+        from data.derivatives import print_derivative_report
+
+        print_derivative_report(context.summary())
 
     if args.diagnose:
         print_gate_diagnostics(_collect_gate_stats(results, args.mode), args)
@@ -429,6 +468,122 @@ def main(argv: list[str] | None = None) -> int:
         _run_options_sim(df, results, vix, args)
 
     return 0
+
+
+def _build_derivative_context(df: pd.DataFrame, args):
+    """
+    Futures volume + futures OI + asli ATM IV series ko ek context mein
+    baandhta hai.
+
+    Returns: (df, context) — df ka `volume` column futures se aa sakta
+    hai, context `None` rehta hai agar koi bhi derivative feed maanga hi
+    nahi gaya.
+
+    ⚠️ Jo feed maanga par mila nahi, wo CHUP-CHAAP spot pe fallback NAHI
+    hota — warning chhapti hai aur wo factor missing hi rehta hai.
+    """
+    if not (args.futures_volume or args.futures_oi or args.real_iv_series):
+        return df, None
+
+    from data.derivatives import (
+        DerivativeContext,
+        attach_futures_volume,
+        contract_ids_for_index,
+        futures_registry_path,
+        load_futures_candles,
+        load_futures_oi,
+    )
+    from data.option_chain import load_registry
+
+    offline = args.source == "csv"
+    broker = None if offline else _login_broker()
+    registry = load_registry(
+        futures_registry_path(exchange="NFO", cache_dir=args.cache_dir)
+    )
+    if not registry:
+        print(
+            "⚠️ Futures registry khaali hai — volume/OI feeds nahi mil sakte. "
+            "Pehle chalao: python3 -m data.option_chain --refresh"
+        )
+
+    volume_coverage = {}
+    if args.futures_volume:
+        futures = load_futures_candles(
+            df.index, interval=args.interval, broker=broker,
+            cache_dir=args.cache_dir, offline=offline, registry=registry,
+        )
+        if futures.empty:
+            print(
+                "⚠️ Futures candles nahi mili — volume-confirmation factor is "
+                "run mein bhi SKIP rahega (spot ka volume=0 hi hai). Ise "
+                "'volume confirm ho gaya' mat samajhna."
+            )
+        else:
+            df, volume_coverage = attach_futures_volume(df, futures)
+
+    oi_series = None
+    contract_ids = None
+    if args.futures_oi:
+        oi_series = load_futures_oi(
+            df.index, interval=args.interval, broker=broker,
+            cache_dir=args.cache_dir, offline=offline, registry=registry,
+        )
+        if oi_series.empty:
+            print("⚠️ Futures OI nahi mili — OI factor har bar pe SKIP rahega.")
+            oi_series = None
+        elif registry:
+            contract_ids = contract_ids_for_index(oi_series.index, registry)
+
+    iv_frame = None
+    if args.real_iv_series:
+        iv_frame = _build_iv_frame(df, args, broker, offline)
+
+    return df, DerivativeContext(
+        oi_series=oi_series, iv_frame=iv_frame, contract_ids=contract_ids,
+        volume_coverage=volume_coverage,
+    )
+
+
+def _login_broker():
+    from broker.angel_connect import AngelBroker
+
+    broker = AngelBroker()
+    broker.login()
+    return broker
+
+
+def _build_iv_frame(df: pd.DataFrame, args, broker, offline: bool):
+    """
+    ATM IV series — asli option candles se. Iska provider trade-pricing
+    wale provider se ALAG hai, warna IV lookups option-chain coverage
+    report ko ganda kar dete (aur wo report trade pricing ki hai).
+    """
+    from data.iv_series import build_atm_iv_series
+    from data.option_chain import AngelOptionChain, load_registry, registry_path
+
+    registry = load_registry(registry_path(cache_dir=args.cache_dir))
+    if not registry:
+        print(
+            "⚠️ Option registry khaali hai — IV series nahi ban sakti, "
+            "Vol-Arb is run mein bhi soya rahega."
+        )
+        return None
+
+    provider = AngelOptionChain(
+        interval=args.interval, cache_dir=args.cache_dir, registry=registry,
+        broker=broker, offline=offline,
+    )
+    iv_frame = build_atm_iv_series(
+        df, provider, strike_step=args.strike_step,
+        sample_every_bars=args.iv_sample_bars,
+    )
+    if iv_frame["atm_iv"].notna().sum() == 0:
+        print(
+            "⚠️ Ek bhi bar pe ATM option ka asli bhaav nahi mila — IV series "
+            "khaali hai (registry itni purani nahi hai)."
+        )
+        return None
+    return iv_frame
 
 
 def _collect_trade_log(results: dict, mode: str) -> list:

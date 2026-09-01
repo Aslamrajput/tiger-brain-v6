@@ -426,8 +426,17 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
 
     if args.refresh:
+        # Ek hi master download dono registries ke liye — futures ke tokens
+        # bhi expire hone par master se gayab ho jaate hain, isliye unhe bhi
+        # isi daily refresh mein pakadna zaroori hai
+        from data.derivatives import refresh_futures_registry
+
+        master = fetch_scrip_master()
         registry = refresh_registry(
-            args.underlying, args.exchange, args.cache_dir
+            args.underlying, args.exchange, args.cache_dir, master=master
+        )
+        refresh_futures_registry(
+            args.underlying, args.exchange, args.cache_dir, master=master
         )
     else:
         registry = load_registry(

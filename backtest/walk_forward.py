@@ -146,6 +146,7 @@ def run_walk_forward(
     bars_per_day: int = 1,
     warmup_bars: int = MIN_WARMUP_DAYS,
     session_aware: bool = False,
+    context=None,
 ) -> dict:
     """
     MAIN ENTRY POINT — poore data pe walk-forward validation chalata hai
@@ -211,6 +212,7 @@ def run_walk_forward(
             stage1_min=stage1_min,
             warmup_bars=warmup_bars,
             session_aware=session_aware,
+            context=context,
         )
         merge_gate_stats(gate_stats, result["gate_stats"])
         last_test_index = min(spec["test_end"], len(df) - 1) - 1
