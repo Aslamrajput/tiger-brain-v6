@@ -59,8 +59,10 @@ try:
     )
     from backtest.options_sim import (
         DEFAULT_EXPIRY_WEEKDAY,
+        DEFAULT_IV_CRUSH_PCT,
         DEFAULT_LOT_SIZE,
         DEFAULT_STRIKE_STEP,
+        crush_sensitivity,
         print_options_report,
         simulate_trade_log,
     )
@@ -305,6 +307,19 @@ def build_parser() -> argparse.ArgumentParser:
         "--expiry-weekday", type=int, default=DEFAULT_EXPIRY_WEEKDAY,
         help="Weekly expiry ka weekday (0=Mon ... 3=Thu, default: 3)",
     )
+    parser.add_argument(
+        "--real-option-prices", action="store_true",
+        help="Premium asli NFO option candles se lo (data/option_chain.py). "
+             "Jis trade ke dono legs ka bhaav mil jaaye us par Black-Scholes "
+             "aur IV-crush assumption dono hat jaate hain. Pehle chalao: "
+             "python3 -m data.option_chain --refresh",
+    )
+    parser.add_argument(
+        "--iv-crush-pct", type=float, default=DEFAULT_IV_CRUSH_PCT,
+        help="Exit IV pe % haircut (default: 0). VIX ka asli move to "
+             "hamesha lagta hai; ye uske upar ka event/expiry crush hai. "
+             "Report har run mein sensitivity table bhi chhapti hai.",
+    )
     return parser
 
 
@@ -320,8 +335,17 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--strike-step 0 se bada hona chahiye")
     if not 0 <= args.expiry_weekday <= 6:
         parser.error("--expiry-weekday 0 (Mon) se 6 (Sun) ke beech hona chahiye")
+    if not 0 <= args.iv_crush_pct < 100:
+        parser.error("--iv-crush-pct 0 se 100 ke beech hona chahiye")
     if args.intraday_days <= 0:
         parser.error("--intraday-days 0 se bada hona chahiye")
+    # Option candles bhi session-time pe cleaned hoti hain; daily (00:00)
+    # candles us filter mein bachti hi nahi
+    if args.real_option_prices and args.interval == DAILY_INTERVAL:
+        parser.error(
+            "--real-option-prices ke liye intraday --interval chahiye "
+            "(jaise FIVE_MINUTE)"
+        )
     # Regime classifier ko kam se kam itni history chahiye, warna scanner
     # koi decision hi nahi deta
     if args.warmup_bars is not None and args.warmup_bars < MIN_WARMUP_DAYS:
@@ -479,16 +503,70 @@ def print_gate_diagnostics(stats: dict, args) -> None:
     print("=" * 66)
 
 
+def print_crush_sensitivity(rows: list) -> None:
+    """IV-crush assumption pe result kitna tikka hai, ye table dikhata hai."""
+    print("\n" + "=" * 66)
+    print("IV-CRUSH SENSITIVITY (wahi trades, alag crush assumptions)")
+    print("=" * 66)
+    print(f"{'crush %':>8} | {'net P&L':>14} | {'PF':>6} | {'win rate':>9}")
+    print("-" * 66)
+    for row in rows:
+        print(
+            f"{row['iv_crush_pct']:>8.0f} | ₹{row['total_pnl']:>13,.2f} | "
+            f"{row['profit_factor']:>6} | {row['win_rate_pct']:>8}%"
+        )
+    print(
+        "\nReal option-chain quotes ke bina crush ka asli number pata nahi. "
+        "Result ko is range ki tarah padho, ek aankde ki tarah nahi."
+    )
+    print("=" * 66)
+
+
+def _build_price_provider(args):
+    """Real option-chain provider — registry khaali ho to saaf batao."""
+    from data.option_chain import AngelOptionChain, load_registry, registry_path
+
+    registry = load_registry(registry_path(cache_dir=args.cache_dir))
+    if not registry:
+        print(
+            "⚠️ Option registry khaali hai — --real-option-prices ka koi asar "
+            "nahi hoga. Pehle chalao: python3 -m data.option_chain --refresh"
+        )
+        return None
+
+    return AngelOptionChain(
+        interval=args.interval, cache_dir=args.cache_dir, registry=registry,
+        offline=args.source == "csv",
+    )
+
+
 def _run_options_sim(df: pd.DataFrame, results: dict, vix, args) -> None:
     trade_log = _collect_trade_log(results, args.mode)
     if args.mode == "split":
         print("(Options P&L sirf OUT-OF-SAMPLE trades pe — in-sample pe nahi.)")
 
+    provider = _build_price_provider(args) if args.real_option_prices else None
+    sim_kwargs = {
+        "vix_series": vix, "lot_size": args.lot_size,
+        "strike_step": args.strike_step, "expiry_weekday": args.expiry_weekday,
+    }
     sim = simulate_trade_log(
-        df, trade_log, vix_series=vix, lot_size=args.lot_size,
-        strike_step=args.strike_step, expiry_weekday=args.expiry_weekday,
+        df, trade_log, iv_crush_pct=args.iv_crush_pct,
+        price_provider=provider, **sim_kwargs
     )
     print_options_report(sim, lot_size=args.lot_size)
+
+    if provider is not None:
+        from data.option_chain import print_coverage_report
+
+        print_coverage_report(provider.coverage())
+
+    # Crush ek MODEL assumption hai — jo trades market ke bhaav pe chale
+    # unpe iska koi matlab nahi, isliye all-real run pe table nahi chhapti
+    if sim["trades"] and sim.get("pricing", {}).get("model"):
+        print_crush_sensitivity(
+            crush_sensitivity(df, trade_log, price_provider=provider, **sim_kwargs)
+        )
 
 
 if __name__ == "__main__":

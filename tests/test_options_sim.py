@@ -253,3 +253,73 @@ def test_empty_trade_log_is_honest():
     assert result["trades"] == []
     assert result["total_pnl"] == 0.0
     assert any("Ek bhi trade" in w for w in result["warnings"])
+
+# ----------------------- KADAM 4: IV dynamics + crush -----------------------
+
+def test_exit_uses_its_own_vix_not_the_entry_iv():
+    """VIX ka asli move P&L mein aana chahiye — pehle exit bhi entry IV pe pricing thi."""
+    df = make_ohlcv([20000.0, 20000.0])
+    crashing_vix = pd.Series([30.0, 12.0], index=df.index)
+    steady_vix = pd.Series([30.0, 30.0], index=df.index)
+
+    crashed = options_sim.simulate_trade_log(
+        df, [trade(df.index[0])], vix_series=crashing_vix
+    )["trades"][0]
+    steady = options_sim.simulate_trade_log(
+        df, [trade(df.index[0])], vix_series=steady_vix
+    )["trades"][0]
+
+    assert (crashed["iv_pct"], crashed["iv_out_pct"]) == (30.0, 12.0)
+    # Spot hila hi nahi — sirf IV girne se premium girna chahiye
+    assert crashed["premium_out"] < steady["premium_out"]
+    assert crashed["net_pnl"] < steady["net_pnl"]
+
+
+def test_iv_crush_only_haircuts_the_exit_leg():
+    df = make_ohlcv([20000.0, 20100.0])
+    vix = pd.Series([20.0, 20.0], index=df.index)
+
+    no_crush = options_sim.simulate_trade_log(
+        df, [trade(df.index[0])], vix_series=vix
+    )["trades"][0]
+    crushed = options_sim.simulate_trade_log(
+        df, [trade(df.index[0])], vix_series=vix, iv_crush_pct=25.0
+    )["trades"][0]
+
+    assert crushed["iv_pct"] == no_crush["iv_pct"] == 20.0
+    assert crushed["iv_out_pct"] == 15.0
+    assert crushed["premium_in"] == no_crush["premium_in"]
+    assert crushed["net_pnl"] < no_crush["net_pnl"]
+
+
+def test_crush_sensitivity_is_monotonic_for_a_buyer():
+    df = make_ohlcv([20000.0, 20100.0, 20250.0, 20400.0])
+    vix = pd.Series([18.0] * len(df), index=df.index)
+    log = [trade(df.index[i], index=i) for i in range(3)]
+
+    rows = options_sim.crush_sensitivity(df, log, vix_series=vix)
+
+    assert [r["iv_crush_pct"] for r in rows] == list(
+        options_sim.IV_CRUSH_SENSITIVITY_LEVELS
+    )
+    pnls = [r["total_pnl"] for r in rows]
+    assert pnls == sorted(pnls, reverse=True)  # zyada crush = buyer ko zyada nuksaan
+
+
+def test_invalid_iv_crush_rejected():
+    df = make_ohlcv([20000.0, 20100.0])
+    with pytest.raises(ValueError):
+        options_sim.simulate_trade_log(df, [trade(df.index[0])], iv_crush_pct=120.0)
+
+
+def test_cli_rejects_bad_iv_crush_before_running(tmp_path):
+    csv_path = tmp_path / "prices.csv"
+    make_ohlcv([20000.0, 20100.0]).to_csv(csv_path)
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main([
+            "--source", "csv", "--csv-path", str(csv_path), "--no-vix",
+            "--iv-crush-pct", "150",
+        ])
+
+    assert exc.value.code == 2
