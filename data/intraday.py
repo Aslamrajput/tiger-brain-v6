@@ -40,7 +40,7 @@ from datetime import datetime, time, timedelta, timezone
 import pandas as pd
 
 try:
-    from automation.holidays import is_market_holiday
+    from automation.holidays import has_holiday_calendar, is_market_holiday
     from config.thresholds import AUTOMATION
 except ImportError:
     raise ImportError("Repo ROOT se chalao: python3 -m data.intraday")
@@ -74,6 +74,20 @@ IST = timezone(timedelta(hours=5, minutes=30))
 def now_ist() -> datetime:
     """Abhi ka IST time, tz-naive (baaki data bhi tz-naive IST hai)."""
     return datetime.now(IST).replace(tzinfo=None)
+
+
+def intraday_window(days: int) -> tuple:
+    """
+    (start, end) IST window jo maangi jaayegi. Start hamesha aadhi raat
+    pe hota hai: Angel ka chunking din-dar-din chalta hai, isliye
+    from_date ka TIME har chunk boundary pe repeat hota aur 14:32 jaisa
+    start har boundary din ki subah ki candles kha jaata.
+    """
+    end = now_ist()
+    start = (end - timedelta(days=days)).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    return start, end
 
 
 def session_bounds() -> tuple:
@@ -167,19 +181,34 @@ def resample_candles(df: pd.DataFrame, target_minutes: int) -> pd.DataFrame:
 # ============================================================
 
 def trading_days_between(start: pd.Timestamp, end: pd.Timestamp) -> list:
-    """[start, end] ke beech ke saare NSE trading din (weekend/holiday chhod ke)."""
+    """
+    [start, end] ke beech ke saare NSE trading din (weekend/holiday chhod ke).
+
+    Jis saal ki holiday list repo mein nahi hai, us saal ke din yahan se
+    chhod diye jaate hain — warna har weekday holiday jhoota "gayab
+    session" ban jaata.
+    """
     days = pd.date_range(start.normalize(), end.normalize(), freq="D")
     return [
         day for day in days
-        if day.dayofweek < 5 and not is_market_holiday(day.date())[0]
+        if day.dayofweek < 5
+        and has_holiday_calendar(day.year)
+        and not is_market_holiday(day.date())[0]
     ]
 
 
-def candle_quality_report(df: pd.DataFrame, interval: str) -> dict:
+def candle_quality_report(
+    df: pd.DataFrame, interval: str,
+    expected_start: datetime | None = None, expected_end: datetime | None = None,
+) -> dict:
     """
     Intraday dataset ki sachchai batata hai: kitne sessions hain, har
     session mein kitni candles honi chahiye thi, kitni missing hain,
     kaunse din adhoore hain, aur kitni candles ka volume 0 hai.
+
+    expected_start/expected_end: jo window MAANGI gayi thi. Inke bina
+    range sirf mile hue data se banti hai, isliye window ke shuru/aakhir
+    ka poora fail hua chunk dikhta hi nahi.
     """
     expected = candles_per_session(interval)
     report = {
@@ -204,8 +233,10 @@ def candle_quality_report(df: pd.DataFrame, interval: str) -> dict:
     # download hi na hua ho to wo yahan dikhna chahiye, warna adhoora
     # dataset "clean" lagta hai.
     present = set(by_day.index)
+    range_start = pd.Timestamp(expected_start) if expected_start else df.index[0]
+    range_end = pd.Timestamp(expected_end) if expected_end else df.index[-1]
     absent = [
-        day for day in trading_days_between(df.index[0], df.index[-1])
+        day for day in trading_days_between(range_start, range_end)
         if day not in present
     ]
     report["missing_sessions"] = [day.date().isoformat() for day in absent]
@@ -351,14 +382,7 @@ def load_intraday(
     if days <= 0:
         raise ValueError("days 0 se bada hona chahiye")
 
-    # Window IST mein banti hai (server UTC ho sakta hai) aur start hamesha
-    # aadhi raat pe — Angel ka chunking din-dar-din aage badhta hai aur
-    # from_date ka TIME har chunk boundary pe repeat hota hai, isliye
-    # 14:32 jaisa start har boundary din ki subah ki candles kha jaata.
-    end = now_ist()
-    start = (end - timedelta(days=days)).replace(
-        hour=0, minute=0, second=0, microsecond=0
-    )
+    start, end = intraday_window(days)
     cached = clean_intraday(
         load_cached(symbol, interval, cache_dir, exchange, symbol_token), interval
     )
@@ -459,7 +483,10 @@ def main(argv: list[str] | None = None) -> int:
         print("ERROR: Koi intraday candle nahi mili.")
         return 1
 
-    print_quality_report(candle_quality_report(df, args.interval))
+    window_start, window_end = intraday_window(args.days)
+    print_quality_report(
+        candle_quality_report(df, args.interval, window_start, window_end)
+    )
 
     if args.resample:
         df = resample_candles(df, args.resample)

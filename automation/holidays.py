@@ -52,6 +52,17 @@ MUHURAT_TRADING_DATES_2026 = {
 }
 
 
+# Jin saalon ki list upar maujood hai. Iske bahar ke saal ke liye holiday
+# ka jawab "pata nahi" hai — unhe seedha trading day maan lena galat
+# missing-session alerts paida karta hai.
+CALENDAR_YEARS = {2026}
+
+
+def has_holiday_calendar(year: int) -> bool:
+    """Kya is saal ki NSE holiday list is repo mein maujood hai?"""
+    return year in CALENDAR_YEARS
+
+
 def is_market_holiday(check_date: date) -> tuple:
     """
     Args:

@@ -446,7 +446,15 @@ def fetch_angel_historical_candles(
 
     chunk_start = from_date
     while chunk_start <= to_date:
-        chunk_end = min(chunk_start + timedelta(days=max_days - 1), to_date)
+        # Chunk ka aakhri din PURA maangna zaroori hai — warna us date pe
+        # sirf 00:00 tak ka data aata hai aur uska poora session gayab ho
+        # jaata hai (agla chunk bhi agle din se shuru hota hai).
+        chunk_end = min(
+            (chunk_start + timedelta(days=max_days - 1)).replace(
+                hour=23, minute=59, second=0, microsecond=0
+            ),
+            to_date,
+        )
 
         params = {
             "exchange": exchange,
@@ -469,7 +477,9 @@ def fetch_angel_historical_candles(
                 f"Candle fetch error {chunk_start.date()}-{chunk_end.date()}: {exc}"
             )
 
-        chunk_start = chunk_end + timedelta(days=1)
+        chunk_start = (chunk_end + timedelta(days=1)).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
         if chunk_start <= to_date:
             time.sleep(ANGEL_CHUNK_PAUSE_SEC)
 

@@ -107,7 +107,8 @@ python3 -m data.intraday --offline --interval FIVE_MINUTE --days 30
 
 Ye layer kya karta hai:
 
-- Cache `data_cache/<SYMBOL>_<INTERVAL>.csv.gz` mein; dobara chalane pe
+- Cache `data_cache/<SYMBOL>_<EXCHANGE>_<TOKEN>_<INTERVAL>.csv.gz` mein
+  (instrument-wise alag file); dobara chalane pe
   sirf naya hissa fetch hota hai (Angel rate limits bachane ke liye).
 - Market hours (09:15–15:30) ke bahar ki candles, weekends aur NSE
   holidays hata deta hai; duplicate timestamps mein naya version rakhta

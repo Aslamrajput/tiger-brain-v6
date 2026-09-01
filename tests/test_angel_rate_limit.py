@@ -131,3 +131,22 @@ def test_historical_fetch_survives_one_failed_chunk(no_real_sleep):
     )
 
     assert len(df) == 1  # ek chunk fail hone se poora download nahi marta
+
+def test_chunk_ranges_cover_boundary_sessions(no_real_sleep):
+    """Har chunk ka aakhri din poora maanga jaana chahiye (00:00 tak nahi)."""
+    broker = FakeBroker([
+        {"status": True, "data": [CANDLE_ROW]},
+        {"status": True, "data": [CANDLE_ROW]},
+    ])
+    loader.fetch_angel_historical_candles(
+        broker, "NSE", "99926000", "ONE_MINUTE",
+        datetime(2026, 6, 1), datetime(2026, 7, 30, 15, 30),
+    )
+
+    first, second = broker.smart_api.calls
+    # 30 June ek weekday hai — uska session pehle chunk mein aana chahiye
+    assert first["fromdate"] == "2026-06-01 00:00"
+    assert first["todate"] == "2026-06-30 23:59"
+    # agla chunk bina gap ke agle din ki subah se
+    assert second["fromdate"] == "2026-07-01 00:00"
+    assert second["todate"] == "2026-07-30 15:30"
