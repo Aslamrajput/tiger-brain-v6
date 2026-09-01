@@ -79,6 +79,11 @@ EXPIRY_FORMAT = "%d%b%Y"
 # Contract listing se pehle koi candle hoti nahi, par listing date registry
 # mein nahi hoti — isliye expiry se itna peeche tak maang lete hain
 MAX_CONTRACT_HISTORY_DAYS = 45
+# Us din ka "current weekly" isse zyada door nahi ho sakta. Jab asli weekly
+# expire ho kar registry se pehle hi gayab ho chuki ho, to agli zinda expiry
+# utha lena ek ALAG contract (zyada DTE, kam theta) pe P&L banata hai —
+# isliye use miss maanana hi imaandari hai
+MAX_EXPIRY_GAP_DAYS = 8
 
 
 def registry_path(
@@ -229,6 +234,7 @@ class AngelOptionChain:
         cache_dir: str = DEFAULT_CACHE_DIR,
         offline: bool = False,
         registry: dict | None = None,
+        max_expiry_gap_days: int = MAX_EXPIRY_GAP_DAYS,
     ):
         if interval not in INTRADAY_INTERVAL_MINUTES:
             raise ValueError(
@@ -241,6 +247,7 @@ class AngelOptionChain:
         self.interval = interval
         self.cache_dir = cache_dir
         self.offline = offline
+        self.max_expiry_gap_days = max_expiry_gap_days
         self.registry = (
             registry if registry is not None
             else load_registry(registry_path(underlying, exchange, cache_dir))
@@ -290,7 +297,7 @@ class AngelOptionChain:
     def contract_for(self, timestamp, strike: float, option_type: str) -> dict | None:
         day = pd.Timestamp(timestamp).date()
         expiry = nearest_expiry_on_or_after(self.registry, day)
-        if expiry is None:
+        if expiry is None or (expiry - day).days > self.max_expiry_gap_days:
             return None
         return find_contract(self.registry, expiry, strike, option_type)
 

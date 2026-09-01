@@ -74,6 +74,27 @@ def test_registry_keeps_contracts_that_have_left_the_master(tmp_path):
     assert "NIFTY08SEP2620000CE" in on_disk
 
 
+def test_a_far_away_expiry_is_not_used_as_that_days_weekly(tmp_path):
+    """
+    Purani weekly registry se pehle hi gayab ho chuki ho to agli zinda
+    expiry uthana ek ALAG contract (zyada DTE) pe P&L banata hai.
+    """
+    registry = option_chain.refresh_registry(
+        cache_dir=str(tmp_path), master=SAMPLE_MASTER
+    )
+    provider = option_chain.AngelOptionChain(
+        cache_dir=str(tmp_path), registry=registry, offline=True
+    )
+
+    # us din ki asli weekly gayab hai; 08SEP 20 din door hai
+    assert provider.contract_for(
+        pd.Timestamp("2026-08-19 09:20"), 20000.0, "CE"
+    ) is None
+    assert provider.contract_for(
+        pd.Timestamp("2026-09-07 09:20"), 20000.0, "CE"
+    )["token"] == "111"
+
+
 def test_nearest_expiry_and_contract_lookup(tmp_path):
     registry = option_chain.refresh_registry(
         cache_dir=str(tmp_path), master=SAMPLE_MASTER
