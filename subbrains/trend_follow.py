@@ -105,6 +105,18 @@ def has_volume_data(df: pd.DataFrame) -> bool:
     return bool(recent.notna().any() and (recent.fillna(0) > 0).any())
 
 
+def has_current_volume(df: pd.DataFrame) -> bool:
+    """
+    Volume CONFIRMATION us bar ke apne volume pe chalti hai
+    (`volume.iloc[-1]` vs 20-bar average). Agar sirf current bar ka
+    futures data missing hai (NaN) to purane bars ke volume se factor
+    ko "fail" maan lena galat hai — wo bar pe factor available hi nahi.
+    """
+    if not has_volume_data(df):
+        return False
+    return bool(pd.notna(df["volume"].iloc[-1]))
+
+
 def calculate_vwap(df: pd.DataFrame, window: int | None = None) -> pd.Series:
     """
     Rolling Volume Weighted Average Price (default window config se).
@@ -212,7 +224,7 @@ def evaluate(
     )  # stock threshold Section 21 ke hisaab se index se zyada hota hai
 
     # Volume check (index spot pe volume 0 hota hai — tab factor skip)
-    volume_available = has_volume_data(df)
+    volume_available = has_current_volume(df)
     volume_avg_20 = df["volume"].tail(20).mean() if volume_available else 0.0
     latest_volume = df["volume"].iloc[-1] if volume_available else 0.0
     volume_multiplier = latest_volume / volume_avg_20 if volume_avg_20 > 0 else 0

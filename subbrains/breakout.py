@@ -15,7 +15,7 @@ import pandas as pd
 
 try:
     from config.thresholds import SUBBRAIN_BREAKOUT, REGIME
-    from subbrains.trend_follow import has_volume_data, redistribute_weight
+    from subbrains.trend_follow import has_current_volume, redistribute_weight
 except ImportError:
     raise ImportError("Repo ROOT se chalao, 'subbrains/' ke andar se nahi.")
 
@@ -61,7 +61,7 @@ def evaluate(
     latest_width = bb_width.iloc[-1]
     avg_width_20 = bb_width.tail(20).mean()
 
-    volume_available = has_volume_data(df)
+    volume_available = has_current_volume(df)
     volume_avg_20 = df["volume"].tail(20).mean() if volume_available else 0.0
     latest_volume = df["volume"].iloc[-1] if volume_available else 0.0
     volume_multiplier = latest_volume / volume_avg_20 if volume_avg_20 > 0 else 0

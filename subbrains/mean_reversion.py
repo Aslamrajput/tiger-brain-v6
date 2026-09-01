@@ -25,7 +25,7 @@ try:
     from config.thresholds import SUBBRAIN_MEAN_REVERSION
     from subbrains.trend_follow import (
         calculate_vwap,
-        has_volume_data,
+        has_current_volume,
         redistribute_weight,
     )
 except ImportError:
@@ -171,7 +171,7 @@ def evaluate(
             conflicting_evidence.append("Koi fresh zone nearby nahi hai")
 
     # 4. Volume (simple check — bahut low volume pe reversal trust nahi karna)
-    volume_available = has_volume_data(df)
+    volume_available = has_current_volume(df)
     volume_avg_20 = df["volume"].tail(20).mean() if volume_available else 0.0
     latest_volume = df["volume"].iloc[-1] if volume_available else 0.0
     volume_ratio = latest_volume / volume_avg_20 if volume_avg_20 > 0 else 0
