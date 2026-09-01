@@ -10,10 +10,11 @@ import sys
 
 import numpy as np
 import pandas as pd
+import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from backtest import engine
+from backtest import cli, engine
 from backtest.cli import bars_per_session, build_parser, load_vix
 from backtest.options_sim import simulate_trade_log
 from backtest.walk_forward import generate_folds
@@ -149,3 +150,57 @@ def test_cli_rejects_bad_intraday_arguments():
     assert args.interval == "FIVE_MINUTE"
     assert args.intraday_days == 5
     assert parser.parse_args([]).interval == "ONE_DAY"
+
+
+def test_explicit_walk_forward_windows_survive_intraday_defaults(monkeypatch):
+    """--train-days/--test-days diye ho to intraday defaults unhe na dabaayen."""
+    captured = {}
+
+    def fake_walk_forward(df, **kwargs):
+        captured.update(kwargs)
+        return {"folds": [], "aggregate": {}}
+
+    monkeypatch.setattr(cli, "run_walk_forward", fake_walk_forward)
+    monkeypatch.setattr(cli, "print_walk_forward_report", lambda results: None)
+    monkeypatch.setattr(
+        cli, "load_intraday_from_angel",
+        lambda *a, **kw: _intraday_frame(sessions=2),
+    )
+
+    cli.main([
+        "--interval", "FIVE_MINUTE", "--no-vix",
+        "--train-days", "250", "--test-days", "60",
+    ])
+    assert (captured["train_days"], captured["test_days"]) == (250, 60)
+
+    captured.clear()
+    cli.main(["--interval", "FIVE_MINUTE", "--no-vix"])
+    assert (captured["train_days"], captured["test_days"]) == (
+        cli.INTRADAY_TRAIN_DAYS, cli.INTRADAY_TEST_DAYS,
+    )
+
+
+def test_coarse_intervals_still_get_the_regime_classifier_minimum():
+    with pytest.raises(SystemExit):
+        cli.main(["--interval", "ONE_HOUR", "--warmup-bars", "5"])
+    assert bars_per_session("ONE_HOUR") < engine.MIN_WARMUP_DAYS
+
+
+def test_bar_without_a_decision_is_skipped_not_crashed(monkeypatch):
+    df = _intraday_frame(sessions=2)
+
+    def sometimes_no_decision(df_slice, **kwargs):
+        if len(df_slice) % 2 == 0:
+            return {
+                "passed_stage1": False, "regime": None, "sub_brain_votes": {},
+                "meta_brain_result": None, "stage1_notes": ["history kam hai"],
+            }
+        return _always_buy(df_slice, **kwargs)
+
+    monkeypatch.setattr(engine, "run_scanner", sometimes_no_decision)
+    result = engine.backtest_range(
+        df, BARS_PER_DAY, len(df) - 1,
+        warmup_bars=BARS_PER_DAY, session_aware=True,
+    )
+
+    assert result["total_trades"] > 0

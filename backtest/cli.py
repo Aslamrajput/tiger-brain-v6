@@ -251,16 +251,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--warmup-bars", type=int, default=None,
-        help="Decision se pehle kitne bars ki history chahiye (default: daily "
-             "pe 30, intraday pe ek poora session)",
+        help=f"Decision se pehle kitne bars ki history chahiye (default: ek "
+             f"poora session, par kam se kam {MIN_WARMUP_DAYS} bars)",
     )
     parser.add_argument(
-        "--train-days", type=int, default=DEFAULT_TRAIN_DAYS,
-        help=f"Walk-forward train/history window (default: {DEFAULT_TRAIN_DAYS})",
+        "--train-days", type=int, default=None,
+        help=f"Walk-forward train/history window (default: {DEFAULT_TRAIN_DAYS} "
+             f"daily pe, {INTRADAY_TRAIN_DAYS} intraday pe)",
     )
     parser.add_argument(
-        "--test-days", type=int, default=DEFAULT_TEST_DAYS,
-        help=f"Walk-forward unseen test window (default: {DEFAULT_TEST_DAYS})",
+        "--test-days", type=int, default=None,
+        help=f"Walk-forward unseen test window (default: {DEFAULT_TEST_DAYS} "
+             f"daily pe, {INTRADAY_TEST_DAYS} intraday pe)",
     )
     parser.add_argument(
         "--anchored", action="store_true",
@@ -320,22 +322,24 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--expiry-weekday 0 (Mon) se 6 (Sun) ke beech hona chahiye")
     if args.intraday_days <= 0:
         parser.error("--intraday-days 0 se bada hona chahiye")
-    if args.warmup_bars is not None and args.warmup_bars < 1:
-        parser.error("--warmup-bars kam se kam 1 hona chahiye")
+    # Regime classifier ko kam se kam itni history chahiye, warna scanner
+    # koi decision hi nahi deta
+    if args.warmup_bars is not None and args.warmup_bars < MIN_WARMUP_DAYS:
+        parser.error(f"--warmup-bars kam se kam {MIN_WARMUP_DAYS} hona chahiye")
 
     intraday = args.interval != DAILY_INTERVAL
     bars_per_day = bars_per_session(args.interval)
-    warmup_bars = args.warmup_bars or (bars_per_day if intraday else MIN_WARMUP_DAYS)
+    warmup_bars = args.warmup_bars or max(bars_per_day, MIN_WARMUP_DAYS)
 
     # Walk-forward windows din mein hain. Intraday run ka data hi kuch
     # hafton ka hota hai (Angel ki per-interval limit), isliye 250/60 din
     # ke daily defaults pe ek bhi fold nahi banta.
-    train_days, test_days = args.train_days, args.test_days
-    if intraday:
-        if train_days == DEFAULT_TRAIN_DAYS:
-            train_days = INTRADAY_TRAIN_DAYS
-        if test_days == DEFAULT_TEST_DAYS:
-            test_days = INTRADAY_TEST_DAYS
+    train_days = args.train_days
+    test_days = args.test_days
+    if train_days is None:
+        train_days = INTRADAY_TRAIN_DAYS if intraday else DEFAULT_TRAIN_DAYS
+    if test_days is None:
+        test_days = INTRADAY_TEST_DAYS if intraday else DEFAULT_TEST_DAYS
 
     if args.source == "csv":
         if not args.csv_path:

@@ -226,6 +226,12 @@ def backtest_range(
             logger.warning(f"Day index {i} pe scanner error: {exc}")
             continue
 
+        if result.get("meta_brain_result") is None:
+            logger.warning(
+                f"Day index {i} pe koi decision nahi bana: {result['stage1_notes']}"
+            )
+            continue
+
         _record_gate_stats(gate_stats, result, score_threshold)
         decision = result["meta_brain_result"]["final_decision"]
 
