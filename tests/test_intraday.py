@@ -154,6 +154,43 @@ def test_quality_report_flags_missing_sessions_at_window_edges():
     assert report["missing_candles"] == 150
 
 
+def test_quality_report_flags_fully_failed_window():
+    """Poora window fail ho jaye to khaali report "sab theek" nahi dikhni chahiye."""
+    empty = make_session("2026-06-16", n=0)
+    report = candle_quality_report(
+        empty, "FIVE_MINUTE",
+        datetime(2026, 6, 15), datetime(2026, 6, 17, 15, 30),
+    )
+
+    assert report["missing_sessions"] == ["2026-06-15", "2026-06-16", "2026-06-17"]
+    assert report["missing_candles"] == 225
+
+
+def test_quality_report_does_not_flag_session_still_running():
+    """Market ke beech chalaya gaya run aaj ka adhoora din gayab na bataye."""
+    df = make_session("2026-06-16", n=12)  # 09:15 se 10:10 tak
+    report = candle_quality_report(
+        df, "FIVE_MINUTE",
+        datetime(2026, 6, 16), datetime(2026, 6, 16, 10, 15),
+    )
+
+    assert report["missing_sessions"] == []
+    assert report["incomplete_sessions"] == []
+    assert report["missing_candles"] == 0
+
+
+def test_quality_report_ignores_day_before_market_opens():
+    """Market khulne se pehle ka run aaj ke din ko session hi na maane."""
+    df = make_session("2026-06-16", n=75)
+    report = candle_quality_report(
+        df, "FIVE_MINUTE",
+        datetime(2026, 6, 16), datetime(2026, 6, 17, 8, 30),
+    )
+
+    assert report["missing_sessions"] == []
+    assert report["missing_candles"] == 0
+
+
 def test_trading_days_ignores_years_without_holiday_calendar():
     # 2025 ki holiday list repo mein nahi hai — us saal ke weekday holidays
     # ko jhoota "gayab session" banane se behtar hai kuch na kehna
