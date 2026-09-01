@@ -197,6 +197,34 @@ def trading_days_between(start: pd.Timestamp, end: pd.Timestamp) -> list:
     ]
 
 
+def expected_candles_for_day(
+    day: pd.Timestamp, interval: str,
+    window_start: pd.Timestamp | None = None,
+    window_end: pd.Timestamp | None = None,
+) -> int:
+    """
+    Us din ke liye kitni candles MAANGI gayi thi.
+
+    Poora din = 75 (5-min). Par jo din window ke kinare pe hai — jaise
+    aaj ka din jab market abhi chal raha hai — usme sirf utni candles
+    expect karni chahiye jitni us waqt tak ban chuki thi, warna har
+    live run "aaj ka session gayab hai" jhoota alert deta hai.
+    """
+    open_t, close_t = session_bounds()
+    start = day.normalize() + pd.Timedelta(hours=open_t.hour, minutes=open_t.minute)
+    end = day.normalize() + pd.Timedelta(hours=close_t.hour, minutes=close_t.minute)
+
+    if window_start is not None and window_start > start:
+        start = window_start
+    if window_end is not None and window_end < end:
+        end = window_end
+    if end <= start:
+        return 0
+
+    minutes = INTRADAY_INTERVAL_MINUTES[interval]
+    return int((end - start).total_seconds() // 60) // minutes
+
+
 def candle_quality_report(
     df: pd.DataFrame, interval: str,
     expected_start: datetime | None = None, expected_end: datetime | None = None,
@@ -223,36 +251,44 @@ def candle_quality_report(
         "first": None,
         "last": None,
     }
-    if df.empty:
+    if df.empty and (expected_start is None or expected_end is None):
         return report
 
-    by_day = df.groupby(df.index.normalize()).size()
-    report["sessions"] = int(len(by_day))
+    if df.empty:
+        by_day = pd.Series(dtype="int64")
+    else:
+        by_day = df.groupby(df.index.normalize()).size()
+        report["sessions"] = int(len(by_day))
+        report["zero_volume_pct"] = round(
+            float((df["volume"].fillna(0) <= 0).mean()) * 100, 2
+        )
+        report["first"] = df.index[0].isoformat()
+        report["last"] = df.index[-1].isoformat()
 
     # Sirf maujood dino ko dekhna kaafi nahi — agar ek poora trading din
     # download hi na hua ho to wo yahan dikhna chahiye, warna adhoora
     # dataset "clean" lagta hai.
-    present = set(by_day.index)
-    range_start = pd.Timestamp(expected_start) if expected_start else df.index[0]
-    range_end = pd.Timestamp(expected_end) if expected_end else df.index[-1]
-    absent = [
-        day for day in trading_days_between(range_start, range_end)
-        if day not in present
-    ]
-    report["missing_sessions"] = [day.date().isoformat() for day in absent]
+    window_start = pd.Timestamp(expected_start) if expected_start else None
+    window_end = pd.Timestamp(expected_end) if expected_end else None
+    range_start = window_start if window_start is not None else df.index[0]
+    range_end = window_end if window_end is not None else df.index[-1]
 
-    incomplete_missing = int((expected - by_day).clip(lower=0).sum())
-    report["missing_candles"] = incomplete_missing + expected * len(absent)
-    report["incomplete_sessions"] = [
-        (day.date().isoformat(), int(count))
-        for day, count in by_day.items()
-        if count < expected
-    ]
-    report["zero_volume_pct"] = round(
-        float((df["volume"].fillna(0) <= 0).mean()) * 100, 2
+    days = sorted(
+        set(trading_days_between(range_start, range_end)) | set(by_day.index)
     )
-    report["first"] = df.index[0].isoformat()
-    report["last"] = df.index[-1].isoformat()
+    missing_candles = 0
+    for day in days:
+        want = expected_candles_for_day(day, interval, window_start, window_end)
+        if want <= 0:
+            continue
+        have = int(by_day.get(day, 0))
+        if have == 0:
+            report["missing_sessions"].append(day.date().isoformat())
+        elif have < want:
+            report["incomplete_sessions"].append((day.date().isoformat(), have))
+        missing_candles += max(0, want - have)
+
+    report["missing_candles"] = missing_candles
     return report
 
 
@@ -479,14 +515,16 @@ def main(argv: list[str] | None = None) -> int:
         symbol_token=args.symbol_token, exchange=args.exchange,
         cache_dir=args.cache_dir, offline=args.offline,
     )
-    if df.empty:
-        print("ERROR: Koi intraday candle nahi mili.")
-        return 1
-
     window_start, window_end = intraday_window(args.days)
     print_quality_report(
         candle_quality_report(df, args.interval, window_start, window_end)
     )
+
+    if df.empty:
+        # Report upar chhap chuki hai — usme dikhta hai ki kaunse trading
+        # din maange gaye the aur ek bhi candle kyun nahi mili.
+        print("\nERROR: Koi intraday candle nahi mili.")
+        return 1
 
     if args.resample:
         df = resample_candles(df, args.resample)
