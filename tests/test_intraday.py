@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import os
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 import pytest
@@ -348,3 +348,20 @@ def test_load_intraday_validates_arguments(tmp_path):
         load_intraday(interval="TWO_MINUTE", cache_dir=str(tmp_path), offline=True)
     with pytest.raises(ValueError, match="days"):
         load_intraday(days=0, cache_dir=str(tmp_path), offline=True)
+
+
+def test_window_end_bounded_to_a_dead_instruments_last_day():
+    """Expire ho chuke contract ka window aaj tak khinchega to har run
+    khaali post-expiry tail dobara maangega."""
+    expiry_end = intraday.now_ist().replace(
+        hour=23, minute=59, second=0, microsecond=0
+    ) - timedelta(days=30)
+    start, end = intraday.intraday_window(10, end=expiry_end)
+
+    assert end == expiry_end
+    assert start == (expiry_end - timedelta(days=10)).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    # future end abhi pe clamp hota hai
+    _, clamped = intraday.intraday_window(10, end=datetime(2999, 1, 1))
+    assert clamped <= intraday.now_ist()

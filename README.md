@@ -97,7 +97,37 @@ crush pe net P&L, PF, win rate). Result ko us range ki tarah padho.
 Tuning: `--lot-size`, `--strike-step`, `--expiry-weekday` (0=Mon … 3=Thu),
 `--iv-crush-pct`.
 
-**Ye simulated premiums hain, real option-chain quotes nahi:**
+### Asli option-chain premiums (`--real-option-prices`)
+
+Neeche wali saari limitations sirf MODEL wale trades ki hain. `data/option_chain.py`
+Angel ke public scrip master se NIFTY ke NFO contracts (token + expiry + strike)
+ek local **registry** mein rakhta hai, aur us token ki asli candles wahi cache-first
+layer se laata hai jo underlying ke liye use hoti hai:
+
+```bash
+# Registry refresh — ise roz chalao (Angel ke master mein sirf ZINDA
+# contracts hote hain; expire hote hi wo gayab ho jaate hain)
+python3 -m data.option_chain --refresh
+
+# Backtest asli option candles pe (intraday interval zaroori hai)
+python3 -m backtest.cli --interval FIVE_MINUTE --intraday-days 30 \
+    --options-pnl --real-option-prices
+```
+
+Jis trade ke **dono** legs ka asli bhaav mil jaata hai, us par na Black-Scholes
+lagta hai na `--iv-crush-pct` — IV crush wahin premium ke andar aa jaata hai,
+guess karne ki zaroorat nahi. Jis ka nahi milta wo trade **poora** model pe
+chalta hai (aadha market + aadha model = sabse bhramak number), aur report
+`real / model` ka count aur ek coverage report chhapti hai — miss ki teen
+wajahein alag ginti hain: contract registry mein nahi, uski history nahi mili,
+ya us bar pe trade hi nahi hua.
+
+⚠️ Iski seema: jo contract **registry banne se pehle** expire ho chuka hai,
+uska token ab kahin se nahi milta — us daur ke trades model pe hi rahenge.
+Registry jitni purani hogi, real coverage utni behtar. Coverage kam ho to
+P&L ko "asli" mat maano.
+
+**Model wale trades ke premiums simulated hain, real option-chain quotes nahi:**
 - IV har strike pe India VIX maana gaya hai (real chain mein skew hota hai).
 - VIX 30-din ka index-level IV hai; weekly ATM option ka crush isse bada
   hota hai. `--iv-crush-pct 0` (default) pe result **optimistic** side pe

@@ -76,14 +76,19 @@ def now_ist() -> datetime:
     return datetime.now(IST).replace(tzinfo=None)
 
 
-def intraday_window(days: int) -> tuple:
+def intraday_window(days: int, end: datetime | None = None) -> tuple:
     """
     (start, end) IST window jo maangi jaayegi. Start hamesha aadhi raat
     pe hota hai: Angel ka chunking din-dar-din chalta hai, isliye
     from_date ka TIME har chunk boundary pe repeat hota aur 14:32 jaisa
     start har boundary din ki subah ki candles kha jaata.
+
+    `end` un instruments ke liye hai jinki zindagi khatam ho chuki hai
+    (jaise expire ho chuka option) — unka window abhi tak khinchne se
+    har run khaali post-expiry tail dobara maangta rehta hai.
     """
-    end = now_ist()
+    now = now_ist()
+    end = now if end is None else min(end, now)
     start = (end - timedelta(days=days)).replace(
         hour=0, minute=0, second=0, microsecond=0
     )
@@ -420,6 +425,7 @@ def load_intraday(
     exchange: str = "NSE",
     cache_dir: str = DEFAULT_CACHE_DIR,
     offline: bool = False,
+    end: datetime | None = None,
 ) -> pd.DataFrame:
     """
     Intraday candles ka main entry point — cache-first, incremental fetch.
@@ -432,6 +438,9 @@ def load_intraday(
         broker: logged-in AngelBroker. None = khud login karega
                 (jab tak `offline=True` na ho).
         offline: sirf cache use karo, koi network call nahi.
+        end: window ka aakhri waqt (default = abhi). Expire ho chuke
+             instrument pe iske bina har run post-expiry khaali tail
+             maangta rehta hai.
 
     Returns:
         Cleaned OHLCV DataFrame (index=timestamp), maangi hui window ka.
@@ -444,7 +453,7 @@ def load_intraday(
     if days <= 0:
         raise ValueError("days 0 se bada hona chahiye")
 
-    start, end = intraday_window(days)
+    start, end = intraday_window(days, end)
     cached = clean_intraday(
         load_cached(symbol, interval, cache_dir, exchange, symbol_token), interval
     )
@@ -454,7 +463,7 @@ def load_intraday(
             logger.warning(
                 f"Offline mode par {symbol}/{interval} ka cache khaali hai."
             )
-        return cached[cached.index >= start]
+        return cached[(cached.index >= start) & (cached.index <= end)]
 
     merged = cached
     for fetch_start, fetch_end in missing_ranges(cached, start, end):
@@ -465,7 +474,7 @@ def load_intraday(
 
     if not merged.empty:
         save_cache(merged, symbol, interval, cache_dir, exchange, symbol_token)
-    return merged[merged.index >= start]
+    return merged[(merged.index >= start) & (merged.index <= end)]
 
 
 def _fetch_from_angel(
