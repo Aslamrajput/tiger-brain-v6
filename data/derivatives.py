@@ -51,8 +51,8 @@ try:
         DEFAULT_CACHE_DIR,
         INTRADAY_INTERVAL_MINUTES,
         load_intraday,
-        missing_ranges,
         now_ist,
+        trading_days_between,
     )
     from data.option_chain import (
         DEFAULT_EXCHANGE,
@@ -450,6 +450,48 @@ def fetch_oi_history(
     return parse_oi_rows(rows)
 
 
+def missing_oi_ranges(cached: pd.Series, start: datetime, end: datetime) -> list:
+    """
+    Window ke jo trading DIN cache mein nahi hain, unke fetch-ranges.
+
+    Candles wala `missing_ranges()` sirf cache ke aage/peeche dekhta hai.
+    OI chunk beech mein fail ho jaye (rate limit/error) to uske dono taraf
+    ka data cache ho jaata hai aur wo hole phir kabhi maanga hi nahi jaata
+    — us daur ke OI confirmations hamesha ke liye gayab. Isliye yahan
+    din-dar-din dekhte hain, aur chalu din hamesha dobara maangte hain
+    (uska session abhi adhoora hai).
+    """
+    days = trading_days_between(pd.Timestamp(start), pd.Timestamp(end))
+    if not days:
+        return []
+    have = (
+        set(pd.DatetimeIndex(cached.index).normalize())
+        if len(cached) else set()
+    )
+    today = pd.Timestamp(now_ist().date())
+    missing = [d for d in days if d not in have or d == today]
+    if not missing:
+        return []
+
+    ranges = []
+    run_start = run_end = missing[0]
+    for day in missing[1:]:
+        if (day - run_end).days <= 4:      # weekend/holiday gap chhodo
+            run_end = day
+            continue
+        ranges.append((run_start, run_end))
+        run_start = run_end = day
+    ranges.append((run_start, run_end))
+
+    return [
+        (
+            max(first.to_pydatetime(), start),
+            min(last.replace(hour=23, minute=59).to_pydatetime(), end),
+        )
+        for first, last in ranges
+    ]
+
+
 def load_oi_series(
     token: str,
     interval: str = "FIVE_MINUTE",
@@ -472,8 +514,7 @@ def load_oi_series(
         return cached
 
     merged = cached
-    frame = cached.to_frame() if not cached.empty else pd.DataFrame()
-    for fetch_start, fetch_end in missing_ranges(frame, start, end):
+    for fetch_start, fetch_end in missing_oi_ranges(cached, start, end):
         fetched = fetch_oi_history(
             broker, exchange, token, interval, fetch_start, fetch_end
         )
