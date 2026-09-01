@@ -87,12 +87,21 @@ din nazdeek hoti hai — isliye theta apne aap P&L mein aata hai, saath mein
 slippage aur brokerage bhi. Report net P&L, win rate vs directional accuracy,
 profit factor, expectancy aur max drawdown dikhati hai.
 
-Tuning: `--lot-size`, `--strike-step`, `--expiry-weekday` (0=Mon … 3=Thu).
+IV entry aur exit, dono par **us waqt ka** VIX se aata hai, isliye VIX ka
+asli move P&L mein dikhta hai. Uske upar `--iv-crush-pct` exit IV pe ek
+extra haircut lagata hai (weekly ATM option pe event/expiry crush VIX se
+bada hota hai). Ye ek assumption hai, mapa hua number nahi — isliye har
+run ke saath ek **IV-crush sensitivity table** bhi chhapta hai (0/5/10/20%
+crush pe net P&L, PF, win rate). Result ko us range ki tarah padho.
+
+Tuning: `--lot-size`, `--strike-step`, `--expiry-weekday` (0=Mon … 3=Thu),
+`--iv-crush-pct`.
 
 **Ye simulated premiums hain, real option-chain quotes nahi:**
 - IV har strike pe India VIX maana gaya hai (real chain mein skew hota hai).
-- Entry se exit tak IV constant hai — yani IV crush ka nuksaan MISSING hai,
-  isliye real result is simulation se **kharab** hoga, behtar nahi.
+- VIX 30-din ka index-level IV hai; weekly ATM option ka crush isse bada
+  hota hai. `--iv-crush-pct 0` (default) pe result **optimistic** side pe
+  hai — sensitivity table isi liye chhapta hai.
 - Sirf close-to-close; intraday stop-loss/target ka path model nahi hota.
 - Expiry Thursday maani gayi hai; holiday shift handle nahi hota.
 
