@@ -608,3 +608,46 @@ def test_cli_logs_in_only_once_per_run(monkeypatch):
 
     assert first is second
     assert len(logins) == 1
+
+# ----------------------- OI cache gaps -----------------------
+
+def test_missing_oi_ranges_refetches_interior_hole():
+    """
+    Beech ka OI chunk fail ho to wo hole dobara maanga jaana chahiye —
+    warna us daur ke OI confirmations hamesha ke liye gayab rehte hain.
+    """
+    cached = pd.Series(
+        {
+            pd.Timestamp("2026-07-01 09:15"): 1.0,
+            pd.Timestamp("2026-07-02 09:15"): 1.0,
+            # 3 July ka chunk fail hua
+            pd.Timestamp("2026-07-06 09:15"): 1.0,
+            pd.Timestamp("2026-07-07 09:15"): 1.0,
+        }
+    )
+    start = datetime(2026, 7, 1, 9, 15)
+    end = datetime(2026, 7, 7, 15, 30)
+
+    ranges = derivatives.missing_oi_ranges(cached, start, end)
+
+    assert ranges, "interior gap dobara maanga hi nahi gaya"
+    covered = [
+        d for d in derivatives.trading_days_between(
+            pd.Timestamp(start), pd.Timestamp(end)
+        )
+        if any(a <= d.to_pydatetime() <= b for a, b in ranges)
+    ]
+    assert pd.Timestamp("2026-07-03") in covered
+
+
+def test_missing_oi_ranges_empty_when_cache_complete():
+    days = derivatives.trading_days_between(
+        pd.Timestamp("2026-07-01"), pd.Timestamp("2026-07-07")
+    )
+    cached = pd.Series({d + pd.Timedelta(hours=9): 1.0 for d in days})
+
+    ranges = derivatives.missing_oi_ranges(
+        cached, datetime(2026, 7, 1, 9, 15), datetime(2026, 7, 7, 15, 30)
+    )
+
+    assert ranges == []
