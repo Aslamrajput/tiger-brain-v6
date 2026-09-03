@@ -297,6 +297,8 @@ def run_raw_sd_backtest(data_map, start_capital=150000.0, max_loss_per_trade=200
                         **pos, "exit_ts": ts, "exit_premium": exit_prem, "pnl": pnl,
                         "exit_reason": ex["reason"],
                         "hold_bars": len(df_so_far) - pos["entry_idx"],
+                        "entry_spread_pct": pos.get("entry_spread_pct", 0.0),
+                        "confirmation": "raw-touch",
                     })
                     if verbose:
                         logger.warning(f"EXIT {sym} {ex['reason']} pnl={pnl:.0f}")
@@ -440,6 +442,7 @@ def run_raw_sd_backtest(data_map, start_capital=150000.0, max_loss_per_trade=200
                     "explosive": setup.get("explosive", False),
                     "expansion_pct": setup.get("expansion_pct", 0.0),
                     "sweep": setup.get("sweep", False),
+                    "entry_spread_pct": spread_pct,
                 }
                 open_positions.append(pos)
                 if verbose:
@@ -473,27 +476,59 @@ def run_raw_sd_backtest(data_map, start_capital=150000.0, max_loss_per_trade=200
             **pos, "exit_ts": last_ts, "exit_premium": cur_prem, "pnl": pnl,
             "exit_reason": "end_of_data",
             "hold_bars": len(df_sym) - pos["entry_idx"],
+            "entry_spread_pct": pos.get("entry_spread_pct", 0.0),
+            "confirmation": "raw-touch",
         })
 
     wins = [t for t in trades if t["pnl"] > 0]
     losses = [t for t in trades if t["pnl"] <= 0]
     gross_profit = sum(t["pnl"] for t in wins)
     gross_loss = abs(sum(t["pnl"] for t in losses))
-    max_trades_day = max(
-        (sum(1 for t in trades if t["entry_ts"].normalize() == d) for d in {t["entry_ts"].normalize() for t in trades}),
-        default=0,
-    )
-    max_comm_day = 0
-    if trades:
-        comm_counts = defaultdict(int)
-        for t in trades:
-            if t["segment"] == "commodity":
-                d = t["entry_ts"].normalize()
-                comm_counts[d] += 1
-        if comm_counts:
-            max_comm_day = max(comm_counts.values())
 
-    return {
+    # Daily trade counts
+    from collections import Counter
+    daily_counts = Counter()
+    daily_comm_counts = Counter()
+    for t in trades:
+        d = t["entry_ts"].normalize()
+        daily_counts[d] += 1
+        if t["segment"] == "commodity":
+            daily_comm_counts[d] += 1
+    max_trades_day = max(daily_counts.values()) if daily_counts else 0
+    max_comm_day = max(daily_comm_counts.values()) if daily_comm_counts else 0
+
+    # Segment stats
+    seg_stats = {}
+    for seg_key in ("index", "stock", "commodity"):
+        seg_trades = [t for t in trades if t["segment"] == seg_key]
+        if not seg_trades:
+            seg_stats[seg_key] = None
+            continue
+        sw = [t for t in seg_trades if t["pnl"] > 0]
+        sl = [t for t in seg_trades if t["pnl"] <= 0]
+        gp = sum(t["pnl"] for t in sw)
+        gl = abs(sum(t["pnl"] for t in sl))
+        seg_stats[seg_key] = {
+            "label": UNIVERSE[seg_key]["label"],
+            "trades": len(seg_trades),
+            "wins": len(sw),
+            "win_rate_pct": round(len(sw) / len(seg_trades) * 100, 1) if seg_trades else 0.0,
+            "net_pnl": round(sum(t["pnl"] for t in seg_trades), 2),
+            "profit_factor": round(gp / gl, 2) if gl > 0 else float("inf"),
+        }
+
+    # Strategy stats (by strategy name)
+    strat_stats = {}
+    for t in trades:
+        sname = t.get("strategy", "unknown")
+        if sname not in strat_stats:
+            strat_stats[sname] = {"trades": 0, "wins": 0, "pnl": 0.0}
+        strat_stats[sname]["trades"] += 1
+        if t["pnl"] > 0:
+            strat_stats[sname]["wins"] += 1
+        strat_stats[sname]["pnl"] += t["pnl"]
+
+    totals = {
         "start_capital": start_capital,
         "final_equity": round(capital, 2),
         "total_return_pct": round((capital - start_capital) / start_capital * 100, 2),
@@ -501,17 +536,23 @@ def run_raw_sd_backtest(data_map, start_capital=150000.0, max_loss_per_trade=200
         "total_trades": len(trades),
         "wins": len(wins),
         "losses": len(losses),
-        "win_rate": round(len(wins) / len(trades) * 100, 2) if trades else 0.0,
+        "win_rate_pct": round(len(wins) / len(trades) * 100, 2) if trades else 0.0,
         "profit_factor": round(gross_profit / gross_loss, 2) if gross_loss > 0 else float("inf"),
-        "avg_pnl": round(sum(t["pnl"] for t in trades) / len(trades), 2) if trades else 0.0,
+        "avg_pnl_per_trade": round(sum(t["pnl"] for t in trades) / len(trades), 2) if trades else 0.0,
         "avg_winner": round(gross_profit / len(wins), 2) if wins else 0.0,
         "avg_loser": round(-gross_loss / len(losses), 2) if losses else 0.0,
         "best_trade": round(max((t["pnl"] for t in trades), default=0), 2),
         "worst_trade": round(min((t["pnl"] for t in trades), default=0), 2),
         "max_drawdown_pct": round(max_dd, 2),
-        "max_trades_day": max_trades_day,
-        "max_comm_trades_day": max_comm_day,
+        "max_daily_global_trades": max_trades_day,
+        "max_daily_commodity_trades": max_comm_day,
+    }
+
+    return {
+        "totals": totals,
         "trades": trades,
+        "segment_stats": seg_stats,
+        "strategy_stats": strat_stats,
         "equity_curve": equity_curve,
     }
 
