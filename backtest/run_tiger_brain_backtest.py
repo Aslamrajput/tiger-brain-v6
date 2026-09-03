@@ -50,6 +50,7 @@ from __future__ import annotations
 
 import logging
 import math
+import re
 import sys
 import time
 from collections import Counter, defaultdict
@@ -808,13 +809,28 @@ def _resolve_symbol_token(symbol: str) -> tuple[str, str] | None:
         return None
     sym_upper = search.upper()
     if exchange == "MCX":
-        mcom = matches[matches["symbol"].str.upper().str.contains("MCOM", na=False)]
-        if not mcom.empty:
-            row = mcom.iloc[0]
+        # Prefer near-month FUT contract (continuous underlying for zones).
+        # "MCOM" filter is too broad — "CRUDEOILMCOM" contains "MCOM" as
+        # part of the name, giving wrong spot commodity tokens.
+        fut = matches[matches["symbol"].str.upper().str.contains("FUT", na=False)]
+        if not fut.empty:
+            # Pick the nearest-month expiry: extract date from symbol name
+            # (e.g., CRUDEOIL19OCT26FUT → 2026-10-19) and choose closest.
+            now = pd.Timestamp.now()
+            best_row, best_diff = None, float("inf")
+            for _, r in fut.iterrows():
+                m = re.search(r"(\d{1,2})([A-Z]{3})(\d{2})FUT", r["symbol"].upper())
+                if m:
+                    try:
+                        dt = pd.Timestamp(f"20{m.group(3)}-{m.group(2)[:3].title()}-{m.group(1).zfill(2)}")
+                        diff = abs((dt - now).total_seconds())
+                        if diff < best_diff:
+                            best_diff, best_row = diff, r
+                    except Exception:
+                        continue
+            row = best_row if best_row is not None else fut.iloc[0]
         else:
-            fut = matches[matches["symbol"].str.upper().str.contains(
-                "FUT", na=False) | matches["symbol"].str.upper().str.startswith(sym_upper)]
-            row = fut.iloc[0] if not fut.empty else matches.iloc[0]
+            row = matches.iloc[0]
         return exchange, str(row["token"])
     exact_eq = matches[matches["symbol"].str.upper() == f"{sym_upper}-EQ"]
     if exact_eq.empty:
