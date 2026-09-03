@@ -5,12 +5,11 @@ A separate, standalone backtest that enters on PURE zone touches.
 
 UPGRADED FEATURES (v2):
   1. LOCALIZED DEMAND-ZONE FILTER: Supply zones remain RAW (proven 50%
-     win rate). Demand zones get a lightweight volume/momentum confirmation
-     to eliminate false bounces (the 16.7% win-rate weakness). NOT the
-     full V6.6 1.8x delta-spike gate — just: bullish 1m bar OR volume
-     surge >= 1.2x at the touch.
+     win rate). Demand zones require BOTH positive volume delta (net
+     buying pressure) AND volume surge >= 1.3x avg to eliminate false
+     bounces. NOT the V6.6 1.8x delta-spike gate — a targeted check.
   2. DYNAMIC LOT-SIZING: Position size scales with real-time account
-     balance. Risk per trade = min(current_equity * risk_pct, ₹2,000 hard
+     balance. Risk per trade = min(current_equity * 1.0%, ₹2,000 hard
      stop). Anti-martingale: sizes grow as account grows, shrink on losses.
   3. MULTI-ASSET: NSE index/stock options + MCX commodity options with
      correct session timing (MCX 09:00-11:30 & 17:00-23:00).
@@ -93,13 +92,16 @@ ANGEL_EXCHANGE = {
 # --- Upgraded engine constants ------------------------------------------
 # Dynamic lot-sizing: risk this fraction of current equity per trade,
 # capped at the ₹2,000 hard stop. Anti-martingale (sizes scale with P&L).
-RISK_PCT_PER_TRADE = 1.5  # 1.5% of current account balance
+# At ₹150K equity → 1.0% = ₹1,500 risk (below cap, so sizing scales).
+RISK_PCT_PER_TRADE = 1.0  # 1.0% of current account balance
 
 # Demand-zone localized filter thresholds (supply zones stay RAW).
-# A demand touch is confirmed if EITHER:
-#   (a) the 1m touch bar is bullish (close > open) — momentum up, OR
-#   (b) the 1m touch bar volume >= 1.2x the 5-bar average — volume surge.
-DEMAND_VOL_SURGE_MULT = 1.2
+# A demand touch is confirmed ONLY if BOTH:
+#   (a) volume_delta > 0 (net BUYING pressure on the touch bar), AND
+#   (b) volume >= 1.3x the 5-bar average (institutional volume surge).
+# This is stricter than v1 (which passed on bullish-bar alone — nearly
+# always true for demand bounces). Now rejects low-volume false bounces.
+DEMAND_VOL_SURGE_MULT = 1.3
 DEMAND_VOL_LOOKBACK = 5
 
 
@@ -109,34 +111,36 @@ def demand_zone_confirmed(df_1m, i_1m) -> tuple[bool, str]:
 
     Checks whether the 1m bar touching a demand zone shows institutional
     buying pressure. This is NOT the V6.6 1.8x delta-spike gate — it's a
-    lighter check to reject obvious false bounces (dead-cat bounces on
-    zero-volume touches).
+    targeted check to reject false bounces (dead-cat bounces on
+    zero-volume or sell-pressure touches).
 
-    Pass condition (either):
-      - Momentum: close > open on the touch bar (bullish body), OR
-      - Volume surge: bar volume >= 1.2x the average of the last 5 bars.
+    Pass condition (BOTH required):
+      - Direction: volume_delta > 0 (net buying pressure on the bar), AND
+      - Volume surge: bar volume >= 1.3x the average of the last 5 bars.
 
     Returns (confirmed, reason).
     """
     if i_1m < DEMAND_VOL_LOOKBACK + 1:
         return (True, "insufficient-bars (pass)")
     bar = df_1m.iloc[i_1m]
-    close, opn = float(bar["close"]), float(bar["open"])
     vol = float(bar.get("volume", 0) or 0)
 
-    # (a) Momentum: bullish 1m bar
-    if close > opn:
-        return (True, "bullish-momentum")
+    # (a) Direction: net buying pressure required
+    vdelta = volume_delta(bar)
+    if vdelta <= 0:
+        return (False, "sell-pressure (no buy delta)")
 
-    # (b) Volume surge: current vol >= 1.2x recent average
+    # (b) Volume surge: current vol >= 1.3x recent average
     if vol > 0:
         recent_vols = [float(df_1m.iloc[j].get("volume", 0) or 0)
                        for j in range(i_1m - DEMAND_VOL_LOOKBACK, i_1m)]
         avg_vol = sum(recent_vols) / len(recent_vols) if recent_vols else 0.0
         if avg_vol > 0 and vol >= avg_vol * DEMAND_VOL_SURGE_MULT:
-            return (True, f"vol-surge {vol / avg_vol:.1f}x")
+            return (True, f"buy-delta + vol-surge {vol / avg_vol:.1f}x")
+        return (False, f"buy-delta but no vol-surge ({vol / max(avg_vol,1):.1f}x)")
 
-    return (False, "no-buy-confirmation")
+    # Volume unavailable (e.g. index spot) — accept on buy-delta alone
+    return (True, "buy-delta (no-volume source)")
 
 
 def size_dynamic(entry_premium, stop_premium, lot_sz, current_capital,
@@ -685,7 +689,7 @@ def main():
     print("#  TIGER BRAIN V6.6 — RAW S/D MULTI-ASSET ENGINE (Variant B, v2)")
     print("#  Upgraded: demand-zone filter + dynamic lot-sizing + MCX commodities")
     print("#  Supply zones: RAW touch. Demand zones: vol/momentum confirmed.")
-    print("#  Lot sizing: 1.5% of real-time equity, capped at ₹2,000 stop.")
+    print("#  Lot sizing: 1.0% of real-time equity, capped at ₹2,000 stop.")
     print("#  Data: Angel One SmartAPI (real OHLCV, IST-native, real volume)")
     print("#" * 72)
 
