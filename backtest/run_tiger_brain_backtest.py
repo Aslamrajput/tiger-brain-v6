@@ -307,10 +307,25 @@ def get_vix_for_date(date) -> float:
             _vix_cache = pd.DataFrame()
     if _vix_cache is None or _vix_cache.empty:
         return VIX_FALLBACK
+    # Find the close column (could be 'close', 'Close', or last numeric column)
+    close_col = None
+    for col in ["close", "Close", "CLOSE"]:
+        if col in _vix_cache.columns:
+            close_col = col
+            break
+    if close_col is None:
+        # Fallback: use last numeric column
+        numeric_cols = _vix_cache.select_dtypes(include="number").columns
+        if len(numeric_cols) == 0:
+            return VIX_FALLBACK
+        close_col = numeric_cols[-1]
     target_date = date if not hasattr(date, 'date') else date.date() if date.tz is None else date.tz_convert("Asia/Kolkata").date()
-    mask = _vix_cache.index.date == target_date
-    if mask.any():
-        return float(_vix_cache.loc[mask].iloc[-1]["close"])
+    try:
+        mask = _vix_cache.index.date == target_date
+        if mask.any():
+            return float(_vix_cache.loc[mask].iloc[-1][close_col])
+    except Exception:
+        pass
     return VIX_FALLBACK
 
 
