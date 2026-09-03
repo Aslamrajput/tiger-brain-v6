@@ -157,3 +157,64 @@ ENTRY_WINDOWS = [
 
 # Hard square-off time — Brain 5 MUST exit everything here
 SQUARE_OFF_TIME = "15:15"
+
+# ============================================================
+# INDIAN MARKET STRUCTURAL TIMING (NSE vs MCX)
+# ============================================================
+# NSE (equity F&O — index + stocks): 09:15-15:30 IST, square-off 15:15
+NSE_ENTRY_WINDOWS = [
+    ("09:15", "11:00"),   # Morning momentum
+    ("13:30", "15:15"),   # Afternoon momentum
+]
+NSE_SQUARE_OFF = "15:15"
+
+# MCX (commodities — CRUDE/GOLD/NATGAS): 09:00-23:30 IST, square-off 23:15.
+# MCX has a morning session (09:00-11:30) and a long evening session
+# (17:00-23:30). We allow entries across the MCX day, square-off at 23:15.
+MCX_ENTRY_WINDOWS = [
+    ("09:00", "11:30"),   # MCX morning session
+    ("17:00", "23:00"),   # MCX evening session (high liquidity for intl commodities)
+]
+MCX_SQUARE_OFF = "23:15"
+
+
+def entry_windows_for(segment: str) -> list:
+    """Return the entry windows for a segment ('index'|'stock'|'commodity')."""
+    if segment == "commodity":
+        return MCX_ENTRY_WINDOWS
+    return NSE_ENTRY_WINDOWS
+
+
+def square_off_for(segment: str) -> str:
+    """Return the hard square-off time (HH:MM) for a segment."""
+    if segment == "commodity":
+        return MCX_SQUARE_OFF
+    return NSE_SQUARE_OFF
+
+
+# ============================================================
+# LIQUIDITY TIERS (Brain 3 spread safety)
+# ============================================================
+# Tier 1 = most liquid (index, mega-cap) → tightest spreads.
+# Used to model a realistic bid-ask spread % per contract so the 0.5%
+# spread gate disqualifies illiquid contracts while letting liquid ones
+# through. Real NSE ATM index option spreads ~0.3-0.5%; large-cap stocks
+# ~0.4-0.8%; mid-caps ~0.8-1.5%; MCX commodities ~0.6-1.2%.
+LIQUIDITY_TIER = {
+    "NIFTY": 1, "BANKNIFTY": 1,
+    "RELIANCE": 1, "HDFCBANK": 1, "ICICIBANK": 1, "SBIN": 1, "TCS": 1,
+    "INFY": 1, "AXISBANK": 1, "KOTAKBANK": 1, "BAJFINANCE": 1, "LT": 1,
+    "BHARTIARTL": 2, "ITC": 2, "TATASTEEL": 2, "HINDALCO": 2, "WIPRO": 2,
+    "MARUTI": 2, "SUNPHARMA": 2, "TITAN": 2, "ADANIENT": 2, "GRASIM": 2,
+    "HCLTECH": 2, "TECHM": 2, "ASIANPAINT": 2, "ULTRACEMCO": 2,
+    "POWERGRID": 3, "NTPC": 3, "ONGC": 3, "COALINDIA": 3, "DIVISLAB": 3,
+    "CIPLA": 3, "DRREDDY": 3, "BAJAJFINSV": 3, "NESTLEIND": 3, "BRITANNIA": 3,
+    "TATACONSUM": 3,
+    # MCX commodities — separate session, different spread regime
+    "CRUDEOIL": 2, "GOLD": 2, "NATURALGAS": 3,
+}
+
+
+def liquidity_tier(symbol: str) -> int:
+    """Return 1 (most liquid), 2, or 3 (least liquid)."""
+    return LIQUIDITY_TIER.get(symbol, 3)

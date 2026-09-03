@@ -142,16 +142,80 @@ def detect_zones(df: pd.DataFrame, i: int, lookback: int = 40,
 
 
 # ============================================================
-# Setup detection — zone touch
+# Setup detection — zone touch + reversal confirmation
 # ============================================================
-def scan_zones(df: pd.DataFrame, i: int, lookback: int = 40) -> list[dict]:
-    """
-    Scan for zone-touch setups at bar i (no lookahead).
+def _rejection_wick(bar) -> tuple[float, str]:
+    """Return (wick_ratio, side) — institutional rejection wick size + side."""
+    o, c, h, l = (float(bar["open"]), float(bar["close"]),
+                  float(bar["high"]), float(bar["low"]))
+    rng = h - l
+    if rng <= 0:
+        return (0.0, "none")
+    body = abs(c - o)
+    upper_wick = h - max(o, c)
+    lower_wick = min(o, c) - l
+    if lower_wick > upper_wick and lower_wick > body * 0.8:
+        return (lower_wick / rng, "lower")
+    if upper_wick > lower_wick and upper_wick > body * 0.8:
+        return (upper_wick / rng, "upper")
+    return (max(upper_wick, lower_wick) / rng, "none")
 
-    Returns list of setups:
-      - Demand touch: price low <= zone top, close > zone bottom => BUY Call
-      - Supply touch: price high >= zone bottom, close < zone top => BUY Put
-    Each setup: {direction, setup_score, entry_price, stop_loss, zone}
+
+def confirm_zone_reversal(df, i, zone_type) -> tuple[bool, str]:
+    """
+    5-min equivalent reversal confirmation on the 15m bar AFTER a zone touch.
+
+    A zone touch at bar i-1 must be CONFIRMED by bar i before entry:
+      - DEMAND (buy call): bar i closes bullish (close > open) AND shows a
+        lower rejection wick (institutions bought the dip), OR closes above
+        the touch bar's high (lower-timeframe structural break up).
+      - SUPPLY (buy put): bar i closes bearish (close < open) AND shows an
+        upper rejection wick (institutions sold the rip), OR closes below
+        the touch bar's low (structural break down).
+
+    Returns (confirmed, reason). Uses only bars i-1 and i (no lookahead).
+    """
+    if i < 2:
+        return (False, "insufficient bars")
+    cur = df.iloc[i]
+    prev = df.iloc[i - 1]
+    o, c, h, l = (float(cur["open"]), float(cur["close"]),
+                  float(cur["high"]), float(cur["low"]))
+    prev_h, prev_l = float(prev["high"]), float(prev["low"])
+    wick_ratio, wick_side = _rejection_wick(cur)
+
+    if zone_type == "demand":
+        bullish_close = c > o
+        rejection = wick_side == "lower" and wick_ratio >= 0.35
+        struct_break = c > prev_h  # broke above the touch bar's high
+        if bullish_close and (rejection or struct_break):
+            why = "lower-rejection" if rejection else "struct-break-up"
+            return (True, why)
+        return (False, f"no bullish confirm (close {c:.0f} vs open {o:.0f})")
+    # supply
+    bearish_close = c < o
+    rejection = wick_side == "upper" and wick_ratio >= 0.35
+    struct_break = c < prev_l  # broke below the touch bar's low
+    if bearish_close and (rejection or struct_break):
+        why = "upper-rejection" if rejection else "struct-break-down"
+        return (True, why)
+    return (False, f"no bearish confirm (close {c:.0f} vs open {o:.0f})")
+
+
+def scan_zones(df: pd.DataFrame, i: int, lookback: int = 40, require_confirm: bool = True) -> list[dict]:
+    """
+    Scan for CONFIRMED zone-touch setups at bar i (no lookahead).
+
+    Flow:
+      1. Detect zones using data up to bar i.
+      2. Check if the PREVIOUS bar (i-1) touched a zone.
+      3. If require_confirm: bar i must confirm the reversal (institutional
+         rejection wick or structural break) before a setup fires.
+      4. Entry triggers on bar i close only when confirmed.
+
+    This prevents operator fakeouts — no blind raw zone touches.
+
+    Returns list of confirmed setups with direction/score/entry/stop/zone.
     """
     if i < lookback:
         return []
@@ -159,45 +223,65 @@ def scan_zones(df: pd.DataFrame, i: int, lookback: int = 40) -> list[dict]:
     if not zones:
         return []
 
+    # The touch happens on the PREVIOUS bar (i-1); confirmation on bar i.
+    touch_bar = df.iloc[i - 1]
+    touch_high = float(touch_bar["high"])
+    touch_low = float(touch_bar["low"])
+    touch_close = float(touch_bar["close"])
     cur = df.iloc[i]
-    cur_high = float(cur["high"])
-    cur_low = float(cur["low"])
     cur_close = float(cur["close"])
     atr = _simple_range(df, i)
 
     setups = []
     for z in zones:
-        # DEMAND touch: price came down into the demand zone
-        if z["type"] == "demand" and cur_low <= z["top"] and cur_close >= z["bottom"]:
-            # bullish if close back above zone bottom
+        # Did the previous bar touch this zone?
+        demand_touched = (z["type"] == "demand" and touch_low <= z["top"]
+                          and touch_close >= z["bottom"])
+        supply_touched = (z["type"] == "supply" and touch_high >= z["bottom"]
+                          and touch_close <= z["top"])
+        if not (demand_touched or supply_touched):
+            continue
+
+        zone_type = z["type"]
+        if require_confirm:
+            confirmed, why = confirm_zone_reversal(df, i, zone_type)
+            if not confirmed:
+                continue
+        else:
+            why = "no-confirm-mode"
+
+        if zone_type == "demand":
             entry = cur_close
             stop = z["bottom"] - atr * 0.3
+            score = z["score"] + (5 if why.startswith(("lower", "upper")) else 3)
             setups.append({
                 "strategy": "Demand_Zone",
                 "direction": "BUY",
-                "setup_score": z["score"],
+                "setup_score": round(score, 1),
                 "entry_price": entry,
                 "stop_loss": stop,
                 "zone_type": "demand",
                 "zone_top": z["top"],
                 "zone_bottom": z["bottom"],
-                "note": f"demand touch low={cur_low:.1f} zone[{z['bottom']:.1f}-{z['top']:.1f}]",
+                "confirmation": why,
+                "note": f"demand touch@{i-1} + {why} zone[{z['bottom']:.1f}-{z['top']:.1f}]",
                 "setup_found": True,
             })
-        # SUPPLY touch: price came up into the supply zone
-        elif z["type"] == "supply" and cur_high >= z["bottom"] and cur_close <= z["top"]:
+        else:
             entry = cur_close
             stop = z["top"] + atr * 0.3
+            score = z["score"] + (5 if why.startswith(("lower", "upper")) else 3)
             setups.append({
                 "strategy": "Supply_Zone",
                 "direction": "SELL",
-                "setup_score": z["score"],
+                "setup_score": round(score, 1),
                 "entry_price": entry,
                 "stop_loss": stop,
                 "zone_type": "supply",
                 "zone_top": z["top"],
                 "zone_bottom": z["bottom"],
-                "note": f"supply touch high={cur_high:.1f} zone[{z['bottom']:.1f}-{z['top']:.1f}]",
+                "confirmation": why,
+                "note": f"supply touch@{i-1} + {why} zone[{z['bottom']:.1f}-{z['top']:.1f}]",
                 "setup_found": True,
             })
 

@@ -32,6 +32,7 @@ try:
     from universe.fno_universe import (
         UNIVERSE, lot_size, segment_of,
         ENTRY_WINDOWS, SQUARE_OFF_TIME,
+        entry_windows_for, square_off_for, liquidity_tier,
     )
     from risk.risk_management import TradeCounterGuard
 except ImportError:
@@ -72,35 +73,72 @@ def realized_vol_simple(df, window=20, bars_per_day=25):
 
 
 # ============================================================
-# Brain 1 — intraday time-window + basic momentum filter
+# Brain 3 — Liquidity & spread safety layer
 # ============================================================
-def _in_entry_window(ts) -> bool:
+# Maximum acceptable bid-ask spread as % of premium (0.5% per user spec).
+MAX_SPREAD_PCT = 0.5
+# Base spread % by liquidity tier (modelled, not from a live chain).
+# Tier 1 (index/mega-cap) ~0.35%, Tier 2 ~0.55%, Tier 3 ~0.85%.
+# Plus a small premium-dependent widening for very cheap options.
+_TIER_BASE_SPREAD = {1: 0.35, 2: 0.55, 3: 0.85}
+
+
+def model_spread_pct(symbol: str, premium: float) -> float:
+    """
+    Model a realistic bid-ask spread (%) for an ATM contract.
+    Spread widens for illiquid tiers and for very cheap premiums (where
+    the fixed tick size dominates). No live chain → model from tier.
+    """
+    tier = liquidity_tier(symbol)
+    base = _TIER_BASE_SPREAD.get(tier, 0.85)
+    # Cheap options (< ₹10) suffer larger relative spreads due to tick size.
+    if premium < 10:
+        base += (10 - premium) * 0.05
+    return base
+
+
+def spread_ok(symbol: str, premium: float, max_pct: float = MAX_SPREAD_PCT) -> tuple[bool, float]:
+    """
+    Brain 3 spread gate. Returns (passes, spread_pct).
+    Disqualifies the contract if spread exceeds max_pct (default 0.5%).
+    """
+    sp = model_spread_pct(symbol, premium)
+    return (sp <= max_pct, sp)
+
+
+# ============================================================
+# Brain 1 — intraday time-window (segment-aware: NSE vs MCX)
+# ============================================================
+def _to_ist(ts):
     if ts.tz is None:
-        ts = ts.tz_localize("Asia/Kolkata")
-    elif str(ts.tz) != "Asia/Kolkata":
-        ts = ts.tz_convert("Asia/Kolkata")
+        return ts.tz_localize("Asia/Kolkata")
+    if str(ts.tz) != "Asia/Kolkata":
+        return ts.tz_convert("Asia/Kolkata")
+    return ts
+
+
+def _in_entry_window(ts, segment: str = "stock") -> bool:
+    """Segment-aware entry window: NSE uses 09:15-11:00 & 13:30-15:15;
+    MCX commodities use 09:00-11:30 & 17:00-23:00."""
+    ts = _to_ist(ts)
     t = ts.time()
-    for start, end in ENTRY_WINDOWS:
-        sh, sm = map(int, start.split(":"))
-        eh, em = map(int, end.split(":"))
+    for start, end in entry_windows_for(segment):
         if t >= pd.Timestamp(f"2000-01-01 {start}").time() and t <= pd.Timestamp(f"2000-01-01 {end}").time():
             return True
     return False
 
 
-def _is_square_off_bar(ts) -> bool:
-    if ts.tz is None:
-        ts = ts.tz_localize("Asia/Kolkata")
-    elif str(ts.tz) != "Asia/Kolkata":
-        ts = ts.tz_convert("Asia/Kolkata")
-    sh, sm = map(int, SQUARE_OFF_TIME.split(":"))
-    return ts.time() == pd.Timestamp(f"2000-01-01 {SQUARE_OFF_TIME}").time()
+def _is_square_off_bar(ts, segment: str = "stock") -> bool:
+    """Segment-aware square-off: NSE 15:15, MCX 23:15."""
+    ts = _to_ist(ts)
+    sq = square_off_for(segment)
+    return ts.time() == pd.Timestamp(f"2000-01-01 {sq}").time()
 
 
-def brain1_intraday_pass(df, i) -> dict:
-    """Brain 1 gate: must be in entry window, bar must have a body (not doji noise)."""
+def brain1_intraday_pass(df, i, segment: str = "stock") -> dict:
+    """Brain 1 gate: must be in segment entry window, bar must have a body."""
     ts = df.index[i]
-    if not _in_entry_window(ts):
+    if not _in_entry_window(ts, segment):
         return {"passed_brain1": False, "reason": "outside entry window"}
     if i < 2:
         return {"passed_brain1": False, "reason": "insufficient bars"}
@@ -187,9 +225,9 @@ def run_intraday_backtest(
         for ts in day_ts:
             # --- 1. EXIT open positions (Brain 5) ---
             still_open = []
-            sq_off = _is_square_off_bar(ts)
             for pos in open_positions:
                 sym = pos["symbol"]
+                seg = pos["segment"]
                 df_sym = data_map[sym]
                 if ts not in df_sym.index:
                     still_open.append(pos)
@@ -199,6 +237,7 @@ def run_intraday_backtest(
                 iv = max(min(realized_vol_simple(df_so_far), 0.80), 0.12)
                 is_call = pos["option_type"] == "CE"
                 cur_prem = atm_premium(cur_underlying, pos["strike"], pos["dte"], is_call, iv)
+                sq_off = _is_square_off_bar(ts, seg)
 
                 ex = check_intraday_exit(pos, cur_underlying, cur_prem, sq_off)
                 if ex["exit"]:
@@ -220,11 +259,10 @@ def run_intraday_backtest(
                     still_open.append(pos)
             open_positions = still_open
 
-            # --- 2. No entries on the square-off bar ---
-            if sq_off:
-                continue
-
-            # --- 3. SCAN ZONES + ENTER (Brains 1,2,3,4) ---
+            # --- 2. SCAN ZONES + ENTER (Brains 1,2,3,4) ---
+            # Square-off is segment-aware (NSE 15:15, MCX 23:15); checked
+            # per-candidate below since a single timestamp may be square-off
+            # for one segment but not another.
             day_candidates = []
             for sym, df_sym in data_map.items():
                 if ts not in df_sym.index:
@@ -232,17 +270,22 @@ def run_intraday_backtest(
                 idx = df_sym.index.get_loc(ts)
                 if idx < 40:
                     continue
-                b1 = brain1_intraday_pass(df_sym, idx)
+                seg = segment_of(sym)
+                # Brain 1: segment-aware entry window (NSE vs MCX)
+                b1 = brain1_intraday_pass(df_sym, idx, segment=seg)
                 if not b1["passed_brain1"]:
                     continue
-                # Brain 2: pure Supply/Demand zone touch
-                setups = scan_zones(df_sym, idx, lookback=40)
+                # Skip if this is a square-off bar for the symbol's segment
+                if _is_square_off_bar(ts, seg):
+                    continue
+                # Brain 2: CONFIRMED Supply/Demand zone touch (rejection filter)
+                setups = scan_zones(df_sym, idx, lookback=40, require_confirm=True)
                 if not setups:
                     continue
                 best = max(setups, key=lambda s: s["setup_score"])
                 day_candidates.append({
                     "symbol": sym, "setup": best, "df_sym": df_sym,
-                    "idx": idx, "ts": ts, "seg": segment_of(sym),
+                    "idx": idx, "ts": ts, "seg": seg,
                 })
 
             day_candidates.sort(key=lambda c: c["setup"]["setup_score"], reverse=True)
@@ -266,6 +309,16 @@ def run_intraday_backtest(
                 strike = round(cur_underlying)
                 entry_prem = atm_premium(cur_underlying, strike, dte_default, is_call, iv)
                 entry_prem = max(entry_prem, 1.0)
+
+                # Brain 3: LIQUIDITY & SPREAD SAFETY LAYER
+                # Disqualify the ATM contract if bid-ask spread > 0.5%.
+                ok_spread, spread_pct = spread_ok(sym, entry_prem)
+                if not ok_spread:
+                    if verbose:
+                        logger.warning(
+                            f"REJECT {sym} spread {spread_pct:.2f}% > 0.5% (illiquid)"
+                        )
+                    continue
 
                 # Option stop = 30% of entry premium (intraday scalp stop)
                 stop_prem = max(entry_prem * 0.70, 0.5)
@@ -304,6 +357,8 @@ def run_intraday_backtest(
                     "entry_ts": ts, "entry_idx": idx,
                     "zone_type": setup["zone_type"],
                     "zone_edge": zone_edge,
+                    "confirmation": setup.get("confirmation", "n/a"),
+                    "entry_spread_pct": round(spread_pct, 2),
                     "dte": dte_default,
                 }
                 open_positions.append(pos)
@@ -421,10 +476,13 @@ def _compute_metrics(trades, equity_curve, start_capital, max_dd, daily_seg_coun
 def print_report(result: dict) -> None:
     t = result["totals"]
     print("=" * 72)
-    print("  TIGER BRAIN V6.3 — PURE SUPPLY/DEMAND INTRADAY BACKTEST")
+    print("  TIGER BRAIN V6.4 — PURE S/D + NSE/MCX INSTITUTIONAL SHIELD")
     print("=" * 72)
     print("  Mode:  PURE INTRADAY (15-min) | Supply/Demand ZONES ONLY")
     print("        NO VWAP, NO RS, NO EMA, NO Black-Scholes")
+    print("  Shield: ① Zone confirmation (rejection wick/struct break)")
+    print("          ② NSE 15:15 / MCX 23:15 square-off")
+    print("          ③ Spread gate ≤0.5% (liquidity safety)")
     print(f"  Starting Capital:   ₹{t['start_capital']:>12,.0f}")
     print(f"  Final Equity:        ₹{t['final_equity']:>12,.0f}")
     print(f"  Total Return:        {t['total_return_pct']:>12.2f}%")
@@ -474,6 +532,18 @@ def print_report(result: dict) -> None:
     for sname, sv in sorted(result["strategy_stats"].items(), key=lambda x: -x[1]["pnl"]):
         wr = (sv["wins"] / sv["trades"] * 100) if sv["trades"] else 0
         print(f"  {sname:<14s} {sv['trades']:>7d} {wr:>6.1f}% ₹{sv['pnl']:>9,.0f}")
+    print("-" * 72)
+    print("  BRAIN 2 — ZONE CONFIRMATION BREAKDOWN (rejection filter)")
+    print("-" * 72)
+    conf = Counter(t.get("confirmation", "n/a") for t in result["trades"])
+    for c, cnt in conf.most_common():
+        print(f"  {c:<24s} {cnt:>5d} trades")
+    print("-" * 72)
+    print("  BRAIN 3 — SPREAD GATE (avg entry spread %)")
+    print("-" * 72)
+    spreads = [t.get("entry_spread_pct", 0) for t in result["trades"]]
+    avg_sp = sum(spreads) / len(spreads) if spreads else 0
+    print(f"  Avg entry spread:    {avg_sp:>12.2f}%  (gate: ≤0.5%)")
     print("-" * 72)
     print("  EXIT REASON BREAKDOWN (Brain 5)")
     print("-" * 72)
