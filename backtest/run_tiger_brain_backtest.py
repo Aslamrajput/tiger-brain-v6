@@ -104,12 +104,12 @@ RISK_FREE_RATE = 0.07
 PREMIUM_MAX_PCT_OF_UNDERLYING = 2.0
 PREMIUM_MIN = 3.0
 TREND_LOOKBACK = 10
-VOL_SURGE_MULT = 1.3        # 1.3x volume (down from 1.8x — catches more)
+VOL_SURGE_MULT = 1.5        # 1.5x volume (balanced — not too strict, not too loose)
 VOL_LOOKBACK = 5
-MAX_ENTRIES_PER_DAY = 4     # top 4 entries by score per day
+MAX_ENTRIES_PER_DAY = 2     # top 2 entries by score per day (sniper quality)
 
 # Score thresholds
-MIN_SCORE_TO_ENTER = 58     # base zone score is ~55, so any bonus qualifies
+MIN_SCORE_TO_ENTER = 68     # need 2-3 confluence bonuses to qualify (was 58 — too noisy)
 EXPLOSIVE_BONUS = 10
 SWEEP_BONUS = 8
 DELTA_SPIKE_BONUS = 5
@@ -612,7 +612,8 @@ def compute_structural_stop(entry_premium, zone, zone_type, cur_underlying,
     stop_underlying = zone["bottom"] if zone_type == "demand" else zone["top"]
     stop_prem = bs_premium_at(stop_underlying, strike, dte, is_call, iv)
     stop_prem = max(stop_prem, 0.5)
-    stop_prem = min(stop_prem, entry_premium * 0.85)
+    # Tighter cap: 60% of entry (was 85% — too wide, caused 28% drawdown)
+    stop_prem = min(stop_prem, entry_premium * 0.60)
     return max(stop_prem, 0.5)
 
 def size_dynamic(entry_premium, stop_premium, lot_sz, current_capital,
