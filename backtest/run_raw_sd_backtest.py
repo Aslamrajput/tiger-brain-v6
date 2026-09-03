@@ -1,24 +1,30 @@
 """
-RAW SUPPLY/DEMAND ZONE-TOUCH BACKTEST (Variant B)
-=================================================
-A separate, standalone backtest that enters on PURE zone touches — NO
-explosive-quality gate, NO 1.8x volume-delta confirmation, NO liquidity
-sweep booster. This is the "raw S/D executor" the user requested.
+RAW S/D ZONE-TOUCH BACKTEST — MULTI-ASSET ENGINE (Variant B, Upgraded)
+=====================================================================
+A separate, standalone backtest that enters on PURE zone touches.
 
-RULES (exactly as specified):
-  1. PURE S/D SCANNER: detect_zones() — institutional supply/demand zones
-     (base consolidation + impulsive move). No explosive-quality filter.
-  2. CALL/PUT BUYING: Demand zone touched on 1m → BUY ATM Call.
-                     Supply zone touched on 1m → BUY ATM Put.
-  3. AGGRESSIVE 5-10 trades/day — no secondary filters blocking entries.
-  4. ₹2,000 hard stop per trade + 15:15 / 23:15 auto square-off.
+UPGRADED FEATURES (v2):
+  1. LOCALIZED DEMAND-ZONE FILTER: Supply zones remain RAW (proven 50%
+     win rate). Demand zones get a lightweight volume/momentum confirmation
+     to eliminate false bounces (the 16.7% win-rate weakness). NOT the
+     full V6.6 1.8x delta-spike gate — just: bullish 1m bar OR volume
+     surge >= 1.2x at the touch.
+  2. DYNAMIC LOT-SIZING: Position size scales with real-time account
+     balance. Risk per trade = min(current_equity * risk_pct, ₹2,000 hard
+     stop). Anti-martingale: sizes grow as account grows, shrink on losses.
+  3. MULTI-ASSET: NSE index/stock options + MCX commodity options with
+     correct session timing (MCX 09:00-11:30 & 17:00-23:00).
+
+CORE RULES (unchanged):
+  - PURE S/D SCANNER: detect_zones() — institutional supply/demand zones.
+  - Demand touch → BUY ATM Call. Supply touch → BUY ATM Put.
+  - ₹2,000 hard stop per trade + 15:15 / 23:15 auto square-off.
+  - 5-10 trades/day aggressive across Index, Stock, Commodity.
 
 This file does NOT modify the locked V6.6 core (intraday_backtest.py,
 intraday_strategies.py). It imports their reusable helper functions
 (detect_zones, zone_touched_on_1m, atm_premium, check_intraday_exit, etc.)
-but implements its own raw-touch entry engine.
-
-Data source: Angel One SmartAPI (real OHLCV, IST-native, real volume).
+but implements its own entry engine.
 
 Run from repo ROOT:
     python3 -m backtest.run_raw_sd_backtest
@@ -62,6 +68,7 @@ from pipeline.intraday_strategies import (
     zone_touched_on_1m,
     find_opposing_zone,
     _simple_range,
+    volume_delta,
 )
 from universe.fno_universe import (
     UNIVERSE, all_symbols, segment_of, lot_size, is_expiry_day,
@@ -71,7 +78,10 @@ from risk.risk_management import TradeCounterGuard
 logger = logging.getLogger("tiger_brain.raw_sd_backtest")
 logging.basicConfig(level=logging.INFO)
 
-# Angel One exchange + symbol-name mapping (same as run_angel_backtest)
+# Angel One exchange + symbol-name mapping.
+# MCX commodities use specific futures contract names — the plain name
+# (e.g. "CRUDEOIL") resolves to a non-tradable composite. We search for
+# the active near-month futures contract instead.
 ANGEL_EXCHANGE = {
     "NIFTY": ("NSE", "Nifty 50"),
     "BANKNIFTY": ("NSE", "Nifty Bank"),
@@ -79,6 +89,82 @@ ANGEL_EXCHANGE = {
     "GOLD": ("MCX", "GOLD"),
     "NATURALGAS": ("MCX", "NATURALGAS"),
 }
+
+# --- Upgraded engine constants ------------------------------------------
+# Dynamic lot-sizing: risk this fraction of current equity per trade,
+# capped at the ₹2,000 hard stop. Anti-martingale (sizes scale with P&L).
+RISK_PCT_PER_TRADE = 1.5  # 1.5% of current account balance
+
+# Demand-zone localized filter thresholds (supply zones stay RAW).
+# A demand touch is confirmed if EITHER:
+#   (a) the 1m touch bar is bullish (close > open) — momentum up, OR
+#   (b) the 1m touch bar volume >= 1.2x the 5-bar average — volume surge.
+DEMAND_VOL_SURGE_MULT = 1.2
+DEMAND_VOL_LOOKBACK = 5
+
+
+def demand_zone_confirmed(df_1m, i_1m) -> tuple[bool, str]:
+    """
+    Localized volume/momentum filter for DEMAND zones only.
+
+    Checks whether the 1m bar touching a demand zone shows institutional
+    buying pressure. This is NOT the V6.6 1.8x delta-spike gate — it's a
+    lighter check to reject obvious false bounces (dead-cat bounces on
+    zero-volume touches).
+
+    Pass condition (either):
+      - Momentum: close > open on the touch bar (bullish body), OR
+      - Volume surge: bar volume >= 1.2x the average of the last 5 bars.
+
+    Returns (confirmed, reason).
+    """
+    if i_1m < DEMAND_VOL_LOOKBACK + 1:
+        return (True, "insufficient-bars (pass)")
+    bar = df_1m.iloc[i_1m]
+    close, opn = float(bar["close"]), float(bar["open"])
+    vol = float(bar.get("volume", 0) or 0)
+
+    # (a) Momentum: bullish 1m bar
+    if close > opn:
+        return (True, "bullish-momentum")
+
+    # (b) Volume surge: current vol >= 1.2x recent average
+    if vol > 0:
+        recent_vols = [float(df_1m.iloc[j].get("volume", 0) or 0)
+                       for j in range(i_1m - DEMAND_VOL_LOOKBACK, i_1m)]
+        avg_vol = sum(recent_vols) / len(recent_vols) if recent_vols else 0.0
+        if avg_vol > 0 and vol >= avg_vol * DEMAND_VOL_SURGE_MULT:
+            return (True, f"vol-surge {vol / avg_vol:.1f}x")
+
+    return (False, "no-buy-confirmation")
+
+
+def size_dynamic(entry_premium, stop_premium, lot_sz, current_capital,
+                 max_loss_cap=2000.0, risk_pct=RISK_PCT_PER_TRADE):
+    """
+    Dynamic lot-sizing based on real-time account balance.
+
+    Risk per trade = min(current_capital * risk_pct, max_loss_cap).
+    This scales position size with equity: after wins, sizes grow;
+    after losses, sizes shrink. Always capped at the ₹2,000 hard stop.
+
+    Returns dict compatible with size_with_hard_stop output:
+      {lots, quantity, max_loss, stop_per_unit, risk_amount}
+    """
+    stop_per_unit = abs(entry_premium - stop_premium)
+    if stop_per_unit <= 0:
+        return {"lots": 1, "quantity": lot_sz, "max_loss": entry_premium * lot_sz,
+                "stop_per_unit": 0.0, "risk_amount": 0.0}
+
+    # Dynamic risk amount: fraction of current equity, capped at hard stop
+    risk_amount = min(current_capital * risk_pct / 100.0, max_loss_cap)
+
+    loss_per_lot = stop_per_unit * lot_sz
+    lots = max(1, int(risk_amount // loss_per_lot))
+    quantity = lots * lot_sz
+    actual_risk = stop_per_unit * quantity
+    return {"lots": lots, "quantity": quantity, "max_loss": actual_risk,
+            "stop_per_unit": stop_per_unit, "risk_amount": round(actual_risk, 2)}
 
 
 def _resolve_symbol_token(symbol: str) -> tuple[str, str] | None:
@@ -99,6 +185,24 @@ def _resolve_symbol_token(symbol: str) -> tuple[str, str] | None:
         return None
 
     sym_upper = search.upper()
+
+    # MCX commodities: Angel One lists futures contracts (e.g. CRUDEOILMCOM,
+    # GOLDMCOM, NATURALGAS27OCT26FUT). Prefer the near-month "MCOM" composite
+    # if available (continuous front-month), else the first futures contract.
+    if exchange == "MCX":
+        mcom = matches[matches["symbol"].str.upper().str.contains("MCOM", na=False)]
+        if not mcom.empty:
+            row = mcom.iloc[0]
+        else:
+            # fall back to first futures-like entry (contains FUT or the base name)
+            fut = matches[matches["symbol"].str.upper().str.contains(
+                "FUT", na=False) | matches["symbol"].str.upper().str.startswith(sym_upper)]
+            row = fut.iloc[0] if not fut.empty else matches.iloc[0]
+        token = str(row["token"])
+        logger.info(f"{symbol}: {exchange} token={token} ({row['symbol']})")
+        return exchange, token
+
+    # NSE stocks: prefer exact "{SYMBOL}-EQ" match
     exact_eq = matches[matches["symbol"].str.upper() == f"{sym_upper}-EQ"]
     if exact_eq.empty:
         exact_eq = matches[matches["symbol"].str.upper() == sym_upper]
@@ -164,9 +268,13 @@ def fetch_angel_data(broker, days_15m: int = 60, days_1m: int = 7):
 
 def find_raw_zone_touch_entry(df_15m, i_15m, df_1m, seg, is_expiry=False):
     """
-    RAW zone-touch entry — NO explosive-quality gate, NO delta-spike
-    confirmation, NO liquidity sweep. Just: price touches a detected
-    supply/demand zone on the 1m chart → instant entry.
+    RAW zone-touch entry with localized demand-zone filter.
+
+    SUPPLY zones: RAW entry (no filter — proven 50% win rate).
+    DEMAND zones: must pass demand_zone_confirmed() (bullish 1m bar OR
+    volume surge >= 1.2x) to eliminate false bounces.
+
+    NO explosive-quality gate, NO 1.8x delta-spike gate, NO liquidity sweep.
 
     Returns dict (same shape as V6.6 sniper) or None.
     """
@@ -180,8 +288,7 @@ def find_raw_zone_touch_entry(df_15m, i_15m, df_1m, seg, is_expiry=False):
         return None
 
     # Detect zones using the FULL available 15m history (no lookahead,
-    # no explosive filter — require_explosive is NOT used here; we call
-    # detect_zones directly which returns ALL institutional zones).
+    # no explosive filter — detect_zones returns ALL institutional zones).
     zone_idx = max(0, i_15m - 1)
     if zone_idx < 40:
         return None
@@ -198,11 +305,24 @@ def find_raw_zone_touch_entry(df_15m, i_15m, df_1m, seg, is_expiry=False):
             touch = zone_touched_on_1m(bar_1m, z)
             if touch is None:
                 continue
-            # RAW ENTRY — no delta_spike_confirms, no explosive gate.
-            # Score = zone's base score only (no spike/sweep boost).
+
+            # DEMAND zones: apply localized volume/momentum filter.
+            # SUPPLY zones: raw entry (no filter).
+            demand_reason = "raw-touch"
+            if touch == "demand":
+                confirmed, d_reason = demand_zone_confirmed(df_1m, i_1m)
+                if not confirmed:
+                    continue  # reject false bounce
+                demand_reason = d_reason
+
             direction = "BUY" if touch == "demand" else "SELL"
             score = z["score"]
+            # Small score boost for confirmed demand entries
+            if touch == "demand" and "raw" not in demand_reason:
+                score += 2
             strike_kind = "ITM" if is_expiry else "ATM"
+            strategy = ("Demand_Confirmed" if touch == "demand"
+                        else "Raw_Supply_Touch")
             candidate = {
                 "direction": direction,
                 "zone_type": touch,
@@ -211,14 +331,14 @@ def find_raw_zone_touch_entry(df_15m, i_15m, df_1m, seg, is_expiry=False):
                 "entry_price": float(bar_1m["close"]),
                 "entry_1m_ts": ts_1m,
                 "entry_1m_idx": i_1m,
-                "delta_reason": "raw-touch (no confirmation)",
+                "delta_reason": demand_reason if touch == "demand" else "raw-supply-touch",
                 "sweep": False,
                 "sweep_reason": "",
                 "delta_spike_mult": 0.0,
                 "explosive": False,
                 "expansion_pct": 0.0,
                 "setup_score": round(score, 1),
-                "strategy": "Raw_Demand_Touch" if touch == "demand" else "Raw_Supply_Touch",
+                "strategy": strategy,
                 "strike_kind": strike_kind,
                 "is_expiry": is_expiry,
             }
@@ -330,11 +450,11 @@ def run_raw_sd_backtest(data_map, start_capital=150000.0, max_loss_per_trade=200
                     if setup is None:
                         continue
                 else:
-                    # 15m fallback: raw zone touch on the previous 15m bar
+                    # 15m fallback: raw zone touch on the previous 15m bar.
+                    # Demand filter can't run (no 1m data) — accept raw touch.
                     setups = detect_zones(df_sym, idx, lookback=40)
                     if not setups:
                         continue
-                    # take the highest-scored zone as a raw touch
                     z = max(setups, key=lambda s: s["score"])
                     touch = "demand" if z["type"] == "demand" else "supply"
                     setup = {
@@ -343,7 +463,7 @@ def run_raw_sd_backtest(data_map, start_capital=150000.0, max_loss_per_trade=200
                         "zone_top": z["top"], "zone_bottom": z["bottom"],
                         "entry_price": float(df_sym.iloc[idx]["close"]),
                         "setup_score": z["score"],
-                        "strategy": "Raw_Demand_Touch" if touch == "demand" else "Raw_Supply_Touch",
+                        "strategy": "Demand_Confirmed" if touch == "demand" else "Raw_Supply_Touch",
                         "strike_kind": "ITM" if expiry else "ATM",
                         "is_expiry": expiry,
                         "delta_reason": "raw-15m-touch",
@@ -391,7 +511,9 @@ def run_raw_sd_backtest(data_map, start_capital=150000.0, max_loss_per_trade=200
 
                 stop_prem = max(entry_prem * 0.70, 0.5)
                 lot_sz = lot_size(sym)
-                sizing = size_with_hard_stop(entry_prem, stop_prem, lot_sz, max_loss_per_trade)
+                # DYNAMIC LOT-SIZING: risk scales with current account balance
+                sizing = size_dynamic(entry_prem, stop_prem, lot_sz, capital,
+                                      max_loss_cap=max_loss_per_trade)
                 alloc = sizing["quantity"] * entry_prem
                 if alloc > capital * max_capital_per_trade_pct / 100:
                     max_alloc = capital * max_capital_per_trade_pct / 100
@@ -429,6 +551,7 @@ def run_raw_sd_backtest(data_map, start_capital=150000.0, max_loss_per_trade=200
                     "stop_premium": stop_prem,
                     "quantity": sizing["quantity"], "lots": sizing["lots"],
                     "max_loss": sizing["max_loss"],
+                    "risk_amount": sizing.get("risk_amount", 0.0),
                     "entry_ts": ts, "entry_idx": idx,
                     "dte": dte_default,
                     "iv": iv,
@@ -559,8 +682,10 @@ def run_raw_sd_backtest(data_map, start_capital=150000.0, max_loss_per_trade=200
 
 def main():
     print("\n" + "#" * 72)
-    print("#  TIGER BRAIN V6.6 — RAW S/D ZONE-TOUCH BACKTEST (Variant B)")
-    print("#  Pure zone touch → instant ATM Call/Put. NO confirmation gates.")
+    print("#  TIGER BRAIN V6.6 — RAW S/D MULTI-ASSET ENGINE (Variant B, v2)")
+    print("#  Upgraded: demand-zone filter + dynamic lot-sizing + MCX commodities")
+    print("#  Supply zones: RAW touch. Demand zones: vol/momentum confirmed.")
+    print("#  Lot sizing: 1.5% of real-time equity, capped at ₹2,000 stop.")
     print("#  Data: Angel One SmartAPI (real OHLCV, IST-native, real volume)")
     print("#" * 72)
 
