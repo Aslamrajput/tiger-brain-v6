@@ -155,9 +155,11 @@ PDH_PDL_TOLERANCE_PCT = 0.5
 ANGEL_EXCHANGE = {
     "NIFTY": ("NSE", "Nifty 50"),
     "BANKNIFTY": ("NSE", "Nifty Bank"),
+    "FINNIFTY": ("NSE", "Nifty Fin Service"),
     "CRUDEOIL": ("MCX", "CRUDEOIL"),
     "GOLD": ("MCX", "GOLD"),
     "NATURALGAS": ("MCX", "NATURALGAS"),
+    "SILVER": ("MCX", "SILVER"),
 }
 
 
@@ -823,7 +825,13 @@ def _resolve_symbol_token(symbol: str) -> tuple[str, str] | None:
     return exchange, str(row["token"])
 
 
-def fetch_angel_data(broker, days_15m=60, days_1m=60):
+def fetch_angel_data(broker, days_15m=365, days_1m=60):
+    """Fetch 15m (1 year) + 1m (max available) historical candles.
+
+    15m data covers 1 year for zone history (detect_zones scans full 15m).
+    1m data is capped at ~60 days by Angel One API — this is the execution
+    window only (zone touch + volume delta + exit engine).
+    """
     to_date = datetime.now().replace(hour=15, minute=30, second=0, microsecond=0)
     from_15m = to_date - timedelta(days=days_15m)
     from_1m = to_date - timedelta(days=days_1m)
@@ -1320,6 +1328,8 @@ def main():
                   f"{t.get('score_details','')}")
         print("-" * 72)
 
+    # Collect standalone segment results for parallel comparison
+    seg_results = {}
     for seg_key in ("index", "stock", "commodity"):
         seg_syms = list(UNIVERSE[seg_key]["symbols"].keys())
         seg_map = {s: data_map[s] for s in seg_syms if s in data_map}
@@ -1330,11 +1340,66 @@ def main():
         print("#" * 72)
         if not seg_map:
             print("  (no data)")
+            seg_results[seg_key] = None
             continue
         seg_res = run_tiger_brain_backtest(
             seg_map, start_capital=150000.0, max_loss_per_trade=2000.0,
             data_map_1m=seg_map_1m if seg_map_1m else None, broker=broker)
         print_report(seg_res)
+        seg_results[seg_key] = seg_res
+
+    # ============================================================
+    # PARALLEL SEGMENT COMPARISON TABLE
+    # Side-by-side: Index vs Stock vs Commodity (win%, P&L, DD)
+    # ============================================================
+    print("\n\n" + "=" * 80)
+    print("  🪖 PARALLEL MULTI-MARKET SEGMENT COMPARISON 🪖")
+    print("  (each segment backtested independently with ₹1.5L capital)")
+    print("=" * 80)
+    print(f"  {'Segment':40s} {'Trades':>7s} {'Win%':>7s} {'Net P&L':>10s} {'Return%':>8s} {'MaxDD%':>7s} {'PF':>5s}")
+    print("  " + "-" * 78)
+    best_seg = None
+    best_return = -999
+    for seg_key in ("index", "stock", "commodity"):
+        res = seg_results.get(seg_key)
+        label = UNIVERSE[seg_key]["label"]
+        if res is None or not res.get("trades"):
+            print(f"  {label:40s} {'—':>7s} {'—':>7s} {'—':>10s} {'—':>8s} {'—':>7s} {'—':>5s}")
+            continue
+        trades = len(res["trades"])
+        wins = sum(1 for t in res["trades"] if t["pnl"] > 0)
+        win_pct = wins / trades * 100 if trades else 0
+        net_pnl = res.get("net_pnl", sum(t["pnl"] for t in res["trades"]))
+        final_eq = res.get("final_equity", 150000 + net_pnl)
+        ret_pct = (final_eq - 150000) / 150000 * 100
+        max_dd = res.get("max_drawdown_pct", 0)
+        gross_win = sum(t["pnl"] for t in res["trades"] if t["pnl"] > 0)
+        gross_loss = abs(sum(t["pnl"] for t in res["trades"] if t["pnl"] < 0))
+        pf = gross_win / gross_loss if gross_loss > 0 else float('inf')
+        print(f"  {label:40s} {trades:>7d} {win_pct:>6.1f}% {net_pnl:>+9.0f} {ret_pct:>+7.1f}% {max_dd:>6.1f}% {pf:>5.2f}")
+        if ret_pct > best_return:
+            best_return = ret_pct
+            best_seg = label
+    print("  " + "-" * 78)
+    # Combined row
+    if combined.get("trades"):
+        ct = len(combined["trades"])
+        cw = sum(1 for t in combined["trades"] if t["pnl"] > 0)
+        cwp = cw / ct * 100 if ct else 0
+        cnp = combined.get("net_pnl", sum(t["pnl"] for t in combined["trades"]))
+        cfe = combined.get("final_equity", 150000 + cnp)
+        cr = (cfe - 150000) / 150000 * 100
+        cdd = combined.get("max_drawdown_pct", 0)
+        gw = sum(t["pnl"] for t in combined["trades"] if t["pnl"] > 0)
+        gl = abs(sum(t["pnl"] for t in combined["trades"] if t["pnl"] < 0))
+        cpf = gw / gl if gl > 0 else float('inf')
+        print(f"  {'★ COMBINED (all segments)':40s} {ct:>7d} {cwp:>6.1f}% {cnp:>+9.0f} {cr:>+7.1f}% {cdd:>6.1f}% {cpf:>5.2f}")
+    print("=" * 80)
+    if best_seg:
+        print(f"\n  🏆 BEST SEGMENT: {best_seg} (+{best_return:.1f}% return)")
+        print(f"  → Use this segment for production deployment.")
+    print("\n  💡 TIP: Run index + stock together for best diversification.")
+    print("     Commodity (MCX) adds non-correlated alpha (different session).")
 
     try:
         broker.logout()

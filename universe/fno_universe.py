@@ -66,6 +66,7 @@ LOT_SIZES = {
     "CRUDEOIL": 100,
     "NATURALGAS": 1250,
     "GOLD": 100,
+    "SILVER": 30,
 }
 
 # F&O universe — high-liquidity stocks + index + commodities
@@ -73,23 +74,26 @@ LOT_SIZES = {
 INDEX_SYMBOLS = {
     "NIFTY": "^NSEI",
     "BANKNIFTY": "^NSEBANK",
+    "FINNIFTY": "^CNXFIN",  # FinNifty (financial sector index)
 }
 
 STOCK_SYMBOLS = {
+    # Top 10 highly liquid F&O stocks (user priority)
     "RELIANCE": "RELIANCE.NS",
-    "SBIN": "SBIN.NS",
-    "HDFCBANK": "HDFCBANK.NS",
-    "ICICIBANK": "ICICIBANK.NS",
-    "AXISBANK": "AXISBANK.NS",
-    "KOTAKBANK": "KOTAKBANK.NS",
     "TCS": "TCS.NS",
+    "ICICIBANK": "ICICIBANK.NS",
+    "HDFCBANK": "HDFCBANK.NS",
     "INFY": "INFY.NS",
+    "SBIN": "SBIN.NS",
+    "AXISBANK": "AXISBANK.NS",
+    "LT": "LT.NS",
+    "BHARTIARTL": "BHARTIARTL.NS",
+    "ITC": "ITC.NS",
+    # Additional high-liquidity F&O stocks
+    "KOTAKBANK": "KOTAKBANK.NS",
     "WIPRO": "WIPRO.NS",
     "HCLTECH": "HCLTECH.NS",
-    "LT": "LT.NS",
     "MARUTI": "MARUTI.NS",
-    "ITC": "ITC.NS",
-    "BHARTIARTL": "BHARTIARTL.NS",
     "TATASTEEL": "TATASTEEL.NS",
     "SUNPHARMA": "SUNPHARMA.NS",
     "ADANIENT": "ADANIENT.NS",
@@ -117,6 +121,7 @@ COMMODITY_SYMBOLS = {
     "CRUDEOIL": "CL=F",
     "NATURALGAS": "NG=F",
     "GOLD": "GC=F",
+    "SILVER": "SI=F",  # MCX Silver (US futures proxy)
 }
 
 # ============================================================
@@ -287,7 +292,7 @@ def square_off_for(segment: str) -> str:
 # through. Real NSE ATM index option spreads ~0.3-0.5%; large-cap stocks
 # ~0.4-0.8%; mid-caps ~0.8-1.5%; MCX commodities ~0.6-1.2%.
 LIQUIDITY_TIER = {
-    "NIFTY": 1, "BANKNIFTY": 1,
+    "NIFTY": 1, "BANKNIFTY": 1, "FINNIFTY": 1,
     "RELIANCE": 1, "HDFCBANK": 1, "ICICIBANK": 1, "SBIN": 1, "TCS": 1,
     "INFY": 1, "AXISBANK": 1, "KOTAKBANK": 1, "BAJFINANCE": 1, "LT": 1,
     "BHARTIARTL": 2, "ITC": 2, "TATASTEEL": 2, "HINDALCO": 2, "WIPRO": 2,
@@ -297,7 +302,7 @@ LIQUIDITY_TIER = {
     "CIPLA": 3, "DRREDDY": 3, "BAJAJFINSV": 3, "NESTLEIND": 3, "BRITANNIA": 3,
     "TATACONSUM": 3,
     # MCX commodities — separate session, different spread regime
-    "CRUDEOIL": 2, "GOLD": 2, "NATURALGAS": 3,
+    "CRUDEOIL": 2, "GOLD": 2, "SILVER": 2, "NATURALGAS": 3,
 }
 
 
@@ -317,6 +322,7 @@ def liquidity_tier(symbol: str) -> int:
 EXPIRY_DAY_OF_WEEK = {
     "NIFTY": 3,        # Thursday (0=Mon)
     "BANKNIFTY": 2,    # Wednesday
+    "FINNIFTY": 1,     # Tuesday
 }
 
 
