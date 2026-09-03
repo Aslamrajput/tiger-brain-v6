@@ -443,16 +443,29 @@ def volume_delta(bar) -> float:
       - close < open (bearish)  => negative delta (sell pressure)
       magnitude = volume * |close-open| / range
     This is a well-known proxy used when tick data is unavailable.
+
+    Volume-unavailable fallback: some data sources report ZERO volume for
+    instruments that are not directly tradeable (e.g. yfinance returns 0
+    volume for ^NSEI/^NSEBANK index tickers — an index, not a listed
+    contract). When volume is genuinely absent (v<=0), we fall back to a
+    pure price-pressure delta = direction * (|close-open|/range), a 0..1
+    body-fraction measure. This preserves the 1.8x spike-ratio test in
+    delta_spike_confirms exactly (the ratio is scale-invariant) without
+    fabricating volume or weakening the confirmation for assets that DO
+    report volume.
     """
     o, c, h, l, v = (float(bar["open"]), float(bar["close"]),
                      float(bar["high"]), float(bar["low"]),
                      float(bar.get("volume", 0) or 0))
     rng = h - l
-    if rng <= 0 or v <= 0:
+    if rng <= 0:
         return 0.0
     direction = 1.0 if c >= o else -1.0
     strength = abs(c - o) / rng  # 0..1 body fraction
-    return direction * v * strength
+    if v > 0:
+        return direction * v * strength
+    # volume genuinely unavailable — price-pressure proxy (scale-invariant)
+    return direction * strength
 
 
 def delta_spike_confirms(df_1m, i, zone_type, lookback: int = 5) -> tuple[bool, float, str]:
@@ -460,7 +473,7 @@ def delta_spike_confirms(df_1m, i, zone_type, lookback: int = 5) -> tuple[bool, 
     Check if the 1m bar at index i shows a sharp volume-delta spike that
     CONFIRMS institutional buying (demand) or selling (supply).
 
-    A "spike" = current |delta| >= 1.3x the average |delta| of the last
+    A "spike" = current |delta| >= 1.8x the average |delta| of the last
     `lookback` 1m bars AND in the correct direction.
 
     Returns (confirmed, delta_value, reason).
@@ -473,7 +486,7 @@ def delta_spike_confirms(df_1m, i, zone_type, lookback: int = 5) -> tuple[bool, 
     avg_abs = sum(recent_deltas) / len(recent_deltas) if recent_deltas else 0.0
     if avg_abs <= 0:
         return (False, cur_delta, "no prior volume")
-    spike = abs(cur_delta) >= avg_abs * 1.3
+    spike = abs(cur_delta) >= avg_abs * 1.8
     if zone_type == "demand":
         if cur_delta > 0 and spike:
             return (True, cur_delta, f"buy-delta-spike {abs(cur_delta)/avg_abs:.1f}x")
@@ -522,6 +535,12 @@ def one_min_exhaustion(df_1m, i, direction: str, lookback: int = 4) -> tuple[boo
     cur = df_1m.iloc[i]
     cur_vol = float(cur.get("volume", 0) or 0)
     cur_close, cur_open = float(cur["close"]), float(cur["open"])
+    cur_high, cur_low = float(cur["high"]), float(cur["low"])
+    cur_rng = max(cur_high - cur_low, 1e-9)
+    body_frac = abs(cur_close - cur_open) / cur_rng
+    # vol spike: real volume when available; price-pressure proxy (strong body)
+    # when the data source reports zero volume (index tickers).
+    vol_spike = (cur_vol > avg_vol * 1.3) if avg_vol > 0 else (body_frac >= 0.5)
 
     if direction == "BUY":
         # bearish reversal candle w/ volume = exhaustion

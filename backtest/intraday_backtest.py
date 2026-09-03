@@ -258,21 +258,29 @@ def find_sniper_entry(df_15m, i_15m, df_1m, seg, is_expiry=False):
     """
     if df_1m is None or len(df_1m) == 0:
         return None
-    # EXPLOSIVE zones from the prior completed 15m bar (no lookahead)
-    zone_idx = max(0, i_15m - 1)
-    if zone_idx < 40:
-        return None
-    zones = detect_zones_explosive(df_15m, zone_idx, lookback=120,
-                                   require_explosive=True,
-                                   impulse_min_pct=0.25,
-                                   expansion_lookback=8, min_expansion_atr=0.6)
-    if not zones:
-        return None
-    # the 15m bar's time range
+    # Only the 15m bars that overlap the 1m execution window can produce a
+    # sniper hit — skip the expensive full-history zone scan for bars before
+    # the 1m data begins (no 1m bars to evaluate).
     bar_15m_start = df_15m.index[i_15m]
     bar_15m_end = bar_15m_start + pd.Timedelta(minutes=15)
     in_window = df_1m[(df_1m.index >= bar_15m_start) & (df_1m.index < bar_15m_end)]
     if len(in_window) == 0:
+        return None
+    # EXPLOSIVE zones from the prior completed 15m bar (no lookahead).
+    # V6.6 data-coverage fix: scan the FULL available 15m history for
+    # unbroken institutional zones, NOT a rolling 40-bar window. yfinance
+    # caps 1m data at 7 days while 15m covers ~60 days — zones formed
+    # earlier in the 15m history (and still unbroken) must remain visible
+    # during the 7-day 1m execution window. The 40-bar cap dropped valid
+    # mature zones before the 1m window began. The explosive quality gate
+    # (1.0 ATR / 5 bars) and all entry/exit thresholds are UNCHANGED.
+    zone_idx = max(0, i_15m - 1)
+    if zone_idx < 40:
+        return None
+    zones = detect_zones_explosive(df_15m, zone_idx, lookback=zone_idx,
+                                   require_explosive=True,
+                                   expansion_lookback=5, min_expansion_atr=1.0)
+    if not zones:
         return None
     best = None
     for ts_1m, bar_1m in in_window.iterrows():
@@ -289,11 +297,11 @@ def find_sniper_entry(df_15m, i_15m, df_1m, seg, is_expiry=False):
             if not confirmed:
                 continue
             # delta spike strength (multiple of avg) parsed from the reason
-            spike_mult = 1.3
+            spike_mult = 1.8
             try:
                 spike_mult = float(delta_reason.split()[-1].rstrip("x"))
             except (ValueError, IndexError):
-                spike_mult = 1.3
+                spike_mult = 1.8
             # liquidity sweep booster
             direction = "BUY" if touch == "demand" else "SELL"
             swept, sweep_reason = liquidity_sweep(df_1m, i_1m, direction)

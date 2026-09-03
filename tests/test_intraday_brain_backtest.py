@@ -352,8 +352,16 @@ def test_volume_delta_sign_matches_bar_direction():
 def test_volume_delta_zero_for_doji_or_no_volume():
     doji = {"open": 100, "close": 100, "high": 101, "low": 99, "volume": 1000}
     assert volume_delta(doji) == 0.0
-    no_vol = {"open": 100, "close": 105, "high": 106, "low": 99, "volume": 0}
-    assert volume_delta(no_vol) == 0.0
+    # volume genuinely unavailable (e.g. yfinance index tickers ^NSEI/^NSEBANK
+    # report 0 volume). Fall back to a price-pressure proxy that preserves the
+    # bar direction so the 1.8x spike-ratio test still fires.
+    no_vol_bull = {"open": 100, "close": 105, "high": 106, "low": 99, "volume": 0}
+    assert volume_delta(no_vol_bull) > 0.0
+    no_vol_bear = {"open": 105, "close": 100, "high": 106, "low": 99, "volume": 0}
+    assert volume_delta(no_vol_bear) < 0.0
+    # with real volume the magnitude is volume-weighted (much larger)
+    with_vol = {"open": 100, "close": 105, "high": 106, "low": 99, "volume": 1000}
+    assert abs(volume_delta(with_vol)) > abs(volume_delta(no_vol_bull))
 
 
 def _one_min_df(start=22000, n_bars=60, seed=1, vol=0.001):
