@@ -70,10 +70,17 @@ def _resolve_symbol_token(broker, symbol: str) -> tuple[str, str] | None:
         logger.warning(f"{symbol}: no instrument match for '{search}' on {exchange}")
         return None
 
-    # For indices/commodities pick the first exact/contains match.
-    # Prefer an exact symbol match, else fall back to the first row.
-    exact = matches[matches["symbol"].str.upper() == search.upper()]
-    row = exact.iloc[0] if not exact.empty else matches.iloc[0]
+    # Angel One stock symbols carry a "-EQ" suffix (e.g. "SBIN-EQ").
+    # A plain contains-search returns wrong matches first (e.g. "SBIN"
+    # → "SBINMID150-EQ", "LT" → "ROHLTD-EQ", "ITC" → "NITCO-EQ").
+    # Preference order: exact "{SYMBOL}-EQ" → exact symbol → first -EQ row.
+    sym_upper = search.upper()
+    exact_eq = matches[matches["symbol"].str.upper() == f"{sym_upper}-EQ"]
+    if exact_eq.empty:
+        exact_eq = matches[matches["symbol"].str.upper() == sym_upper]
+    if exact_eq.empty:
+        exact_eq = matches[matches["symbol"].str.upper().str.endswith("-EQ")]
+    row = exact_eq.iloc[0] if not exact_eq.empty else matches.iloc[0]
     token = str(row["token"])
     logger.info(f"{symbol}: {exchange} token={token} ({row['symbol']})")
     return exchange, token
