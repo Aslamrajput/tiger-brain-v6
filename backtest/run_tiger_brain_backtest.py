@@ -608,28 +608,13 @@ def find_tiger_brain_entry(df_15m, i_15m, df_1m, seg, is_expiry, symbol,
             score = z["score"]
             score_details = []
 
-            # === DEMAND ZONE QUALITY VALIDATION (V6 — the fix) ===
-            # Weak demand zones were the #1 problem. Now every demand zone
-            # is validated for: freshness + creation volume + departure
-            # speed + impulse body + round number.
-            if touch == "demand":
-                dq_score, dq_details = validate_demand_zone_quality(df_15m, z, i_15m)
-                score += dq_score
-                score_details.extend(dq_details)
-
-            # --- Explosive quality (DATA-DRIVEN SPLIT) ---
+            # --- Explosive quality (bonus, data-driven) ---
             try:
                 is_exp, exp_pct = zone_explosive_quality(
                     df_15m, z.get("bar_idx", zone_idx), touch)
                 if is_exp:
-                    if touch == "demand":
-                        # Explosive DEMAND = false breakout trap (45.5% win in V5)
-                        score += DEMAND_EXPLOSIVE_PENALTY
-                        score_details.append(f"explosive-demand-trap({DEMAND_EXPLOSIVE_PENALTY})")
-                    else:
-                        # Explosive SUPPLY = confirmed rejection (100% win in V5)
-                        score += SUPPLY_EXPLOSIVE_BONUS
-                        score_details.append(f"explosive-supply(+{SUPPLY_EXPLOSIVE_BONUS})")
+                    score += EXPLOSIVE_BONUS
+                    score_details.append(f"explosive(+{EXPLOSIVE_BONUS})")
             except Exception:
                 is_exp, exp_pct = False, 0.0
 
@@ -719,10 +704,17 @@ def find_tiger_brain_entry(df_15m, i_15m, df_1m, seg, is_expiry, symbol,
                 continue
 
             # --- Strike selection ---
-            # ITM for momentum trades (sweep/spike/explosive) — higher delta =
-            # faster move = profit before stop hit. ATM for plain zones.
-            # V4 ATM-only was wrong: ATM delta ~0.5 too slow, stop hit by noise.
-            strike_kind = "ITM" if (spike_mult >= 2.0 or swept or is_exp or is_expiry) else "ATM"
+            # ITM for momentum trades (sweep/spike/supply-explosive) — higher delta =
+            # faster move = profit before stop hit.
+            # BUT explosive DEMAND uses ATM — data showed Demand_Boom with ITM = 45.5%
+            # win (expensive ITM premiums + false breakout = big losses on stop).
+            # Explosive SUPPLY keeps ITM (100% win in V5).
+            if touch == "demand" and is_exp:
+                strike_kind = "ATM"  # demand explosive = ATM (cheaper, less risk on false breakout)
+            elif spike_mult >= 2.0 or swept or is_exp or is_expiry:
+                strike_kind = "ITM"
+            else:
+                strike_kind = "ATM"
 
             strategy = "Tiger_Demand" if touch == "demand" else "Tiger_Supply"
             if is_exp:
