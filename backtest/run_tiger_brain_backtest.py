@@ -565,11 +565,10 @@ def find_tiger_brain_entry(df_15m, i_15m, df_1m, seg, is_expiry, symbol,
                 continue
 
             # --- Strike selection ---
-            # ATM for all — data showed ITM strikes (expensive) lose more on stops.
-            # Only use ITM on expiry day with delta confirmation (V6.6 design).
-            strike_kind = "ATM"
-            if is_expiry and ("delta" in vol_reason or "delta" in delta_reason):
-                strike_kind = "ITM"
+            # ITM for momentum trades (sweep/spike/explosive) — higher delta =
+            # faster move = profit before stop hit. ATM for plain zones.
+            # V4 ATM-only was wrong: ATM delta ~0.5 too slow, stop hit by noise.
+            strike_kind = "ITM" if (spike_mult >= 2.0 or swept or is_exp or is_expiry) else "ATM"
 
             strategy = "Tiger_Demand" if touch == "demand" else "Tiger_Supply"
             if is_exp:
@@ -617,8 +616,8 @@ def compute_structural_stop(entry_premium, zone, zone_type, cur_underlying,
     stop_underlying = zone["bottom"] if zone_type == "demand" else zone["top"]
     stop_prem = bs_premium_at(stop_underlying, strike, dte, is_call, iv)
     stop_prem = max(stop_prem, 0.5)
-    # Tighter cap: 50% of entry (was 60% — still 32% stop hits, tighten more)
-    stop_prem = min(stop_prem, entry_premium * 0.50)
+    # 60% of entry — V2 sweet spot (50% was too tight, 85% was too wide)
+    stop_prem = min(stop_prem, entry_premium * 0.60)
     return max(stop_prem, 0.5)
 
 def size_dynamic(entry_premium, stop_premium, lot_sz, current_capital,
