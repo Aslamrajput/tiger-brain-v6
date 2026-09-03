@@ -78,7 +78,8 @@ def _scan_one(symbol: str, ticker: str, daily_df: pd.DataFrame,
     # historical rejection caused an immediate high-volume expansion move).
     daily_zones = detect_zones_explosive(daily_df, len(daily_df) - 1,
                                          lookback=40, require_explosive=True,
-                                         expansion_lookback=5, min_expansion_atr=1.0)
+                                         impulse_min_pct=0.25,
+                                         expansion_lookback=8, min_expansion_atr=0.6)
     if not daily_zones:
         return None
 
@@ -87,7 +88,8 @@ def _scan_one(symbol: str, ticker: str, daily_df: pd.DataFrame,
     if fourh_df is not None and len(fourh_df) >= 30:
         fourh_zones = detect_zones_explosive(fourh_df, len(fourh_df) - 1,
                                              lookback=40, require_explosive=True,
-                                             expansion_lookback=5, min_expansion_atr=1.0)
+                                             impulse_min_pct=0.25,
+                                             expansion_lookback=8, min_expansion_atr=0.6)
 
     cur_price = float(daily_df.iloc[-1]["close"])
     candidates = []

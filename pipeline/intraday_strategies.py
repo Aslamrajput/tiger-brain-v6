@@ -177,9 +177,12 @@ def zone_explosive_quality(df: pd.DataFrame, base_bar_idx: int,
     atr_win = df.iloc[max(0, base_bar_idx - 20):base_bar_idx]
     atr = float((atr_win["high"] - atr_win["low"]).mean() or 1.0)
     # volume baseline: avg volume over 20 bars before the base
-    vol_base = float(atr_win["volume"].mean() or 1.0)
+    vol_base = float(atr_win["volume"].mean() or 0.0)
     after_vol = float(after["volume"].mean() or 0.0)
-    vol_surge = after_vol >= vol_base * 1.0  # expansion must carry volume
+    # volume surge: expansion must carry volume. Some sources (e.g. yfinance
+    # for ^NSEI/^NSEBANK index tickers) report ZERO volume — in that case
+    # skip the volume gate and rely on the expansion-ATR confirmation alone.
+    vol_surge = True if vol_base <= 0 else after_vol >= vol_base * 1.0
 
     closes = after["close"].astype(float).values
     if zone_type == "demand":
@@ -457,7 +460,7 @@ def delta_spike_confirms(df_1m, i, zone_type, lookback: int = 5) -> tuple[bool, 
     Check if the 1m bar at index i shows a sharp volume-delta spike that
     CONFIRMS institutional buying (demand) or selling (supply).
 
-    A "spike" = current |delta| >= 1.8x the average |delta| of the last
+    A "spike" = current |delta| >= 1.3x the average |delta| of the last
     `lookback` 1m bars AND in the correct direction.
 
     Returns (confirmed, delta_value, reason).
@@ -470,7 +473,7 @@ def delta_spike_confirms(df_1m, i, zone_type, lookback: int = 5) -> tuple[bool, 
     avg_abs = sum(recent_deltas) / len(recent_deltas) if recent_deltas else 0.0
     if avg_abs <= 0:
         return (False, cur_delta, "no prior volume")
-    spike = abs(cur_delta) >= avg_abs * 1.8
+    spike = abs(cur_delta) >= avg_abs * 1.3
     if zone_type == "demand":
         if cur_delta > 0 and spike:
             return (True, cur_delta, f"buy-delta-spike {abs(cur_delta)/avg_abs:.1f}x")

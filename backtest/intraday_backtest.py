@@ -262,9 +262,10 @@ def find_sniper_entry(df_15m, i_15m, df_1m, seg, is_expiry=False):
     zone_idx = max(0, i_15m - 1)
     if zone_idx < 40:
         return None
-    zones = detect_zones_explosive(df_15m, zone_idx, lookback=40,
+    zones = detect_zones_explosive(df_15m, zone_idx, lookback=120,
                                    require_explosive=True,
-                                   expansion_lookback=5, min_expansion_atr=1.0)
+                                   impulse_min_pct=0.25,
+                                   expansion_lookback=8, min_expansion_atr=0.6)
     if not zones:
         return None
     # the 15m bar's time range
@@ -288,11 +289,11 @@ def find_sniper_entry(df_15m, i_15m, df_1m, seg, is_expiry=False):
             if not confirmed:
                 continue
             # delta spike strength (multiple of avg) parsed from the reason
-            spike_mult = 1.8
+            spike_mult = 1.3
             try:
                 spike_mult = float(delta_reason.split()[-1].rstrip("x"))
             except (ValueError, IndexError):
-                spike_mult = 1.8
+                spike_mult = 1.3
             # liquidity sweep booster
             direction = "BUY" if touch == "demand" else "SELL"
             swept, sweep_reason = liquidity_sweep(df_1m, i_1m, direction)
