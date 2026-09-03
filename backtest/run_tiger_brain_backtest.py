@@ -122,6 +122,21 @@ PCR_BONUS = 3
 VIX_LOW_BONUS = 2
 ORB_BONUS = 3
 
+# DEMAND ZONE QUALITY VALIDATION (new in V6)
+# Weak demand zones were the #1 problem (Tiger_Demand_Boom 45.5% win).
+# Now every demand zone is validated for institutional strength.
+DEMAND_FRESH_UNTESTED = 15       # 0 touches since creation = freshest
+DEMAND_FRESH_TESTED = 10         # 1-2 touches and held = confirmed support
+DEMAND_STALE_PENALTY = -8        # 3+ touches = weakening (supply absorbed)
+DEMAND_HIGH_VOL_BONUS = 8        # volume at creation > 1.5x avg = institutional
+DEMAND_FAST_DEPARTURE = 6       # price left zone fast = strong rejection
+DEMAND_STRONG_BODY = 5          # impulse candle body > 60% of range
+DEMAND_ROUND_NUMBER_BONUS = 4   # zone near round number = psychological
+
+# EXPLOSIVE SPLIT (data-driven — demand explosive LOSES, supply explosive WINS)
+DEMAND_EXPLOSIVE_PENALTY = -5   # explosive demand = false breakout trap (45.5% win)
+SUPPLY_EXPLOSIVE_BONUS = 3      # explosive supply = confirmed rejection (100% win)
+
 # PCR thresholds
 PCR_BULLISH_MAX = 1.3
 PCR_BEARISH_MIN = 0.7
@@ -329,6 +344,130 @@ def get_vix_for_date(date) -> float:
     return VIX_FALLBACK
 
 
+# ============================================================
+# STRONG DEMAND ZONE VALIDATION (V6 — fixes weak demand detection)
+# ============================================================
+
+def count_zone_touches(df_15m, zone, current_idx) -> int:
+    """
+    Kitni baar price zone ko touch karke wapas gaya since creation?
+    0 touches = freshest (untested institutional level)
+    1-2 touches = confirmed support (held = strong)
+    3+ touches = stale (supply absorbed, weakening)
+    """
+    bar_idx = zone.get("bar_idx", current_idx)
+    if bar_idx >= current_idx or bar_idx < 1:
+        return 0
+    zone_top = zone["top"]
+    zone_bottom = zone["bottom"]
+    touches = 0
+    for k in range(bar_idx + 3, min(current_idx, len(df_15m))):
+        low = float(df_15m.iloc[k]["low"])
+        if low <= zone_top and low >= zone_bottom * 0.98:
+            close_k = float(df_15m.iloc[k]["close"])
+            if close_k > zone_bottom:
+                touches += 1
+    return touches
+
+def zone_creation_volume(df_15m, zone) -> tuple[float, bool]:
+    """Volume at zone creation vs 20-bar average. High = institutional."""
+    bar_idx = zone.get("bar_idx", 0)
+    if bar_idx < 1 or bar_idx >= len(df_15m):
+        return (1.0, False)
+    creation_vols = [float(df_15m.iloc[bar_idx + k].get("volume", 0) or 0)
+                     for k in range(min(3, len(df_15m) - bar_idx))]
+    creation_vol = sum(creation_vols) / len(creation_vols) if creation_vols else 0
+    vol_window = df_15m.iloc[max(0, bar_idx - 20):bar_idx]
+    avg_vol = float(vol_window["volume"].mean() or 0) if len(vol_window) > 0 else 0
+    if avg_vol <= 0 or creation_vol <= 0:
+        return (1.0, False)
+    ratio = creation_vol / avg_vol
+    return (round(ratio, 2), ratio >= 1.5)
+
+def zone_departure_speed(df_15m, zone, zone_type) -> tuple[float, bool]:
+    """How fast did price leave the zone? Fast = strong rejection."""
+    bar_idx = zone.get("bar_idx", 0)
+    if bar_idx < 1 or bar_idx + 5 >= len(df_15m):
+        return (0.0, False)
+    after = df_15m.iloc[bar_idx + 1:bar_idx + 6]
+    if len(after) < 2:
+        return (0.0, False)
+    if zone_type == "demand":
+        base_high = zone["top"]
+        peak = float(after["high"].max())
+        departure_pct = (peak - base_high) / base_high * 100 if base_high > 0 else 0
+    else:
+        base_low = zone["bottom"]
+        trough = float(after["low"].min())
+        departure_pct = (base_low - trough) / base_low * 100 if base_low > 0 else 0
+    return (round(departure_pct, 2), departure_pct >= 0.5)
+
+def impulse_body_strength(df_15m, zone) -> tuple[float, bool]:
+    """Impulse candle body should be strong (close near high for demand)."""
+    bar_idx = zone.get("bar_idx", 0)
+    if bar_idx < 1 or bar_idx >= len(df_15m):
+        return (0.0, False)
+    imp_idx = max(0, bar_idx - 1)
+    imp = df_15m.iloc[imp_idx]
+    o, c = float(imp["open"]), float(imp["close"])
+    h, l = float(imp["high"]), float(imp["low"])
+    rng = h - l
+    if rng <= 0:
+        return (0.0, False)
+    body_ratio = abs(c - o) / rng
+    return (round(body_ratio, 2), body_ratio >= 0.6)
+
+def near_round_number(price, tolerance_pct=0.3) -> bool:
+    """Is price near a psychological round number (50/100/500/1000)?"""
+    for step in [50, 100, 500, 1000]:
+        remainder = price % step
+        dist_to_round = min(remainder, step - remainder)
+        if price > 0 and dist_to_round / price * 100 <= tolerance_pct:
+            return True
+    return False
+
+def validate_demand_zone_quality(df_15m, zone, i_15m) -> tuple[int, list[str]]:
+    """
+    Full demand zone validation — the FIX for weak demand detection.
+    Scores: freshness + creation volume + departure speed + body + round no.
+    """
+    score = 0
+    details = []
+
+    touches = count_zone_touches(df_15m, zone, i_15m)
+    if touches == 0:
+        score += DEMAND_FRESH_UNTESTED
+        details.append(f"fresh-untested(+{DEMAND_FRESH_UNTESTED})")
+    elif touches <= 2:
+        score += DEMAND_FRESH_TESTED
+        details.append(f"confirmed-{touches}touch(+{DEMAND_FRESH_TESTED})")
+    else:
+        score += DEMAND_STALE_PENALTY
+        details.append(f"stale-{touches}touch({DEMAND_STALE_PENALTY})")
+
+    vol_ratio, is_high_vol = zone_creation_volume(df_15m, zone)
+    if is_high_vol:
+        score += DEMAND_HIGH_VOL_BONUS
+        details.append(f"inst-vol{vol_ratio:.1f}x(+{DEMAND_HIGH_VOL_BONUS})")
+
+    dep_pct, is_fast = zone_departure_speed(df_15m, zone, zone["type"])
+    if is_fast:
+        score += DEMAND_FAST_DEPARTURE
+        details.append(f"fast-departure{dep_pct:.1f}%(+{DEMAND_FAST_DEPARTURE})")
+
+    body_ratio, is_strong = impulse_body_strength(df_15m, zone)
+    if is_strong:
+        score += DEMAND_STRONG_BODY
+        details.append(f"strong-body{body_ratio:.0f}%(+{DEMAND_STRONG_BODY})")
+
+    zone_mid = (zone["top"] + zone["bottom"]) / 2
+    if near_round_number(zone_mid):
+        score += DEMAND_ROUND_NUMBER_BONUS
+        details.append(f"round-no(+{DEMAND_ROUND_NUMBER_BONUS})")
+
+    return (score, details)
+
+
 # --- PCR (Put-Call Ratio) ---
 def fetch_pcr(broker, underlying: str) -> float:
     try:
@@ -469,13 +608,28 @@ def find_tiger_brain_entry(df_15m, i_15m, df_1m, seg, is_expiry, symbol,
             score = z["score"]
             score_details = []
 
-            # --- Brain 2 booster: Explosive quality ---
+            # === DEMAND ZONE QUALITY VALIDATION (V6 — the fix) ===
+            # Weak demand zones were the #1 problem. Now every demand zone
+            # is validated for: freshness + creation volume + departure
+            # speed + impulse body + round number.
+            if touch == "demand":
+                dq_score, dq_details = validate_demand_zone_quality(df_15m, z, i_15m)
+                score += dq_score
+                score_details.extend(dq_details)
+
+            # --- Explosive quality (DATA-DRIVEN SPLIT) ---
             try:
                 is_exp, exp_pct = zone_explosive_quality(
                     df_15m, z.get("bar_idx", zone_idx), touch)
                 if is_exp:
-                    score += EXPLOSIVE_BONUS
-                    score_details.append(f"explosive(+{EXPLOSIVE_BONUS})")
+                    if touch == "demand":
+                        # Explosive DEMAND = false breakout trap (45.5% win in V5)
+                        score += DEMAND_EXPLOSIVE_PENALTY
+                        score_details.append(f"explosive-demand-trap({DEMAND_EXPLOSIVE_PENALTY})")
+                    else:
+                        # Explosive SUPPLY = confirmed rejection (100% win in V5)
+                        score += SUPPLY_EXPLOSIVE_BONUS
+                        score_details.append(f"explosive-supply(+{SUPPLY_EXPLOSIVE_BONUS})")
             except Exception:
                 is_exp, exp_pct = False, 0.0
 
