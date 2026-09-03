@@ -109,8 +109,8 @@ VOL_LOOKBACK = 5
 MAX_ENTRIES_PER_DAY = 2     # top 2 entries by score per day (sniper quality)
 
 # Score thresholds
-MIN_SCORE_TO_ENTER = 68     # need 2-3 confluence bonuses to qualify (was 58 — too noisy)
-EXPLOSIVE_BONUS = 10
+MIN_SCORE_TO_ENTER = 75     # raised from 68 — only strong multi-confluence setups
+EXPLOSIVE_BONUS = 3         # reduced from 10 — data showed explosive zones lose money
 SWEEP_BONUS = 8
 DELTA_SPIKE_BONUS = 5
 TREND_BONUS = 5
@@ -564,7 +564,11 @@ def find_tiger_brain_entry(df_15m, i_15m, df_1m, seg, is_expiry, symbol,
                 continue
 
             # --- Strike selection ---
-            strike_kind = "ITM" if (spike_mult >= 3.0 or swept or is_exp or is_expiry) else "ATM"
+            # ATM for all — data showed ITM strikes (expensive) lose more on stops.
+            # Only use ITM on expiry day with delta confirmation (V6.6 design).
+            strike_kind = "ATM"
+            if is_expiry and "delta" in setup.get("delta_reason", ""):
+                strike_kind = "ITM"
 
             strategy = "Tiger_Demand" if touch == "demand" else "Tiger_Supply"
             if is_exp:
@@ -612,8 +616,8 @@ def compute_structural_stop(entry_premium, zone, zone_type, cur_underlying,
     stop_underlying = zone["bottom"] if zone_type == "demand" else zone["top"]
     stop_prem = bs_premium_at(stop_underlying, strike, dte, is_call, iv)
     stop_prem = max(stop_prem, 0.5)
-    # Tighter cap: 60% of entry (was 85% — too wide, caused 28% drawdown)
-    stop_prem = min(stop_prem, entry_premium * 0.60)
+    # Tighter cap: 50% of entry (was 60% — still 32% stop hits, tighten more)
+    stop_prem = min(stop_prem, entry_premium * 0.50)
     return max(stop_prem, 0.5)
 
 def size_dynamic(entry_premium, stop_premium, lot_sz, current_capital,
