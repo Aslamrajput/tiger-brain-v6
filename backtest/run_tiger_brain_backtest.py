@@ -480,6 +480,7 @@ def find_tiger_brain_entry(df_15m, i_15m, df_1m, seg, is_expiry, symbol,
                 is_exp, exp_pct = False, 0.0
 
             # --- Brain 2 booster: Delta spike (1.8x = bonus, not required) ---
+            confirmed, delta_reason, spike_mult = False, "", 1.8
             try:
                 confirmed, delta_val, delta_reason = delta_spike_confirms(
                     df_1m, i_1m, touch)
@@ -567,7 +568,7 @@ def find_tiger_brain_entry(df_15m, i_15m, df_1m, seg, is_expiry, symbol,
             # ATM for all — data showed ITM strikes (expensive) lose more on stops.
             # Only use ITM on expiry day with delta confirmation (V6.6 design).
             strike_kind = "ATM"
-            if is_expiry and "delta" in setup.get("delta_reason", ""):
+            if is_expiry and ("delta" in vol_reason or "delta" in delta_reason):
                 strike_kind = "ITM"
 
             strategy = "Tiger_Demand" if touch == "demand" else "Tiger_Supply"
