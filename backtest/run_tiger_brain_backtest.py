@@ -825,24 +825,80 @@ def _resolve_symbol_token(symbol: str) -> tuple[str, str] | None:
     return exchange, str(row["token"])
 
 
+def fetch_yfinance_fallback(symbol, ticker, days_15m=365, days_1m=60):
+    """Fallback for MCX commodities when Angel One token resolution fails.
+
+    Uses yfinance US futures (CL=F, GC=F, SI=F, NG=F) as proxy for MCX.
+    Timezone converted to IST so MCX entry windows (09:00-23:00 IST) work.
+    """
+    import yfinance as yf
+    to_date = datetime.now()
+    from_15m = to_date - timedelta(days=days_15m)
+    from_1m = to_date - timedelta(days=days_1m)
+
+    data_15m, data_1m = None, None
+    try:
+        raw15 = yf.download(ticker, start=from_15m, end=to_date,
+                            interval="15m", progress=False, auto_adjust=False)
+        if raw15 is not None and not raw15.empty:
+            raw15 = raw15.dropna(subset=["Close"])
+            if raw15.index.tz is None:
+                raw15.index = raw15.index.tz_localize("UTC")
+            raw15.index = raw15.index.tz_convert("Asia/Kolkata")
+            # Flatten MultiIndex columns if present
+            if isinstance(raw15.columns, pd.MultiIndex):
+                raw15.columns = raw15.columns.get_level_values(0)
+            data_15m = _normalize_cols(raw15)
+    except Exception as exc:
+        logger.warning(f"{symbol} (yfinance 15m): {exc}")
+
+    try:
+        raw1 = yf.download(ticker, start=from_1m, end=to_date,
+                           interval="1m", progress=False, auto_adjust=False)
+        if raw1 is not None and not raw1.empty:
+            raw1 = raw1.dropna(subset=["Close"])
+            if raw1.index.tz is None:
+                raw1.index = raw1.index.tz_localize("UTC")
+            raw1.index = raw1.index.tz_convert("Asia/Kolkata")
+            if isinstance(raw1.columns, pd.MultiIndex):
+                raw1.columns = raw1.columns.get_level_values(0)
+            data_1m = _normalize_cols(raw1)
+    except Exception as exc:
+        logger.warning(f"{symbol} (yfinance 1m): {exc}")
+
+    return data_15m, data_1m
+
+
 def fetch_angel_data(broker, days_15m=365, days_1m=60):
     """Fetch 15m (1 year) + 1m (max available) historical candles.
 
-    15m data covers 1 year for zone history (detect_zones scans full 15m).
-    1m data is capped at ~60 days by Angel One API — this is the execution
-    window only (zone touch + volume delta + exit engine).
+    NSE symbols use Angel One (broker data, accurate).
+    MCX commodities use yfinance fallback (US futures proxy, IST-converted)
+    when Angel One token resolution fails.
     """
+    from universe.fno_universe import COMMODITY_SYMBOLS
     to_date = datetime.now().replace(hour=15, minute=30, second=0, microsecond=0)
     from_15m = to_date - timedelta(days=days_15m)
     from_1m = to_date - timedelta(days=days_1m)
     data_map, data_map_1m = {}, {}
     failed = []
+    yf_used = []
     syms = all_symbols()
     total = len(syms)
-    for idx, (sym, _tk) in enumerate(syms.items(), 1):
+    for idx, (sym, ticker) in enumerate(syms.items(), 1):
         tag = f"[{idx}/{total}] {sym}"
         mapping = _resolve_symbol_token(sym)
         if mapping is None:
+            # Try yfinance fallback for commodities
+            if sym in COMMODITY_SYMBOLS:
+                d15, d1 = fetch_yfinance_fallback(sym, ticker, days_15m, days_1m)
+                if d15 is not None and not d15.empty:
+                    data_map[sym] = d15
+                    if d1 is not None and not d1.empty:
+                        data_map_1m[sym] = d1
+                    yf_used.append(sym)
+                    print(f"  {tag:30s}: 15m={len(d15):5d}  1m={len(data_map_1m.get(sym, [])):5d}  [yfinance]")
+                    continue
             failed.append(sym)
             continue
         exchange, token = mapping
@@ -852,6 +908,16 @@ def fetch_angel_data(broker, days_15m=365, days_1m=60):
             if d15 is not None and not d15.empty:
                 data_map[sym] = _normalize_cols(d15)
             else:
+                # Empty Angel data — try yfinance for commodities
+                if sym in COMMODITY_SYMBOLS:
+                    d15_yf, d1_yf = fetch_yfinance_fallback(sym, ticker, days_15m, days_1m)
+                    if d15_yf is not None and not d15_yf.empty:
+                        data_map[sym] = d15_yf
+                        if d1_yf is not None and not d1_yf.empty:
+                            data_map_1m[sym] = d1_yf
+                        yf_used.append(sym)
+                        print(f"  {tag:30s}: 15m={len(d15_yf):5d}  1m={len(data_map_1m.get(sym, [])):5d}  [yfinance]")
+                        continue
                 failed.append(sym)
                 continue
         except Exception as exc:
@@ -867,6 +933,8 @@ def fetch_angel_data(broker, days_15m=365, days_1m=60):
             logger.warning(f"{tag}: 1m error: {exc}")
         print(f"  {tag:30s}: 15m={len(data_map[sym]):5d}  1m={len(data_map_1m.get(sym, [])):5d}")
         time.sleep(0.4)
+    if yf_used:
+        print(f"\n  yfinance fallback used for: {yf_used}")
     print(f"\nFailed: {failed}")
     print(f"Universe: 15m={len(data_map)}  1m={len(data_map_1m)}")
     return data_map, data_map_1m, failed
