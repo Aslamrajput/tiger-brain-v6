@@ -11,12 +11,9 @@ import pytest
 
 from backtest.intraday_backtest import (
     brain1_intraday_pass,
-    bs_call,
-    bs_put,
-    bs_delta,
+    atm_premium,
     check_intraday_exit,
-    price_atm_option,
-    realized_vol,
+    realized_vol_simple,
     run_intraday_backtest,
     size_with_hard_stop,
     _in_entry_window,
@@ -40,15 +37,16 @@ def _intraday_df(start=22000, n_bars=150, seed=1, vol=0.004, tz="Asia/Kolkata"):
     return d
 
 
-def test_bs_call_put_at_expiry_intrinsic():
-    assert bs_call(22000, 21000, 0.0, 0.2) == 1000.0
-    assert bs_put(22000, 23000, 0.0, 0.2) == 1000.0
-    assert bs_call(22000, 23000, 0.0, 0.2) == 0.0
-
-
-def test_bs_delta_atm_call_near_half():
-    d = bs_delta(22000, 22000, 5 / 365, 0.2, is_call=True)
-    assert 0.45 < d < 0.65
+def test_atm_premium_positive_for_otm_and_itm():
+    # ATM call premium positive (intrinsic ~0, time value positive)
+    p = atm_premium(22000, 22000, 1.0, is_call=True, iv_pct=0.20)
+    assert p > 0
+    # ITM call has intrinsic value
+    p_itm = atm_premium(22100, 22000, 1.0, is_call=True, iv_pct=0.20)
+    assert p_itm > p  # ITM > ATM
+    # OTM call has less premium than ATM
+    p_otm = atm_premium(21900, 22000, 1.0, is_call=True, iv_pct=0.20)
+    assert p_otm < p
 
 
 def test_in_entry_window_morning_and_afternoon():
@@ -73,38 +71,35 @@ def test_size_with_hard_stop_respects_2000_cap():
 
 def test_check_intraday_exit_square_off_priority():
     pos = {"entry_premium": 100, "stop_premium": 70, "direction": "BUY",
-           "underlying_stop": 21900}
+           "zone_edge": 21900}
     ex = check_intraday_exit(pos, cur_underlying=22000, cur_premium=50,
-                             ts=pd.Timestamp("2026-08-27 15:15", tz="Asia/Kolkata"),
                              is_square_off_bar=True)
     assert ex["exit"] and ex["reason"] == "square_off_1515"
 
 
 def test_check_intraday_exit_hard_stop():
     pos = {"entry_premium": 100, "stop_premium": 70, "direction": "BUY",
-           "underlying_stop": 21900}
+           "zone_edge": 21900}
     ex = check_intraday_exit(pos, cur_underlying=21900, cur_premium=65,
-                             ts=pd.Timestamp("2026-08-27 10:00", tz="Asia/Kolkata"),
                              is_square_off_bar=False)
     assert ex["exit"] and ex["reason"] == "stop_loss_2000"
 
 
 def test_check_intraday_exit_target():
     pos = {"entry_premium": 100, "stop_premium": 70, "direction": "BUY",
-           "underlying_stop": 21900}
+           "zone_edge": 21900}
     ex = check_intraday_exit(pos, cur_underlying=22100, cur_premium=141,
-                             ts=pd.Timestamp("2026-08-27 10:00", tz="Asia/Kolkata"),
                              is_square_off_bar=False)
     assert ex["exit"] and ex["reason"] == "target_40pct"
 
 
-def test_check_intraday_exit_structural_stop():
+def test_check_intraday_exit_zone_break():
     pos = {"entry_premium": 100, "stop_premium": 50, "direction": "BUY",
-           "underlying_stop": 21900}
+           "zone_edge": 21900}
+    # underlying breaches the zone edge but premium not yet at hard stop
     ex = check_intraday_exit(pos, cur_underlying=21899, cur_premium=80,
-                             ts=pd.Timestamp("2026-08-27 10:00", tz="Asia/Kolkata"),
                              is_square_off_bar=False)
-    assert ex["exit"] and ex["reason"] == "structural_stop"
+    assert ex["exit"] and ex["reason"] == "zone_break"
 
 
 def test_brain1_intraday_rejects_outside_window():

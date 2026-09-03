@@ -1,25 +1,26 @@
 """
-Tiger Brain V6.2 — 5 Parallel Intraday Strategies (Brain 2)
+Tiger Brain V6.3 — PURE SUPPLY & DEMAND ZONE SCANNER (Brain 2)
 ================================================================
-Pure intraday options-buying ke liye 5 institutional strategies jo
-PARALLEL chalti hain. Har strategy ek 15-min candle pe setup detect
-kar sakti hai. Saare setups collect hote hain, score hote hain, aur
-top-scoring setups daily 5-10 quota tak execute hote hain.
+Koi VWAP nahi. Koi RS-Score nahi. Koi Black-Scholes nahi. Koi EMA
+nahi. Sirf SUPPLY aur DEMAND ZONES.
 
-Strategies:
-  a) SMC Order Blocks & Liquidity Sweeps (Stop-Hunt Capture)
-  b) Institutional Opening Range Breakout (ORB)
-  c) VWAP Deviation & Positive Volume Delta Alignment
-  d) Multi-Timeframe EMA Trend Momentum Chaser
-  e) Mathematical Relative Strength (RS) Divergence
+Yahan major institutional zones detect hote hain:
+  - DEMAND ZONE (Support): jahan institutions buy karte hain.
+    Price yahan touch karega to rocket up.
+  - SUPPLY ZONE (Resistance): jahan institutions sell karte hain.
+    Price yahan touch karega to crash down.
 
-⚠️ NO LOOKAHEAD — har strategy sirf `df.iloc[:i+1]` (abhi tak ke data)
-use karti hai. Intraday VWAP day ki open se rolling ban-ta hai (reset
-har trading day).
+Zone detection — PURE PRICE ACTION (no indicators):
+  Ek zone = ek consolidation cluster jisme 3+ consecutive bars ka
+  tight range (low body-to-range, overlapping highs/lows) ban-ta hai,
+  uske pehle ek strong directional move aata hai (impulsive leg).
+  Zone ke high/low = cluster ke extreme wicks.
 
-⚠️ DATA LIMITATION — real intraday OI/delta free mein nahi milta. Ye
-strategies price+volume+VWAP+EMA pe based hain, OI velocity abhi
-option-selector (Brain 3) ke synthetic chain mein aata hai.
+Setup rule (dead simple):
+  - Price touches DEMAND ZONE (low <= zone_high)  ➔ BUY ATM Call
+  - Price touches SUPPLY ZONE (high >= zone_low)  ➔ BUY ATM Put
+
+⚠️ NO LOOKAHEAD — zone detection sirf `df.iloc[:i+1]` use karta hai.
 """
 
 from __future__ import annotations
@@ -32,332 +33,180 @@ import pandas as pd
 
 
 # ============================================================
-# Helpers — intraday indicators (no lookahead)
+# Zone detection — pure price action
 # ============================================================
-def _intraday_session(df: pd.DataFrame, i: int) -> pd.DataFrame:
-    """Return bars of the SAME trading day as bar i (no future bars)."""
-    if df.index.tz is None:
-        day = df.index[i].date()
-        mask = df.index.normalize() == pd.Timestamp(day)
-    else:
-        day = df.index[i].normalize()
-        mask = df.index.normalize() == day
-    session = df[mask]
-    # Only up to and including bar i
-    return session[session.index <= df.index[i]]
+def _bar_body_ratio(c: pd.Series) -> float:
+    """Body / range ratio of a candle — low = consolidation bar."""
+    rng = (c["high"] - c["low"])
+    body = abs(c["close"] - c["open"])
+    if rng <= 0:
+        return 0.0
+    return body / rng
 
 
-def _ema(series: pd.Series, span: int) -> pd.Series:
-    return series.ewm(span=span, adjust=False).mean()
-
-
-def _vwap(session: pd.DataFrame) -> float:
-    """VWAP of the session so far (typical price * volume / sum volume)."""
-    typical = (session["high"] + session["low"] + session["close"]) / 3.0
-    vol = session["volume"].replace(0, np.nan)
-    pv = (typical * vol).sum()
-    vv = vol.sum()
-    if vv == 0 or math.isnan(vv):
-        return float(session["close"].iloc[-1])
-    return float(pv / vv)
-
-
-def _atr(df: pd.DataFrame, window: int = 14) -> float:
-    """Latest ATR (no lookahead)."""
-    if len(df) < window + 1:
-        return float(df["close"].diff().abs().mean() or 1.0)
-    h, l, c = df["high"], df["low"], df["close"]
-    prev_c = c.shift(1)
-    tr = pd.concat([(h - l), (h - prev_c).abs(), (l - prev_c).abs()], axis=1).max(axis=1)
-    return float(tr.rolling(window).mean().iloc[-1])
-
-
-# ============================================================
-# Strategy base result
-# ============================================================
-def _setup(strategy: str, direction: str, score: float, entry: float,
-           stop: float, note: str) -> dict:
-    return {
-        "strategy": strategy,
-        "direction": direction,        # "BUY" (CE) or "SELL" (PE)
-        "setup_score": round(score, 1),
-        "entry_price": round(entry, 2),
-        "stop_loss": round(stop, 2),
-        "note": note,
-        "setup_found": True,
-    }
-
-
-def _no_setup(strategy: str, reason: str) -> dict:
-    return {"strategy": strategy, "setup_found": False, "reason": reason,
-            "direction": None, "setup_score": 0.0,
-            "entry_price": None, "stop_loss": None}
-
-
-# ============================================================
-# Strategy A — SMC Order Blocks & Liquidity Sweeps (Stop-Hunt)
-# ============================================================
-def smc_sweep(df: pd.DataFrame, i: int, lookback: int = 20) -> dict:
+def detect_zones(df: pd.DataFrame, i: int, lookback: int = 40,
+                 cluster_min: int = 3, impulse_min_pct: float = 0.4) -> list[dict]:
     """
-    Liquidity sweep detection: last `lookback` bars ka low/high sweep
-    hua, fir reversal candle close hua wapas range ke andar.
-    Direction: sweep of lows + bullish reclaim => BUY (CE)
-              sweep of highs + bearish reclaim => SELL (PE)
+    Detect major Supply & Demand zones up to bar i (no lookahead).
+
+    Method (institutional S/D logic):
+      1. Scan last `lookback` bars for a consolidation cluster:
+         `cluster_min` consecutive bars with overlapping ranges and
+         small bodies (body/range < 0.5) — this is the "base".
+      2. Before the base, there must be a strong impulsive move
+         (>= impulse_min_pct of price in one direction) — this is the
+         institutional leg that created the zone.
+      3. DEMAND zone = base BEFORE an up-move (institutions bought).
+      4. SUPPLY zone = base BEFORE a down-move (institutions sold).
+      Zone bounds = base's wick high & low.
+
+    Returns list of zones: {type: 'demand'|'supply', top, bottom, score, bar}
     """
-    if i < lookback + 2:
-        return _no_setup("SMC", "insufficient bars")
-    window = df.iloc[i - lookback:i + 1]
-    cur = df.iloc[i]
-    prev = df.iloc[i - 1]
+    if i < cluster_min + 2:
+        return []
+    window = df.iloc[max(0, i - lookback):i + 1]
+    if len(window) < cluster_min + 1:
+        return []
 
-    # Liquidity pool = prior lookback low / high (excluding current bar)
-    pool_low = float(window["low"].iloc[:-1].min())
-    pool_high = float(window["high"].iloc[:-1].max())
+    zones = []
+    closes = window["close"].astype(float).values
+    opens = window["open"].astype(float).values
+    highs = window["high"].astype(float).values
+    lows = window["low"].astype(float).values
 
-    atr = _atr(df.iloc[:i + 1], 14)
-    sweep_depth = max(atr * 0.15, 0.0)
+    # Walk the window looking for clusters
+    j = 0
+    n = len(window)
+    while j < n - cluster_min:
+        # Check if bars [j, j+cluster_min-1] form a tight base
+        cluster = slice(j, j + cluster_min)
+        bodies = [abs(closes[k] - opens[k]) for k in range(j, j + cluster_min)]
+        ranges = [highs[k] - lows[k] for k in range(j, j + cluster_min)]
+        # tight base: small bodies + overlapping ranges
+        small_bodies = all(b / max(r, 1e-9) < 0.5 for b, r in zip(bodies, ranges))
+        # overlapping: consecutive bars' ranges overlap
+        overlapping = True
+        for k in range(j, j + cluster_min - 1):
+            if lows[k] > highs[k + 1] or highs[k] < lows[k + 1]:
+                overlapping = False
+                break
+        if not (small_bodies and overlapping):
+            j += 1
+            continue
 
-    # Bullish sweep: prev wick pierced pool_low, current close reclaimed above
-    swept_low = float(prev["low"]) < pool_low - sweep_depth
-    reclaimed_up = float(cur["close"]) > pool_low
-    bull_body = float(cur["close"]) > float(cur["open"])  # bullish candle
+        base_high = max(highs[j:j + cluster_min])
+        base_low = min(lows[j:j + cluster_min])
+        base_mid = (base_high + base_low) / 2
 
-    # Bearish sweep: prev wick pierced pool_high, current close reclaimed below
-    swept_high = float(prev["high"]) > pool_high + sweep_depth
-    reclaimed_dn = float(cur["close"]) < pool_high
-    bear_body = float(cur["close"]) < float(cur["open"])
+        # Look at the bar BEFORE the base (impulsive leg)
+        if j == 0:
+            j += 1
+            continue
+        prev_close = closes[j - 1]
+        prev_open = opens[j - 1]
+        leg_move = (prev_close - prev_open) / max(prev_open, 1e-9)
 
-    if swept_low and reclaimed_up and bull_body:
-        entry = float(cur["close"])
-        stop = min(pool_low, float(cur["low"])) - atr * 0.1
-        score = 60 + min((float(prev["low"]) - pool_low) / max(atr, 1) * 8, 15)
-        return _setup("SMC_Sweep", "BUY", score, entry, stop,
-                      f"low sweep {pool_low:.2f} -> reclaim bullish")
+        # Skip if base is too recent (we want mature zones, not current chop)
+        bars_since_base = n - (j + cluster_min)
 
-    if swept_high and reclaimed_dn and bear_body:
-        entry = float(cur["close"])
-        stop = max(pool_high, float(cur["high"])) + atr * 0.1
-        score = 60 + min((float(prev["high"]) - pool_high) / max(atr, 1) * 8, 15)
-        return _setup("SMC_Sweep", "SELL", score, entry, stop,
-                      f"high sweep {pool_high:.2f} -> reclaim bearish")
+        # DEMAND zone: strong UP move before the base => institutions bought
+        if leg_move >= impulse_min_pct / 100:
+            # freshness: zone should not have been broken since
+            broken = any(lows[k] < base_low for k in range(j + cluster_min, n))
+            if not broken:
+                strength = abs(leg_move)
+                # prefer zones with more bars since (tested, mature)
+                score = 55 + min(strength * 30, 25) + min(bars_since_base * 0.3, 15)
+                zones.append({
+                    "type": "demand", "top": base_high, "bottom": base_low,
+                    "mid": base_mid, "score": round(score, 1),
+                    "bars_since": bars_since_base,
+                    "bar_idx": i - (n - (j + cluster_min)),
+                })
+        # SUPPLY zone: strong DOWN move before the base => institutions sold
+        elif leg_move <= -impulse_min_pct / 100:
+            broken = any(highs[k] > base_high for k in range(j + cluster_min, n))
+            if not broken:
+                strength = abs(leg_move)
+                score = 55 + min(strength * 30, 25) + min(bars_since_base * 0.3, 15)
+                zones.append({
+                    "type": "supply", "top": base_high, "bottom": base_low,
+                    "mid": base_mid, "score": round(score, 1),
+                    "bars_since": bars_since_base,
+                    "bar_idx": i - (n - (j + cluster_min)),
+                })
+        j += cluster_min  # skip past this cluster
 
-    return _no_setup("SMC", "no sweep+reclaim")
+    # Dedupe: keep strongest zone per type within 0.5% of price
+    return zones
 
 
 # ============================================================
-# Strategy B — Institutional Opening Range Breakout (ORB)
+# Setup detection — zone touch
 # ============================================================
-def opening_range_breakout(df: pd.DataFrame, i: int, orb_minutes: int = 30,
-                           bar_minutes: int = 15) -> dict:
+def scan_zones(df: pd.DataFrame, i: int, lookback: int = 40) -> list[dict]:
     """
-    First `orb_minutes` (default 30 min = 2 bars of 15m) ka high/low
-    ban-ta hai ORB range. Uske baad breakout + volume confirm => trade.
-    Sirf morning window mein active (09:15-11:00).
-    """
-    if i < (orb_minutes // bar_minutes) + 1:
-        return _no_setup("ORB", "insufficient ORB bars")
-    session = _intraday_session(df, i)
-    if len(session) < (orb_minutes // bar_minutes) + 1:
-        return _no_setup("ORB", "ORB range not yet formed")
+    Scan for zone-touch setups at bar i (no lookahead).
 
-    orb_bars = orb_minutes // bar_minutes
-    orb = session.iloc[:orb_bars]
-    orb_high = float(orb["high"].max())
-    orb_low = float(orb["low"].min())
+    Returns list of setups:
+      - Demand touch: price low <= zone top, close > zone bottom => BUY Call
+      - Supply touch: price high >= zone bottom, close < zone top => BUY Put
+    Each setup: {direction, setup_score, entry_price, stop_loss, zone}
+    """
+    if i < lookback:
+        return []
+    zones = detect_zones(df, i, lookback=lookback)
+    if not zones:
+        return []
 
     cur = df.iloc[i]
-    cur_idx = session.index.get_loc(df.index[i])
-    if cur_idx < orb_bars:
-        return _no_setup("ORB", "still in ORB formation")
-
-    # Current bar must be AFTER the ORB window (not the breakout bar itself
-    # counted twice) — check it's a fresh breakout this bar
-    prev_close = float(df.iloc[i - 1]["close"])
+    cur_high = float(cur["high"])
+    cur_low = float(cur["low"])
     cur_close = float(cur["close"])
-    avg_vol = float(session["volume"].iloc[:cur_idx].mean() or 1)
-    cur_vol = float(cur["volume"])
+    atr = _simple_range(df, i)
 
-    # Bullish ORB breakout
-    if (prev_close <= orb_high and cur_close > orb_high
-            and cur_vol > avg_vol * 1.3):
-        entry = cur_close
-        stop = orb_low
-        score = 62 + min((cur_vol / max(avg_vol, 1) - 1) * 10, 15)
-        return _setup("ORB", "BUY", score, entry, stop,
-                      f"ORB breakout above {orb_high:.2f} vol {cur_vol/max(avg_vol,1):.1f}x")
-
-    # Bearish ORB breakout
-    if (prev_close >= orb_low and cur_close < orb_low
-            and cur_vol > avg_vol * 1.3):
-        entry = cur_close
-        stop = orb_high
-        score = 62 + min((cur_vol / max(avg_vol, 1) - 1) * 10, 15)
-        return _setup("ORB", "SELL", score, entry, stop,
-                      f"ORB breakdown below {orb_low:.2f} vol {cur_vol/max(avg_vol,1):.1f}x")
-
-    return _no_setup("ORB", "no ORB breakout")
-
-
-# ============================================================
-# Strategy C — VWAP Deviation & Positive Volume Delta
-# ============================================================
-def vwap_deviation(df: pd.DataFrame, i: int, dev_pct: float = 0.4) -> dict:
-    """
-    Price deviates above/below intraday VWAP by >= dev_pct, with positive
-    volume delta (current vol > avg vol) confirming. Mean-reversion or
-    momentum-continuation depending on direction.
-    BUY: price > VWAP * (1 + dev) with strong volume (trend up, buy CE)
-    SELL: price < VWAP * (1 - dev) with strong volume (trend down, buy PE)
-    """
-    session = _intraday_session(df, i)
-    if len(session) < 5:
-        return _no_setup("VWAP", "insufficient session bars")
-    vwap = _vwap(session)
-    cur = df.iloc[i]
-    cur_close = float(cur["close"])
-    avg_vol = float(session["volume"].iloc[:-1].mean() or 1)
-    cur_vol = float(cur["volume"])
-
-    if avg_vol <= 0:
-        return _no_setup("VWAP", "no volume baseline")
-
-    dev = (cur_close - vwap) / vwap * 100  # percent deviation
-    vol_strong = cur_vol > avg_vol * 1.3
-    bull = float(cur["close"]) > float(cur["open"])
-
-    if dev >= dev_pct and vol_strong and bull:
-        entry = cur_close
-        atr = _atr(df.iloc[:i + 1], 14)
-        stop = vwap - atr * 0.5
-        score = 58 + min(abs(dev) * 4, 12)
-        return _setup("VWAP_Dev", "BUY", score, entry, stop,
-                      f"VWAP dev +{dev:.2f}% vol {cur_vol/avg_vol:.1f}x")
-
-    if dev <= -dev_pct and vol_strong and not bull:
-        entry = cur_close
-        atr = _atr(df.iloc[:i + 1], 14)
-        stop = vwap + atr * 0.5
-        score = 58 + min(abs(dev) * 4, 12)
-        return _setup("VWAP_Dev", "SELL", score, entry, stop,
-                      f"VWAP dev {dev:.2f}% vol {cur_vol/avg_vol:.1f}x")
-
-    return _no_setup("VWAP", f"dev {dev:.2f}% below threshold or weak vol")
-
-
-# ============================================================
-# Strategy D — Multi-Timeframe EMA Trend Momentum Chaser
-# ============================================================
-def ema_momentum(df: pd.DataFrame, i: int) -> dict:
-    """
-    Fast EMA (8) above Slow EMA (21) above Slower EMA (50) => uptrend.
-    Entry on momentum bar (close > prev close, vol spike) in trend dir.
-    Intraday so EMAs computed on 15m bars up to bar i (no lookahead).
-    """
-    if i < 50:
-        return _no_setup("EMA_MTF", "insufficient bars for EMA50")
-    window = df.iloc[:i + 1]
-    c = window["close"]
-    ema8 = _ema(c, 8).iloc[-1]
-    ema21 = _ema(c, 21).iloc[-1]
-    ema50 = _ema(c, 50).iloc[-1]
-    cur = df.iloc[i]
-    cur_close = float(cur["close"])
-    prev_close = float(df.iloc[i - 1]["close"])
-    avg_vol = float(window["volume"].iloc[-20:].mean() or 1)
-    cur_vol = float(cur["volume"])
-
-    # Bullish trend stack
-    if ema8 > ema21 > ema50 and cur_close > prev_close and cur_vol > avg_vol * 1.2:
-        atr = _atr(window, 14)
-        stop = ema21 - atr * 0.8
-        strength = (ema8 - ema50) / ema50 * 100
-        score = 56 + min(strength * 3, 14)
-        return _setup("EMA_MTF", "BUY", score, cur_close, stop,
-                      f"EMA stack up 8>{ema21:.0f}>{ema50:.0f} str {strength:.2f}%")
-
-    # Bearish trend stack
-    if ema8 < ema21 < ema50 and cur_close < prev_close and cur_vol > avg_vol * 1.2:
-        atr = _atr(window, 14)
-        stop = ema21 + atr * 0.8
-        strength = (ema50 - ema8) / ema50 * 100
-        score = 56 + min(strength * 3, 14)
-        return _setup("EMA_MTF", "SELL", score, cur_close, stop,
-                      f"EMA stack down 8<{ema21:.0f}<{ema50:.0f} str {strength:.2f}%")
-
-    return _no_setup("EMA_MTF", "no aligned EMA stack + momentum")
-
-
-# ============================================================
-# Strategy E — Mathematical Relative Strength (RS) Divergence
-# ============================================================
-def rs_divergence(df: pd.DataFrame, i: int, benchmark_df: Optional[pd.DataFrame] = None,
-                  lookback: int = 10) -> dict:
-    """
-    Symbol ka return vs benchmark return over last `lookback` bars.
-    Strong outperformance (RS >= 1.0pp) + symbol bullish => BUY (CE).
-    Strong underperformance (RS <= -1.0pp) + symbol bearish => SELL (PE).
-    """
-    if benchmark_df is None or i < lookback + 1:
-        return _no_setup("RS_Div", "no benchmark or insufficient bars")
-    sym_window = df.iloc[i - lookback:i + 1]
-    cur = df.iloc[i]
-    cur_time = df.index[i]
-
-    # Benchmark bars up to current time (no lookahead)
-    bench_so_far = benchmark_df[benchmark_df.index <= cur_time]
-    if len(bench_so_far) < lookback + 1:
-        return _no_setup("RS_Div", "insufficient benchmark bars")
-    bench_window = bench_so_far.iloc[-lookback - 1:]
-
-    sym_ret = (float(sym_window["close"].iloc[-1]) / float(sym_window["close"].iloc[0]) - 1) * 100
-    bench_ret = (float(bench_window["close"].iloc[-1]) / float(bench_window["close"].iloc[0]) - 1) * 100
-    rs = sym_ret - bench_ret
-
-    bull = float(cur["close"]) > float(cur["open"])
-    bear = float(cur["close"]) < float(cur["open"])
-
-    if rs >= 1.0 and bull:
-        atr = _atr(df.iloc[:i + 1], 14)
-        entry = float(cur["close"])
-        stop = entry - atr * 1.0
-        score = 57 + min(abs(rs) * 2, 13)
-        return _setup("RS_Div", "BUY", score, entry, stop,
-                      f"RS +{rs:.2f}pp (sym {sym_ret:.2f}% vs bench {bench_ret:.2f}%)")
-
-    if rs <= -1.0 and bear:
-        atr = _atr(df.iloc[:i + 1], 14)
-        entry = float(cur["close"])
-        stop = entry + atr * 1.0
-        score = 57 + min(abs(rs) * 2, 13)
-        return _setup("RS_Div", "SELL", score, entry, stop,
-                      f"RS {rs:.2f}pp (sym {sym_ret:.2f}% vs bench {bench_ret:.2f}%)")
-
-    return _no_setup("RS_Div", f"RS {rs:.2f}pp below threshold")
-
-
-# ============================================================
-# Orchestrator — run all 5 strategies in parallel on a bar
-# ============================================================
-STRATEGIES = {
-    "SMC_Sweep": smc_sweep,
-    "ORB": opening_range_breakout,
-    "VWAP_Dev": vwap_deviation,
-    "EMA_MTF": ema_momentum,
-    "RS_Div": rs_divergence,
-}
-
-
-def scan_intraday(df: pd.DataFrame, i: int, benchmark_df: Optional[pd.DataFrame] = None) -> list[dict]:
-    """
-    Run all 5 strategies on bar i. Return list of found setups (empty if none).
-    Each setup has strategy, direction, setup_score, entry_price, stop_loss.
-    """
     setups = []
-    for name, fn in STRATEGIES.items():
-        if name == "RS_Div":
-            res = fn(df, i, benchmark_df=benchmark_df)
-        else:
-            res = fn(df, i)
-        if res.get("setup_found"):
-            setups.append(res)
+    for z in zones:
+        # DEMAND touch: price came down into the demand zone
+        if z["type"] == "demand" and cur_low <= z["top"] and cur_close >= z["bottom"]:
+            # bullish if close back above zone bottom
+            entry = cur_close
+            stop = z["bottom"] - atr * 0.3
+            setups.append({
+                "strategy": "Demand_Zone",
+                "direction": "BUY",
+                "setup_score": z["score"],
+                "entry_price": entry,
+                "stop_loss": stop,
+                "zone_type": "demand",
+                "zone_top": z["top"],
+                "zone_bottom": z["bottom"],
+                "note": f"demand touch low={cur_low:.1f} zone[{z['bottom']:.1f}-{z['top']:.1f}]",
+                "setup_found": True,
+            })
+        # SUPPLY touch: price came up into the supply zone
+        elif z["type"] == "supply" and cur_high >= z["bottom"] and cur_close <= z["top"]:
+            entry = cur_close
+            stop = z["top"] + atr * 0.3
+            setups.append({
+                "strategy": "Supply_Zone",
+                "direction": "SELL",
+                "setup_score": z["score"],
+                "entry_price": entry,
+                "stop_loss": stop,
+                "zone_type": "supply",
+                "zone_top": z["top"],
+                "zone_bottom": z["bottom"],
+                "note": f"supply touch high={cur_high:.1f} zone[{z['bottom']:.1f}-{z['top']:.1f}]",
+                "setup_found": True,
+            })
+
     return setups
+
+
+def _simple_range(df: pd.DataFrame, i: int, window: int = 20) -> float:
+    """Average bar range over last `window` bars (no stddev, no ATR formula)."""
+    if i < window:
+        return float(df["high"].iloc[:i + 1].max() - df["low"].iloc[:i + 1].min() or 1.0)
+    w = df.iloc[i - window + 1:i + 1]
+    return float((w["high"] - w["low"]).mean() or 1.0)
