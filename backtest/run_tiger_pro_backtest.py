@@ -329,7 +329,7 @@ def _resolve_symbol_token(symbol: str) -> tuple[str, str] | None:
     return exchange, token
 
 
-def fetch_angel_data(broker, days_15m: int = 60, days_1m: int = 7):
+def fetch_angel_data(broker, days_15m: int = 60, days_1m: int = 30):
     to_date = datetime.now().replace(hour=15, minute=30, second=0, microsecond=0)
     from_15m = to_date - timedelta(days=days_15m)
     from_1m = to_date - timedelta(days=days_1m)
