@@ -79,11 +79,12 @@ PREMIUM_MAX_PCT_OF_UNDERLYING = 1.5  # Reject if premium > 1.5% of underlying
 PREMIUM_MIN = 3.0              # Reject if premium < ₹3
 
 # Golden windows (NSE times; MCX uses its own entry_windows_for)
+# Morning institutional flow + afternoon breakout zone + closing momentum.
+# 11:00-13:00 is the only true chop zone (lunch lull).
 GOLDEN_WINDOWS_NSE = [
     ("09:15", "11:00"),   # Morning institutional flow
-    ("14:30", "15:15"),   # Closing momentum
+    ("13:00", "15:15"),   # Afternoon breakout + closing momentum
 ]
-# 11:00-14:30 is SKIPPED (chop zone — fake moves, low conviction)
 
 ANGEL_EXCHANGE = {
     "NIFTY": ("NSE", "Nifty 50"),
@@ -229,33 +230,26 @@ def compute_structural_stop(entry_premium, zone, zone_type, cur_underlying,
     If price breaks BELOW the demand zone bottom → demand is invalid → exit.
     If price breaks ABOVE the supply zone top → supply is invalid → exit.
 
-    Translate the zone-breach underlying price into option premium terms,
-    then cap the total loss at max_loss_cap (₹2,000).
+    Translate the zone-breach underlying price into option premium terms.
+    The structural stop gives the trade ROOM TO BREATHE — wider than the
+    old 30% premium stop. Total loss is still capped at max_loss_cap (₹2,000)
+    by the dynamic lot sizing (fewer lots = same max risk).
     """
     if zone_type == "demand":
-        # Stop when underlying drops below zone bottom
         stop_underlying = zone["bottom"]
     else:
-        # Stop when underlying rises above zone top
         stop_underlying = zone["top"]
 
-    # What would the option premium be at the stop underlying price?
     stop_prem_structural = atm_premium(stop_underlying, strike, dte, is_call, iv)
     stop_prem_structural = max(stop_prem_structural, 0.5)
 
-    # Also compute the 30% premium stop as a fallback floor
-    stop_prem_pct = entry_premium * 0.70
+    # Use the structural stop (wider — lets trade breathe).
+    # size_dynamic() will cap total loss at max_loss_cap via fewer lots.
+    stop_premium = stop_prem_structural
 
-    # Use the structural stop if it's tighter than 30% (gives trade room)
-    # but ensure it doesn't allow loss beyond max_loss_cap
-    stop_premium = min(stop_prem_structural, stop_prem_pct)
+    # Safety floor: never let stop be above 70% of entry (some breathing room)
+    stop_premium = min(stop_premium, entry_premium * 0.85)
     stop_premium = max(stop_premium, 0.5)
-
-    # Ensure max loss per unit doesn't exceed cap
-    loss_per_unit = max(entry_premium - stop_premium, 0)
-    if loss_per_unit * 1 > max_loss_cap:  # will be adjusted by lot sizing
-        # Tighten stop to cap loss
-        stop_premium = entry_premium - (max_loss_cap / max(lot_size_safe(), 1))
 
     return stop_premium
 
