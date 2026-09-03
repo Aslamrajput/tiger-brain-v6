@@ -29,7 +29,7 @@ import numpy as np
 import pandas as pd
 
 try:
-    from pipeline.intraday_strategies import detect_zones
+    from pipeline.intraday_strategies import detect_zones, detect_zones_explosive
     from universe.fno_universe import scan_universe, segment_of
 except ImportError:
     raise ImportError("Repo ROOT se chalao.")
@@ -74,16 +74,20 @@ def _scan_one(symbol: str, ticker: str, daily_df: pd.DataFrame,
     """Scan a single symbol on daily + 4H. Return a watchlist entry or None."""
     if daily_df is None or len(daily_df) < 30:
         return None
-    # Detect major zones on the daily (use up to the last completed bar —
-    # no lookahead; daily_df already excludes the current forming day).
-    daily_zones = detect_zones(daily_df, len(daily_df) - 1, lookback=40)
+    # Detect major EXPLOSIVE zones on the daily (V6.6: only zones whose
+    # historical rejection caused an immediate high-volume expansion move).
+    daily_zones = detect_zones_explosive(daily_df, len(daily_df) - 1,
+                                         lookback=40, require_explosive=True,
+                                         expansion_lookback=5, min_expansion_atr=1.0)
     if not daily_zones:
         return None
 
-    # 4H confirmation: zones on 4H too
+    # 4H confirmation: zones on 4H too (explosive quality)
     fourh_zones = []
     if fourh_df is not None and len(fourh_df) >= 30:
-        fourh_zones = detect_zones(fourh_df, len(fourh_df) - 1, lookback=40)
+        fourh_zones = detect_zones_explosive(fourh_df, len(fourh_df) - 1,
+                                             lookback=40, require_explosive=True,
+                                             expansion_lookback=5, min_expansion_atr=1.0)
 
     cur_price = float(daily_df.iloc[-1]["close"])
     candidates = []
@@ -112,6 +116,7 @@ def _scan_one(symbol: str, ticker: str, daily_df: pd.DataFrame,
             "price": round(cur_price, 2),
             "bars_in_zone": bars_in,
             "fourh_confirmed": fourh_agrees,
+            "expansion_pct": z.get("expansion_pct", 0.0),
             "gun_powder_score": round(score, 1),
             "direction": "BUY Call" if z["type"] == "demand" else "BUY Put",
         })

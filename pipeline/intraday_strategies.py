@@ -142,7 +142,136 @@ def detect_zones(df: pd.DataFrame, i: int, lookback: int = 40,
 
 
 # ============================================================
-# Setup detection — zone touch + reversal confirmation
+# V6.6 — INSTITUTIONAL ZONE QUALITY (explosive rejection filter)
+# ============================================================
+def zone_explosive_quality(df: pd.DataFrame, base_bar_idx: int,
+                           zone_type: str, expansion_lookback: int = 5,
+                           min_expansion_atr: float = 1.0) -> tuple[bool, float]:
+    """
+    Only validate a zone if the HISTORICAL REJECTION from that level caused an
+    immediate, high-volume EXPLOSIVE expansion move. Weak/choppy/retail
+    consolidation zones are REJECTED.
+
+    Checks the `expansion_lookback` bars immediately AFTER the zone base:
+      - DEMAND zone: price must EXPAND UP (a close rises >= min_expansion_atr * ATR
+        above the base high within the window) on volume >= the prior average.
+      - SUPPLY zone: price must EXPAND DOWN (a close falls >= ... ATR below
+        the base low) on volume >= avg.
+
+    The expansion may develop over a few bars (not only the immediate next bar),
+    which matches how real institutional rejections unfold.
+
+    Returns (is_explosive, expansion_strength_pct).
+    """
+    n = len(df)
+    start = base_bar_idx + 1
+    end = min(n, start + expansion_lookback)
+    if end <= start or start < 1:
+        return (False, 0.0)
+    after = df.iloc[start:end]
+    if len(after) < 2:
+        return (False, 0.0)
+    base_high = float(df.iloc[base_bar_idx]["high"])
+    base_low = float(df.iloc[base_bar_idx]["low"])
+    # ATR proxy: average bar range over the 20 bars before the base
+    atr_win = df.iloc[max(0, base_bar_idx - 20):base_bar_idx]
+    atr = float((atr_win["high"] - atr_win["low"]).mean() or 1.0)
+    # volume baseline: avg volume over 20 bars before the base
+    vol_base = float(atr_win["volume"].mean() or 1.0)
+    after_vol = float(after["volume"].mean() or 0.0)
+    vol_surge = after_vol >= vol_base * 1.0  # expansion must carry volume
+
+    closes = after["close"].astype(float).values
+    if zone_type == "demand":
+        # explosive up-rejection: furthest close above base high
+        max_close = float(closes.max())
+        expansion = max_close - base_high
+    else:  # supply
+        min_close = float(closes.min())
+        expansion = base_low - min_close
+    expansion_atr = expansion / max(atr, 1e-9)
+    is_explosive = expansion_atr >= min_expansion_atr and vol_surge
+    expansion_pct = round(expansion / base_high * 100.0, 2) if base_high else 0.0
+    return (is_explosive, expansion_pct)
+
+
+def detect_zones_explosive(df: pd.DataFrame, i: int, lookback: int = 40,
+                           cluster_min: int = 3, impulse_min_pct: float = 0.4,
+                           require_explosive: bool = True,
+                           expansion_lookback: int = 3,
+                           min_expansion_atr: float = 1.5) -> list[dict]:
+    """
+    V6.6 zone detection: detect_zones + the explosive-rejection quality gate.
+    Each returned zone carries `explosive` (bool) and `expansion_pct`.
+    If require_explosive, only explosive-quality zones are returned.
+    """
+    zones = detect_zones(df, i, lookback, cluster_min, impulse_min_pct)
+    kept = []
+    for z in zones:
+        is_exp, exp_pct = zone_explosive_quality(
+            df, z["bar_idx"], z["type"], expansion_lookback, min_expansion_atr
+        )
+        z["explosive"] = is_exp
+        z["expansion_pct"] = exp_pct
+        if require_explosive and not is_exp:
+            continue
+        # boost score for stronger explosive rejections
+        if is_exp:
+            z["score"] = round(z["score"] + min(exp_pct * 1.5, 20), 1)
+        kept.append(z)
+    return kept
+
+
+# ============================================================
+# V6.6 — 1m LIQUIDITY SWEEP (smart-money stop-hunt confirmation)
+# ============================================================
+def liquidity_sweep(df_1m, i: int, direction: str, lookback: int = 20) -> tuple[bool, str]:
+    """
+    Detect a recent 1-minute liquidity sweep (institutional stop-hunt) that
+    confirms the boom entry.
+
+    A liquidity sweep = price briefly PIERCES a recent local extreme then
+    snaps back — institutions grab stops then reverse.
+      - For DEMAND/BUY: a 1m low within the last `lookback` bars made a NEW
+        local low (below the prior lookback-low) but a later bar closed back
+        ABOVE that level → bear-trap sweep.
+      - For SUPPLY/SELL: a 1m high made a NEW local high then closed back
+        BELOW → bull-trap sweep.
+
+    Returns (swept, reason). Looks back up to `lookback` 1m bars.
+    """
+    if i < lookback + 2:
+        return (False, "insufficient 1m bars")
+    window = df_1m.iloc[i - lookback:i + 1]
+    lows = window["low"].astype(float).values
+    highs = window["high"].astype(float).values
+    closes = window["close"].astype(float).values
+    n = len(window)
+    # reference range = the FIRST half of the window (the established range
+    # before the sweep). Using the full window would include the sweep itself.
+    ref_end = max(n // 2, 2)
+    if direction == "BUY":  # demand → bear-trap sweep (sweep lows then reverse up)
+        prior_low = float(lows[:ref_end].min())
+        pierced = [k for k in range(ref_end, n) if lows[k] < prior_low]
+        if not pierced:
+            return (False, "no low sweep")
+        last_pierce = pierced[-1]
+        snap = any(closes[k] > prior_low for k in range(last_pierce + 1, n))
+        if snap:
+            return (True, "bear-trap-sweep")
+        return (False, "no snap-back")
+    else:  # SELL → bull-trap sweep (sweep highs then reverse down)
+        prior_high = float(highs[:ref_end].max())
+        pierced = [k for k in range(ref_end, n) if highs[k] > prior_high]
+        if not pierced:
+            return (False, "no high sweep")
+        last_pierce = pierced[-1]
+        snap = any(closes[k] < prior_high for k in range(last_pierce + 1, n))
+        if snap:
+            return (True, "bull-trap-sweep")
+        return (False, "no snap-back")
+
+
 # ============================================================
 def _rejection_wick(bar) -> tuple[float, str]:
     """Return (wick_ratio, side) — institutional rejection wick size + side."""

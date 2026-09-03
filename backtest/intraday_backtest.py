@@ -32,6 +32,7 @@ try:
         scan_zones, _simple_range, detect_zones,
         volume_delta, delta_spike_confirms, zone_touched_on_1m,
         one_min_exhaustion, find_opposing_zone,
+        zone_explosive_quality, detect_zones_explosive, liquidity_sweep,
     )
     from universe.fno_universe import (
         UNIVERSE, lot_size, segment_of,
@@ -170,29 +171,40 @@ def size_with_hard_stop(entry_premium, stop_premium, lot_sz, max_loss=2000.0):
 
 
 # ============================================================
-# Brain 5 — DYNAMIC OPPOSING-ZONE TREND RIDER (V6.5)
+# Brain 5 — DYNAMIC MOMENTUM TRAIL RIDER (V6.6)
 # ============================================================
 def check_intraday_exit(pos, cur_underlying, cur_premium, is_square_off_bar,
                         df_1m=None, i_1m=None) -> dict:
     """
-    Trend-rider exit logic (NO fixed % target):
-      1. Square-off at segment close (NSE 15:15 / MCX 23:15) — highest priority.
-      2. ₹2,000 hard stop (option premium breached).
-      3. OPPOSING 15m institutional zone hit → ride ends there.
-      4. 1-minute structural exhaustion (reversal candle w/ volume OR 3
-         lower-highs/higher-lows) → order flow signals the move is done.
-      5. Absolute runaway safety: +250% (only to avoid a never-exit edge
-         case; NOT a normal profit target).
+    Maximum-momentum trend-rider exit (NO fixed % target, NO early exit on
+    minor retracements):
 
-    df_1m/i_1m optional: when 1m data is provided, exhaustion is checked
-    on the 1m chart. Otherwise falls back to the underlying zone-break.
+      1. Square-off at segment close (NSE 15:15 / MCX 23:15) — top priority.
+      2. ₹2,000 hard stop (option premium breached) — protects capital.
+      3. OPPOSING 15m institutional zone hit → ride ends there (the move ran
+         to the next institutional level).
+      4. DYNAMIC PROFIT TRAIL: only ACTIVATES after the premium has run
+         +30% from entry (i.e. the explosive move is real). Once active,
+         the bot locks in a trailing stop at 55% of the peak profit — so it
+         rides the rocket but doesn't give back the bulk of a big move on a
+         minor retracement. (Before +30%, no trail → no early exit on noise.)
+      5. 1-minute structural EXHAUSTION — only counts AFTER the move has
+         extended (+15% gain): a single reversal candle mid-rocket is NOT
+         exhaustion. Requires the move to have run, then 1m reversal-w/-volume
+         OR 3 lower-highs/higher-lows to confirm the move is truly done.
+      6. Absolute runaway safety: +250% (edge-case only, NOT a target).
+
+    df_1m/i_1m optional: 1m exhaustion data when available.
     """
     # 1. Square-off — no carry-forward
     if is_square_off_bar:
         return {"exit": True, "reason": "square_off", "exit_premium": cur_premium}
-    # 2. Hard stop
+    # 2. Hard stop — capital protection
     if cur_premium <= pos["stop_premium"]:
         return {"exit": True, "reason": "stop_loss_2000", "exit_premium": max(cur_premium, 0.5)}
+
+    gain_pct = (cur_premium - pos["entry_premium"]) / pos["entry_premium"] * 100
+
     # 3. Opposing-zone trend-rider: underlying reached the opposing 15m zone
     opp = pos.get("opposing_zone_edge")
     if opp is not None:
@@ -200,13 +212,23 @@ def check_intraday_exit(pos, cur_underlying, cur_premium, is_square_off_bar,
             return {"exit": True, "reason": "opposing_zone_reached", "exit_premium": max(cur_premium, 0.5)}
         if pos["direction"] == "SELL" and cur_underlying <= opp:
             return {"exit": True, "reason": "opposing_zone_reached", "exit_premium": max(cur_premium, 0.5)}
-    # 4. 1-minute structural exhaustion
-    if df_1m is not None and i_1m is not None:
+
+    # 4. Dynamic profit trail — activates only after the move is real (+30%)
+    if gain_pct >= 30.0:
+        peak = max(pos.get("peak_premium", cur_premium), cur_premium)
+        peak_gain = (peak - pos["entry_premium"]) / pos["entry_premium"]
+        # lock in 55% of the peak profit (give back only 45% on a retracement)
+        trail_floor = pos["entry_premium"] * (1 + peak_gain * 0.55)
+        if cur_premium <= trail_floor:
+            return {"exit": True, "reason": "dynamic_trail_lock", "exit_premium": max(cur_premium, 0.5)}
+
+    # 5. 1-minute structural exhaustion — only after the move has extended
+    if df_1m is not None and i_1m is not None and gain_pct >= 15.0:
         exhausted, why = one_min_exhaustion(df_1m, i_1m, pos["direction"])
         if exhausted:
             return {"exit": True, "reason": f"1m_exhaustion:{why}", "exit_premium": max(cur_premium, 0.5)}
-    # 5. Runaway safety (NOT a normal target — only extreme gamma spikes)
-    gain_pct = (cur_premium - pos["entry_premium"]) / pos["entry_premium"] * 100
+
+    # 6. Runaway safety (extreme gamma spike edge-case only)
     if gain_pct >= 250:
         return {"exit": True, "reason": "runaway_safety_250pct", "exit_premium": cur_premium}
     return {"exit": False}
@@ -217,32 +239,41 @@ def check_intraday_exit(pos, cur_underlying, cur_premium, is_square_off_bar,
 # ============================================================
 def find_sniper_entry(df_15m, i_15m, df_1m, seg, is_expiry=False):
     """
-    Scan the 1m bars WITHIN the 15m bar at i_15m for an instant zone-touch
-    + volume-delta-confirmed entry (no 15m-close wait).
+    V6.6 BOOM ENTRY TRIGGER. Scan the 1m bars WITHIN the 15m bar at i_15m for
+    an instant zone-touch + 1m volume-delta confirmation (no 15m-close wait).
+
+    Zone quality gate: only EXPLOSIVE institutional zones pass (the historical
+    rejection caused an immediate high-volume expansion move). Weak/choppy
+    consolidation zones are rejected.
+
+    Booster (not a hard gate, to avoid over-filtering): a recent 1m LIQUIDITY
+    SWEEP (smart-money stop-hunt + snap-back) lifts the setup_score.
+
+    Strike selection: a strong delta spike (>= 3x avg) + sweep → ITM strike to
+    catch the rocket's gamma; otherwise ATM.
 
     Returns dict: {direction, zone_type, zone_top, zone_bottom, entry_price,
-                   entry_1m_ts, delta_reason, setup_score, strategy, is_expiry}
-    or None.
-
-    Zones are detected on the 15m frame using data up to the PRIOR completed
-    15m bar (i_15m - 1) to avoid lookahead (the 15m bar i_15m is in-progress).
+                   entry_1m_ts, delta_reason, setup_score, strategy, is_expiry,
+                   explosive, sweep, strike_kind} or None.
     """
     if df_1m is None or len(df_1m) == 0:
         return None
-    # zones from the prior completed 15m bar (no lookahead)
+    # EXPLOSIVE zones from the prior completed 15m bar (no lookahead)
     zone_idx = max(0, i_15m - 1)
     if zone_idx < 40:
         return None
-    zones = detect_zones(df_15m, zone_idx, lookback=40)
+    zones = detect_zones_explosive(df_15m, zone_idx, lookback=40,
+                                   require_explosive=True,
+                                   expansion_lookback=5, min_expansion_atr=1.0)
     if not zones:
         return None
     # the 15m bar's time range
     bar_15m_start = df_15m.index[i_15m]
     bar_15m_end = bar_15m_start + pd.Timedelta(minutes=15)
-    # 1m bars within this 15m window (by time)
     in_window = df_1m[(df_1m.index >= bar_15m_start) & (df_1m.index < bar_15m_end)]
     if len(in_window) == 0:
         return None
+    best = None
     for ts_1m, bar_1m in in_window.iterrows():
         i_1m = df_1m.index.get_loc(ts_1m)
         if i_1m < 6:
@@ -256,21 +287,42 @@ def find_sniper_entry(df_15m, i_15m, df_1m, seg, is_expiry=False):
             )
             if not confirmed:
                 continue
-            entry_price = float(bar_1m["close"])
-            return {
-                "direction": "BUY" if touch == "demand" else "SELL",
+            # delta spike strength (multiple of avg) parsed from the reason
+            spike_mult = 1.8
+            try:
+                spike_mult = float(delta_reason.split()[-1].rstrip("x"))
+            except (ValueError, IndexError):
+                spike_mult = 1.8
+            # liquidity sweep booster
+            direction = "BUY" if touch == "demand" else "SELL"
+            swept, sweep_reason = liquidity_sweep(df_1m, i_1m, direction)
+            score = z["score"] + spike_mult
+            if swept:
+                score += 8  # smart-money stop-hunt boost
+            # ITM when the move looks explosive: strong delta (>=3x) OR a sweep
+            strike_kind = "ITM" if (spike_mult >= 3.0 or swept or is_expiry) else "ATM"
+            candidate = {
+                "direction": direction,
                 "zone_type": touch,
                 "zone_top": z["top"],
                 "zone_bottom": z["bottom"],
-                "entry_price": entry_price,
+                "entry_price": float(bar_1m["close"]),
                 "entry_1m_ts": ts_1m,
                 "entry_1m_idx": i_1m,
                 "delta_reason": delta_reason,
-                "setup_score": z["score"],
-                "strategy": "Demand_Zone_Sniper" if touch == "demand" else "Supply_Zone_Sniper",
+                "sweep": swept,
+                "sweep_reason": sweep_reason if swept else "",
+                "delta_spike_mult": round(spike_mult, 1),
+                "explosive": True,
+                "expansion_pct": z.get("expansion_pct", 0.0),
+                "setup_score": round(score, 1),
+                "strategy": "Demand_Boom_Sniper" if touch == "demand" else "Supply_Boom_Sniper",
+                "strike_kind": strike_kind,
                 "is_expiry": is_expiry,
             }
-    return None
+            if best is None or candidate["setup_score"] > best["setup_score"]:
+                best = candidate
+    return best
 
 
 # ============================================================
@@ -331,6 +383,9 @@ def run_intraday_backtest(
                 iv = max(min(realized_vol_simple(df_so_far), 0.80), 0.12)
                 is_call = pos["option_type"] == "CE"
                 cur_prem = atm_premium(cur_underlying, pos["strike"], pos["dte"], is_call, iv)
+                # V6.6: track peak premium for the dynamic trailing stop
+                if cur_prem > pos.get("peak_premium", 0):
+                    pos["peak_premium"] = cur_prem
                 sq_off = _is_square_off_bar(ts, seg)
                 # 1m exhaustion data (if available) — find the 1m idx for this ts
                 i_1m_pos = None
@@ -421,13 +476,12 @@ def run_intraday_backtest(
                 iv = max(min(realized_vol_simple(df_so_far), 0.80), 0.12)
                 is_call = setup["direction"] == "BUY"
 
-                # Brain 3 (V6.5): expiry-day zero-to-hero → ITM strike to
-                # capture gamma spikes from short-covering. ITM call strike
-                # slightly below spot; ITM put slightly above. On a demand
-                # touch on expiry, call-writer unwind (proxy: strong buy
-                # delta spike) → use ITM for the exponential premium pop.
-                if expiry and "delta" in setup.get("delta_reason", ""):
-                    # ITM strike ~1% in-the-money
+                # V6.6 strike selection: sniper carries strike_kind (ATM/ITM).
+                # ITM (call below spot / put above spot) for explosive rockets
+                # to capture gamma; ATM otherwise. Expiry-day ITM retained.
+                strike_kind = setup.get("strike_kind", "ATM")
+                delta_in_reason = "delta" in setup.get("delta_reason", "")
+                if (expiry and delta_in_reason) or strike_kind == "ITM":
                     if is_call:
                         strike = round(cur_underlying * 0.99)
                     else:
@@ -505,6 +559,13 @@ def run_intraday_backtest(
                     "delta_reason": setup.get("delta_reason", "n/a"),
                     "entry_spread_pct": round(spread_pct, 2),
                     "expiry_trade": expiry,
+                    "strike_kind": setup.get("strike_kind", "ATM"),
+                    "explosive": setup.get("explosive", False),
+                    "expansion_pct": setup.get("expansion_pct", 0.0),
+                    "sweep": setup.get("sweep", False),
+                    "sweep_reason": setup.get("sweep_reason", ""),
+                    "delta_spike_mult": setup.get("delta_spike_mult", 0.0),
+                    "peak_premium": entry_prem,  # V6.6 dynamic trailing tracker
                     "dte": dte_default,
                 }
                 open_positions.append(pos)
@@ -622,14 +683,14 @@ def _compute_metrics(trades, equity_curve, start_capital, max_dd, daily_seg_coun
 def print_report(result: dict) -> None:
     t = result["totals"]
     print("=" * 72)
-    print("  TIGER BRAIN V6.5 — S/D SNIPER + NSE/MCX INSTITUTIONAL ENGINE")
+    print("  TIGER BRAIN V6.6 — EXPLOSIVE S/D MOMENTUM SNIPER (NSE/MCX)")
     print("=" * 72)
     print("  Mode:  PURE INTRADAY | Supply/Demand ZONES ONLY (core untouched)")
     print("        NO VWAP, NO RS, NO EMA, NO Black-Scholes")
-    print("  ① Pre-market gun-powder scanner (daily+4H coiled zones)")
-    print("  ② 15m zone + 1m volume-delta sniper (instant touch, no close wait)")
+    print("  ① Pre-market gun-powder scanner (daily+4H EXPLOSIVE coiled zones)")
+    print("  ② 15m EXPLOSIVE zone + 1m volume-delta sniper + liquidity sweep")
     print("  ③ Expiry-day zero-to-hero (ITM gamma on short-covering proxy)")
-    print("  ④ Opposing-zone trend rider (no fixed % target) + 1m exhaustion")
+    print("  ④ Opposing-zone momentum rider + dynamic profit-trail lock")
     print("  ⑤ NSE 15:15 / MCX 23:15 square-off, ₹2000 stop, 5-10 trades/day")
     print(f"  Starting Capital:   ₹{t['start_capital']:>12,.0f}")
     print(f"  Final Equity:        ₹{t['final_equity']:>12,.0f}")
@@ -693,11 +754,31 @@ def print_report(result: dict) -> None:
     avg_sp = sum(spreads) / len(spreads) if spreads else 0
     print(f"  Avg entry spread:    {avg_sp:>12.2f}%  (gate: ≤0.5%)")
     print("-" * 72)
-    print("  EXIT REASON BREAKDOWN (Brain 5)")
+    print("  EXIT REASON BREAKDOWN (Brain 5 momentum rider)")
     print("-" * 72)
     reasons = Counter(t["exit_reason"] for t in result["trades"])
     for r, c in reasons.most_common():
         print(f"  {r:<24s} {c:>5d} trades")
+    # --- BIG MOMENTUM MOVES (the explosive captures) ---
+    big = []
+    for tr in result["trades"]:
+        gain_pct = (tr["exit_premium"] - tr["entry_premium"]) / tr["entry_premium"] * 100
+        if gain_pct >= 50.0 or tr["pnl"] >= 2000:
+            big.append((tr, gain_pct))
+    big.sort(key=lambda x: x[1], reverse=True)
+    print("-" * 72)
+    print(f"  EXPLOSIVE CAPTURES (premium +50% or P&L ≥ ₹2,000): {len(big)} trades")
+    print("-" * 72)
+    if big:
+        print(f"  {'Symbol':<12s} {'Dir':<5s} {'Strike':>8s} {'Kind':<4s} "
+              f"{'Entry':>7s} {'Exit':>7s} {'%':>7s} {'P&L':>8s} {'Sweep':<5s} {'ExitReason':<20s}")
+        for tr, gp in big[:15]:
+            print(f"  {tr['symbol']:<12s} {tr['direction']:<5s} {tr['strike']:>8d} "
+                  f"{tr.get('strike_kind','ATM'):<4s} {tr['entry_premium']:>7.1f} "
+                  f"{tr['exit_premium']:>7.1f} {gp:>6.0f}% ₹{tr['pnl']:>6.0f} "
+                  f"{'Y' if tr.get('sweep') else 'n':<5s} {tr['exit_reason']:<20s}")
+    else:
+        print("  (no trade crossed +50% in this sample)")
     print("=" * 72)
     print("  HONESTY NOTES")
     print("=" * 72)
