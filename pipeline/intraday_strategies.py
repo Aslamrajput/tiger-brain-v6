@@ -294,3 +294,149 @@ def _simple_range(df: pd.DataFrame, i: int, window: int = 20) -> float:
         return float(df["high"].iloc[:i + 1].max() - df["low"].iloc[:i + 1].min() or 1.0)
     w = df.iloc[i - window + 1:i + 1]
     return float((w["high"] - w["low"]).mean() or 1.0)
+
+
+# ============================================================
+# V6.5 — 1-minute VOLUME DELTA sniper (Brain 2 sharp entry)
+# ============================================================
+def volume_delta(bar) -> float:
+    """
+    Approximate 1-minute volume delta (buy-minus-sell pressure).
+
+    True volume delta needs tick-level bid/ask trade classification (tick
+    rule). yfinance 1m OHLCV gives only candle OHLC + volume, so we use the
+    standard proxy: split the bar's volume by the fraction of the range
+    above/below the open.
+      - close > open (bullish)  => positive delta (buy pressure)
+      - close < open (bearish)  => negative delta (sell pressure)
+      magnitude = volume * |close-open| / range
+    This is a well-known proxy used when tick data is unavailable.
+    """
+    o, c, h, l, v = (float(bar["open"]), float(bar["close"]),
+                     float(bar["high"]), float(bar["low"]),
+                     float(bar.get("volume", 0) or 0))
+    rng = h - l
+    if rng <= 0 or v <= 0:
+        return 0.0
+    direction = 1.0 if c >= o else -1.0
+    strength = abs(c - o) / rng  # 0..1 body fraction
+    return direction * v * strength
+
+
+def delta_spike_confirms(df_1m, i, zone_type, lookback: int = 5) -> tuple[bool, float, str]:
+    """
+    Check if the 1m bar at index i shows a sharp volume-delta spike that
+    CONFIRMS institutional buying (demand) or selling (supply).
+
+    A "spike" = current |delta| >= 1.8x the average |delta| of the last
+    `lookback` 1m bars AND in the correct direction.
+
+    Returns (confirmed, delta_value, reason).
+    """
+    if i < lookback + 1:
+        return (False, 0.0, "insufficient 1m bars")
+    cur_delta = volume_delta(df_1m.iloc[i])
+    recent_deltas = [abs(volume_delta(df_1m.iloc[j]))
+                     for j in range(i - lookback, i)]
+    avg_abs = sum(recent_deltas) / len(recent_deltas) if recent_deltas else 0.0
+    if avg_abs <= 0:
+        return (False, cur_delta, "no prior volume")
+    spike = abs(cur_delta) >= avg_abs * 1.8
+    if zone_type == "demand":
+        if cur_delta > 0 and spike:
+            return (True, cur_delta, f"buy-delta-spike {abs(cur_delta)/avg_abs:.1f}x")
+        return (False, cur_delta, "no buy-delta spike")
+    # supply
+    if cur_delta < 0 and spike:
+        return (True, cur_delta, f"sell-delta-spike {abs(cur_delta)/avg_abs:.1f}x")
+    return (False, cur_delta, "no sell-delta spike")
+
+
+def zone_touched_on_1m(bar, zone) -> str | None:
+    """
+    Did a 1m bar TOUCH a 15m zone? Returns 'demand' / 'supply' / None.
+      demand touch: 1m low <= zone top  AND 1m low >= zone bottom*0.98
+      supply touch: 1m high >= zone bottom AND 1m high <= zone top*1.02
+    """
+    low = float(bar["low"])
+    high = float(bar["high"])
+    if zone["type"] == "demand" and low <= zone["top"] and low >= zone["bottom"] * 0.98:
+        return "demand"
+    if zone["type"] == "supply" and high >= zone["bottom"] and high <= zone["top"] * 1.02:
+        return "supply"
+    return None
+
+
+# ============================================================
+# V6.5 — 1m STRUCTURAL EXHAUSTION (Brain 5 trailing exit)
+# ============================================================
+def one_min_exhaustion(df_1m, i, direction: str, lookback: int = 4) -> tuple[bool, str]:
+    """
+    Detect structural exhaustion on the 1m chart to exit a trend rider.
+
+    For a BUY (long call) position:
+      - exhaustion = a bearish 1m reversal candle with above-average volume
+        (institutional distribution) OR 3 consecutive lower highs.
+    For a SELL (long put) position:
+      - exhaustion = a bullish 1m reversal candle with above-average volume
+        OR 3 consecutive higher lows.
+
+    Returns (exhausted, reason).
+    """
+    if i < lookback + 1:
+        return (False, "insufficient 1m bars")
+    bars = df_1m.iloc[i - lookback + 1:i + 1]
+    avg_vol = float(bars["volume"].mean() or 1)
+    cur = df_1m.iloc[i]
+    cur_vol = float(cur.get("volume", 0) or 0)
+    cur_close, cur_open = float(cur["close"]), float(cur["open"])
+
+    if direction == "BUY":
+        # bearish reversal candle w/ volume = exhaustion
+        bearish = cur_close < cur_open
+        vol_spike = cur_vol > avg_vol * 1.3
+        # 3 consecutive lower highs
+        highs = [float(bars.iloc[j]["high"]) for j in range(len(bars))]
+        lower_highs = len(highs) >= 3 and all(highs[k] < highs[k - 1] for k in range(1, len(highs)))
+        if bearish and vol_spike:
+            return (True, "bearish-reversal-vol")
+        if lower_highs:
+            return (True, "3-lower-highs")
+    else:  # SELL (long put)
+        bullish = cur_close > cur_open
+        vol_spike = cur_vol > avg_vol * 1.3
+        lows = [float(bars.iloc[j]["low"]) for j in range(len(bars))]
+        higher_lows = len(lows) >= 3 and all(lows[k] > lows[k - 1] for k in range(1, len(lows)))
+        if bullish and vol_spike:
+            return (True, "bullish-reversal-vol")
+        if higher_lows:
+            return (True, "3-higher-lows")
+    return (False, "trend-intact")
+
+
+def find_opposing_zone(df_15m, i_15m, entry_zone_type: str,
+                       lookback: int = 40) -> dict | None:
+    """
+    Find the nearest OPPOSING 15m institutional zone for the trend-rider exit.
+      Bought at DEMAND → exit at the nearest SUPPLY zone.
+      Bought at SUPPLY → exit at the nearest DEMAND zone.
+    Returns the zone dict (with top/bottom) or None.
+    """
+    zones = detect_zones(df_15m, i_15m, lookback=lookback)
+    target_type = "supply" if entry_zone_type == "demand" else "demand"
+    opp = [z for z in zones if z["type"] == target_type]
+    if not opp:
+        return None
+    cur_price = float(df_15m.iloc[i_15m]["close"])
+    # nearest zone by distance to current price (in the trade direction)
+    if entry_zone_type == "demand":
+        # going up, pick nearest supply ABOVE current price
+        above = [z for z in opp if z["bottom"] > cur_price]
+        if above:
+            return min(above, key=lambda z: z["bottom"])
+        return max(opp, key=lambda z: z["top"])  # fallback closest
+    else:
+        below = [z for z in opp if z["top"] < cur_price]
+        if below:
+            return max(below, key=lambda z: z["top"])
+        return min(opp, key=lambda z: z["bottom"])

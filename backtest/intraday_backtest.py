@@ -28,11 +28,16 @@ import numpy as np
 import pandas as pd
 
 try:
-    from pipeline.intraday_strategies import scan_zones, _simple_range
+    from pipeline.intraday_strategies import (
+        scan_zones, _simple_range, detect_zones,
+        volume_delta, delta_spike_confirms, zone_touched_on_1m,
+        one_min_exhaustion, find_opposing_zone,
+    )
     from universe.fno_universe import (
         UNIVERSE, lot_size, segment_of,
         ENTRY_WINDOWS, SQUARE_OFF_TIME,
-        entry_windows_for, square_off_for, liquidity_tier,
+        entry_windows_for, square_off_for, liquidity_tier, is_expiry_day,
+        scan_universe,
     )
     from risk.risk_management import TradeCounterGuard
 except ImportError:
@@ -165,26 +170,107 @@ def size_with_hard_stop(entry_premium, stop_premium, lot_sz, max_loss=2000.0):
 
 
 # ============================================================
-# Brain 5 — intraday exit logic
+# Brain 5 — DYNAMIC OPPOSING-ZONE TREND RIDER (V6.5)
 # ============================================================
-def check_intraday_exit(pos, cur_underlying, cur_premium, is_square_off_bar) -> dict:
-    # 1. Square-off at 03:15 — highest priority, no carry
+def check_intraday_exit(pos, cur_underlying, cur_premium, is_square_off_bar,
+                        df_1m=None, i_1m=None) -> dict:
+    """
+    Trend-rider exit logic (NO fixed % target):
+      1. Square-off at segment close (NSE 15:15 / MCX 23:15) — highest priority.
+      2. ₹2,000 hard stop (option premium breached).
+      3. OPPOSING 15m institutional zone hit → ride ends there.
+      4. 1-minute structural exhaustion (reversal candle w/ volume OR 3
+         lower-highs/higher-lows) → order flow signals the move is done.
+      5. Absolute runaway safety: +250% (only to avoid a never-exit edge
+         case; NOT a normal profit target).
+
+    df_1m/i_1m optional: when 1m data is provided, exhaustion is checked
+    on the 1m chart. Otherwise falls back to the underlying zone-break.
+    """
+    # 1. Square-off — no carry-forward
     if is_square_off_bar:
-        return {"exit": True, "reason": "square_off_1515", "exit_premium": cur_premium}
-    # 2. ₹2,000 hard stop
+        return {"exit": True, "reason": "square_off", "exit_premium": cur_premium}
+    # 2. Hard stop
     if cur_premium <= pos["stop_premium"]:
         return {"exit": True, "reason": "stop_loss_2000", "exit_premium": max(cur_premium, 0.5)}
-    # 3. Target scalp +40%
+    # 3. Opposing-zone trend-rider: underlying reached the opposing 15m zone
+    opp = pos.get("opposing_zone_edge")
+    if opp is not None:
+        if pos["direction"] == "BUY" and cur_underlying >= opp:
+            return {"exit": True, "reason": "opposing_zone_reached", "exit_premium": max(cur_premium, 0.5)}
+        if pos["direction"] == "SELL" and cur_underlying <= opp:
+            return {"exit": True, "reason": "opposing_zone_reached", "exit_premium": max(cur_premium, 0.5)}
+    # 4. 1-minute structural exhaustion
+    if df_1m is not None and i_1m is not None:
+        exhausted, why = one_min_exhaustion(df_1m, i_1m, pos["direction"])
+        if exhausted:
+            return {"exit": True, "reason": f"1m_exhaustion:{why}", "exit_premium": max(cur_premium, 0.5)}
+    # 5. Runaway safety (NOT a normal target — only extreme gamma spikes)
     gain_pct = (cur_premium - pos["entry_premium"]) / pos["entry_premium"] * 100
-    if gain_pct >= 40:
-        return {"exit": True, "reason": "target_40pct", "exit_premium": cur_premium}
-    # 4. Structural stop — underlying crossed the zone edge
-    if pos.get("zone_edge") is not None:
-        if pos["direction"] == "BUY" and cur_underlying <= pos["zone_edge"]:
-            return {"exit": True, "reason": "zone_break", "exit_premium": max(cur_premium, 0.5)}
-        if pos["direction"] == "SELL" and cur_underlying >= pos["zone_edge"]:
-            return {"exit": True, "reason": "zone_break", "exit_premium": max(cur_premium, 0.5)}
+    if gain_pct >= 250:
+        return {"exit": True, "reason": "runaway_safety_250pct", "exit_premium": cur_premium}
     return {"exit": False}
+
+
+# ============================================================
+# V6.5 — 1m SNIPER ENTRY: 15m zone touch + 1m volume delta
+# ============================================================
+def find_sniper_entry(df_15m, i_15m, df_1m, seg, is_expiry=False):
+    """
+    Scan the 1m bars WITHIN the 15m bar at i_15m for an instant zone-touch
+    + volume-delta-confirmed entry (no 15m-close wait).
+
+    Returns dict: {direction, zone_type, zone_top, zone_bottom, entry_price,
+                   entry_1m_ts, delta_reason, setup_score, strategy, is_expiry}
+    or None.
+
+    Zones are detected on the 15m frame using data up to the PRIOR completed
+    15m bar (i_15m - 1) to avoid lookahead (the 15m bar i_15m is in-progress).
+    """
+    if df_1m is None or len(df_1m) == 0:
+        return None
+    # zones from the prior completed 15m bar (no lookahead)
+    zone_idx = max(0, i_15m - 1)
+    if zone_idx < 40:
+        return None
+    zones = detect_zones(df_15m, zone_idx, lookback=40)
+    if not zones:
+        return None
+    # the 15m bar's time range
+    bar_15m_start = df_15m.index[i_15m]
+    bar_15m_end = bar_15m_start + pd.Timedelta(minutes=15)
+    # 1m bars within this 15m window (by time)
+    in_window = df_1m[(df_1m.index >= bar_15m_start) & (df_1m.index < bar_15m_end)]
+    if len(in_window) == 0:
+        return None
+    for ts_1m, bar_1m in in_window.iterrows():
+        i_1m = df_1m.index.get_loc(ts_1m)
+        if i_1m < 6:
+            continue
+        for z in zones:
+            touch = zone_touched_on_1m(bar_1m, z)
+            if touch is None:
+                continue
+            confirmed, delta_val, delta_reason = delta_spike_confirms(
+                df_1m, i_1m, touch
+            )
+            if not confirmed:
+                continue
+            entry_price = float(bar_1m["close"])
+            return {
+                "direction": "BUY" if touch == "demand" else "SELL",
+                "zone_type": touch,
+                "zone_top": z["top"],
+                "zone_bottom": z["bottom"],
+                "entry_price": entry_price,
+                "entry_1m_ts": ts_1m,
+                "entry_1m_idx": i_1m,
+                "delta_reason": delta_reason,
+                "setup_score": z["score"],
+                "strategy": "Demand_Zone_Sniper" if touch == "demand" else "Supply_Zone_Sniper",
+                "is_expiry": is_expiry,
+            }
+    return None
 
 
 # ============================================================
@@ -198,7 +284,15 @@ def run_intraday_backtest(
     max_capital_per_trade_pct: float = 10.0,
     dte_default: float = 1.0,
     verbose: bool = False,
+    data_map_1m: dict | None = None,
 ) -> dict:
+    """
+    V6.5 engine. If data_map_1m (1m OHLCV per symbol) is provided, entry
+    uses the 15m-zone + 1m-volume-delta SNIPER (instant touch, no 15m-close
+    wait) and exit uses the opposing-zone trend rider with 1m exhaustion.
+    If absent, falls back to the 15m confirmed-zone path.
+    """
+    use_sniper = data_map_1m is not None
     all_ts = sorted(set().union(*[set(d.index) for d in data_map.values()]))
     days = defaultdict(list)
     for ts in all_ts:
@@ -223,7 +317,7 @@ def run_intraday_backtest(
             counter.commodity_count = 0
 
         for ts in day_ts:
-            # --- 1. EXIT open positions (Brain 5) ---
+            # --- 1. EXIT open positions (Brain 5 trend rider) ---
             still_open = []
             for pos in open_positions:
                 sym = pos["symbol"]
@@ -238,8 +332,16 @@ def run_intraday_backtest(
                 is_call = pos["option_type"] == "CE"
                 cur_prem = atm_premium(cur_underlying, pos["strike"], pos["dte"], is_call, iv)
                 sq_off = _is_square_off_bar(ts, seg)
+                # 1m exhaustion data (if available) — find the 1m idx for this ts
+                i_1m_pos = None
+                df_1m_pos = None
+                if use_sniper and data_map_1m and sym in data_map_1m:
+                    df_1m_pos = data_map_1m[sym]
+                    if ts in df_1m_pos.index:
+                        i_1m_pos = df_1m_pos.index.get_loc(ts)
 
-                ex = check_intraday_exit(pos, cur_underlying, cur_prem, sq_off)
+                ex = check_intraday_exit(pos, cur_underlying, cur_prem, sq_off,
+                                         df_1m=df_1m_pos, i_1m=i_1m_pos)
                 if ex["exit"]:
                     exit_prem = ex["exit_premium"]
                     slippage = exit_prem * 0.008 + pos["entry_premium"] * 0.008
@@ -260,9 +362,9 @@ def run_intraday_backtest(
             open_positions = still_open
 
             # --- 2. SCAN ZONES + ENTER (Brains 1,2,3,4) ---
-            # Square-off is segment-aware (NSE 15:15, MCX 23:15); checked
-            # per-candidate below since a single timestamp may be square-off
-            # for one segment but not another.
+            # Brain 2 (V6.5): 15m-zone + 1m-VOLUME-DELTA SNIPER when 1m data
+            # is available (instant touch, no 15m-close wait). Falls back to
+            # the 15m confirmed-zone path when no 1m data.
             day_candidates = []
             for sym, df_sym in data_map.items():
                 if ts not in df_sym.index:
@@ -278,14 +380,25 @@ def run_intraday_backtest(
                 # Skip if this is a square-off bar for the symbol's segment
                 if _is_square_off_bar(ts, seg):
                     continue
-                # Brain 2: CONFIRMED Supply/Demand zone touch (rejection filter)
-                setups = scan_zones(df_sym, idx, lookback=40, require_confirm=True)
-                if not setups:
-                    continue
-                best = max(setups, key=lambda s: s["setup_score"])
+                # Brain 3 (V6.5): expiry-day zero-to-hero flag
+                expiry = use_sniper and is_expiry_day(sym, ts)
+
+                if use_sniper and data_map_1m and sym in data_map_1m:
+                    # 15m-zone + 1m volume-delta sniper
+                    sniper = find_sniper_entry(df_sym, idx, data_map_1m[sym],
+                                               seg, is_expiry=expiry)
+                    if sniper is None:
+                        continue
+                    best = sniper
+                else:
+                    # 15m confirmed-zone fallback
+                    setups = scan_zones(df_sym, idx, lookback=40, require_confirm=True)
+                    if not setups:
+                        continue
+                    best = max(setups, key=lambda s: s["setup_score"])
                 day_candidates.append({
                     "symbol": sym, "setup": best, "df_sym": df_sym,
-                    "idx": idx, "ts": ts, "seg": seg,
+                    "idx": idx, "ts": ts, "seg": seg, "expiry": expiry,
                 })
 
             day_candidates.sort(key=lambda c: c["setup"]["setup_score"], reverse=True)
@@ -302,11 +415,25 @@ def run_intraday_backtest(
                 setup = cand["setup"]
                 df_sym = cand["df_sym"]
                 idx = cand["idx"]
+                expiry = cand.get("expiry", False)
                 cur_underlying = float(df_sym.iloc[idx]["close"])
                 df_so_far = df_sym.loc[:ts]
                 iv = max(min(realized_vol_simple(df_so_far), 0.80), 0.12)
                 is_call = setup["direction"] == "BUY"
-                strike = round(cur_underlying)
+
+                # Brain 3 (V6.5): expiry-day zero-to-hero → ITM strike to
+                # capture gamma spikes from short-covering. ITM call strike
+                # slightly below spot; ITM put slightly above. On a demand
+                # touch on expiry, call-writer unwind (proxy: strong buy
+                # delta spike) → use ITM for the exponential premium pop.
+                if expiry and "delta" in setup.get("delta_reason", ""):
+                    # ITM strike ~1% in-the-money
+                    if is_call:
+                        strike = round(cur_underlying * 0.99)
+                    else:
+                        strike = round(cur_underlying * 1.01)
+                else:
+                    strike = round(cur_underlying)
                 entry_prem = atm_premium(cur_underlying, strike, dte_default, is_call, iv)
                 entry_prem = max(entry_prem, 1.0)
 
@@ -342,6 +469,21 @@ def run_intraday_backtest(
 
                 # zone edge = zone bottom (for demand/buy) or zone top (supply/sell)
                 zone_edge = setup["zone_bottom"] if is_call else setup["zone_top"]
+                # Brain 5 (V6.5): opposing 15m zone = trend-rider exit target.
+                # Bought at demand → ride to nearest supply; bought at supply
+                # → ride to nearest demand. Find the opposing zone now.
+                opp_zone = None
+                if idx - 1 >= 40:
+                    opp_zone = find_opposing_zone(df_sym, idx - 1, setup["zone_type"])
+                # opposing edge: supply bottom (going up) or demand top (going down)
+                if is_call and opp_zone:  # going up to supply
+                    opposing_zone_edge = opp_zone["bottom"]
+                elif (not is_call) and opp_zone:  # going down to demand
+                    opposing_zone_edge = opp_zone["top"]
+                else:
+                    # no opposing zone found → fall back to a +6 ATR trail target
+                    atr = _simple_range(df_sym, idx)
+                    opposing_zone_edge = (cur_underlying + atr * 6) if is_call else (cur_underlying - atr * 6)
 
                 pos = {
                     "symbol": sym, "segment": seg,
@@ -357,8 +499,12 @@ def run_intraday_backtest(
                     "entry_ts": ts, "entry_idx": idx,
                     "zone_type": setup["zone_type"],
                     "zone_edge": zone_edge,
-                    "confirmation": setup.get("confirmation", "n/a"),
+                    "opposing_zone_edge": opposing_zone_edge,
+                    "confirmation": setup.get("confirmation",
+                                              setup.get("delta_reason", "n/a")),
+                    "delta_reason": setup.get("delta_reason", "n/a"),
                     "entry_spread_pct": round(spread_pct, 2),
+                    "expiry_trade": expiry,
                     "dte": dte_default,
                 }
                 open_positions.append(pos)
@@ -476,13 +622,15 @@ def _compute_metrics(trades, equity_curve, start_capital, max_dd, daily_seg_coun
 def print_report(result: dict) -> None:
     t = result["totals"]
     print("=" * 72)
-    print("  TIGER BRAIN V6.4 — PURE S/D + NSE/MCX INSTITUTIONAL SHIELD")
+    print("  TIGER BRAIN V6.5 — S/D SNIPER + NSE/MCX INSTITUTIONAL ENGINE")
     print("=" * 72)
-    print("  Mode:  PURE INTRADAY (15-min) | Supply/Demand ZONES ONLY")
+    print("  Mode:  PURE INTRADAY | Supply/Demand ZONES ONLY (core untouched)")
     print("        NO VWAP, NO RS, NO EMA, NO Black-Scholes")
-    print("  Shield: ① Zone confirmation (rejection wick/struct break)")
-    print("          ② NSE 15:15 / MCX 23:15 square-off")
-    print("          ③ Spread gate ≤0.5% (liquidity safety)")
+    print("  ① Pre-market gun-powder scanner (daily+4H coiled zones)")
+    print("  ② 15m zone + 1m volume-delta sniper (instant touch, no close wait)")
+    print("  ③ Expiry-day zero-to-hero (ITM gamma on short-covering proxy)")
+    print("  ④ Opposing-zone trend rider (no fixed % target) + 1m exhaustion")
+    print("  ⑤ NSE 15:15 / MCX 23:15 square-off, ₹2000 stop, 5-10 trades/day")
     print(f"  Starting Capital:   ₹{t['start_capital']:>12,.0f}")
     print(f"  Final Equity:        ₹{t['final_equity']:>12,.0f}")
     print(f"  Total Return:        {t['total_return_pct']:>12.2f}%")
@@ -563,6 +711,18 @@ def print_report(result: dict) -> None:
     print("=" * 72)
 
 
+def _normalize_cols(df):
+    if df is None or df.empty:
+        return df
+    df = df.copy()
+    df.columns = [c.lower() if isinstance(c, str)
+                  else (c[0].lower() if hasattr(c, "__len__") else str(c).lower())
+                  for c in df.columns]
+    df.index = pd.to_datetime(df.index)
+    df = df.dropna(subset=["close"])
+    return df
+
+
 if __name__ == "__main__":
     import sys
     sys.path.insert(0, ".")
@@ -570,50 +730,75 @@ if __name__ == "__main__":
     from universe.fno_universe import all_symbols
 
     logging.basicConfig(level=logging.INFO)
-    print("Fetching 15-min intraday data via yfinance (~60 days)...")
-    period = "60d"
-    interval = "15m"
+
+    # ============================================================
+    # BRAIN 1 — Pre-market gun-powder scanner (daily + 4H)
+    # ============================================================
+    print("\n" + "#" * 72)
+    print("#  BRAIN 1 — PRE-MARKET 'GUN-POWDER' SCANNER")
+    print("#" * 72)
+    from pipeline.premarket_scanner import run_premarket_scan, print_watchlist
+    # Full scan is slow (161 symbols × daily+4H); run on the traded universe.
+    scan_syms = all_symbols()
+    scan_res = run_premarket_scan(symbols=scan_syms)
+    print_watchlist(scan_res)
+    explosive = {w["symbol"] for w in scan_res["watchlist"]}
+    print(f"\n  → {len(explosive)} explosive assets on the watchlist for live session.\n")
+
+    # ============================================================
+    # Fetch 15m + 1m intraday data (V6.5 sniper needs both)
+    # ============================================================
+    print("Fetching 15-min + 1-min intraday data via yfinance (~7 days for 1m)...")
+    print("  (yfinance 1m history is capped at 7 days; 15m at 60 days. The")
+    print("   engine aligns the overlapping 7-day window for the sniper.)")
+    period_15m, period_1m = "60d", "7d"
 
     syms = all_symbols()
     data_map = {}
+    data_map_1m = {}
     failed = []
     for sym, tk in syms.items():
-        d = yf.download(tk, period=period, interval=interval, progress=False)
+        d = yf.download(tk, period=period_15m, interval="15m", progress=False)
         if d is None or d.empty:
             failed.append(sym)
             continue
-        d = d.copy()
-        d.columns = [c.lower() if isinstance(c, str) else (c[0].lower() if hasattr(c, '__len__') else str(c).lower()) for c in d.columns]
-        d.index = pd.to_datetime(d.index)
-        d = d.dropna(subset=["close"])
+        d = _normalize_cols(d)
         data_map[sym] = d
-        print(f"  {sym:14s}: {len(d):5d} bars")
+        # 1m data for the sniper (only the last 7 days)
+        d1 = yf.download(tk, period=period_1m, interval="1m", progress=False)
+        if d1 is not None and not d1.empty:
+            d1 = _normalize_cols(d1)
+            data_map_1m[sym] = d1
+        print(f"  {sym:14s}: 15m={len(d):5d}  1m={len(data_map_1m.get(sym, [])):5d}")
 
     print(f"\nFailed symbols: {failed}")
-    print(f"Universe loaded: {len(data_map)} symbols")
+    print(f"Universe loaded: 15m={len(data_map)}  1m={len(data_map_1m)}")
 
-    # Per-segment standalone + combined
+    # Per-segment standalone + combined (V6.5 sniper mode)
     from universe.fno_universe import UNIVERSE as _UNI
     seg_results = {}
     for seg_key in ("index", "stock", "commodity"):
         seg_syms = list(_UNI[seg_key]["symbols"].keys())
         seg_map = {s: data_map[s] for s in seg_syms if s in data_map}
+        seg_map_1m = {s: data_map_1m[s] for s in seg_syms if s in data_map_1m}
         if not seg_map:
             seg_results[seg_key] = None
             continue
         print(f"\nRunning {seg_key} standalone ({len(seg_map)} symbols, ₹1.5L)...")
         seg_results[seg_key] = run_intraday_backtest(
-            seg_map, start_capital=150000.0, max_loss_per_trade=2000.0
+            seg_map, start_capital=150000.0, max_loss_per_trade=2000.0,
+            data_map_1m=seg_map_1m if seg_map_1m else None,
         )
 
     print(f"\nRunning COMBINED portfolio (₹1.5L, {len(data_map)} symbols)...")
     combined = run_intraday_backtest(
-        data_map, start_capital=150000.0, max_loss_per_trade=2000.0
+        data_map, start_capital=150000.0, max_loss_per_trade=2000.0,
+        data_map_1m=data_map_1m if data_map_1m else None,
     )
 
     print("\n\n")
     print("#" * 72)
-    print("#  PART 1 — COMBINED PORTFOLIO (all segments, shared daily cap)")
+    print("#  PART 1 — COMBINED PORTFOLIO (V6.5 sniper + trend rider)")
     print("#" * 72)
     print_report(combined)
 

@@ -119,6 +119,92 @@ COMMODITY_SYMBOLS = {
     "GOLD": "GC=F",
 }
 
+# ============================================================
+# EXPANDED SCAN UNIVERSE — 150+ liquid NSE F&O stocks (Brain 1 scanner)
+# ============================================================
+# Broader high-liquidity F&O list for the pre-market gun-powder scanner.
+# These are real, actively-traded NSE F&O names. Lot sizes approximated
+# for sizing; the scanner uses daily/4H zones (lot size not critical there).
+SCAN_STOCK_SYMBOLS = {
+    # --- Financials ---
+    "RELIANCE": "RELIANCE.NS", "SBIN": "SBIN.NS", "HDFCBANK": "HDFCBANK.NS",
+    "ICICIBANK": "ICICIBANK.NS", "AXISBANK": "AXISBANK.NS", "KOTAKBANK": "KOTAKBANK.NS",
+    "BAJFINANCE": "BAJFINANCE.NS", "BAJAJFINSV": "BAJAJFINSV.NS", "INDUSINDBK": "INDUSINDBK.NS",
+    "AUBANK": "AUBANK.NS", "FEDERALBNK": "FEDERALBNK.NS", "IDFCFIRSTB": "IDFCFIRSTB.NS",
+    "PNB": "PNB.NS", "BANKBARODA": "BANKBARODA.NS", "CANBK": "CANBK.NS",
+    "SBILIFE": "SBILIFE.NS", "HDFCLIFE": "HDFCLIFE.NS", "ICICIPRULI": "ICICIPRULI.NS",
+    "SBICARD": "SBICARD.NS", "CHOLAFIN": "CHOLAFIN.NS", "MUTHOOTFIN": "MUTHOOTFIN.NS",
+    "PFC": "PFC.NS", "RECLTD": "RECLTD.NS", "M&MFIN": "MMFIN.NS",
+    # --- IT ---
+    "TCS": "TCS.NS", "INFY": "INFY.NS", "WIPRO": "WIPRO.NS", "HCLTECH": "HCLTECH.NS",
+    "TECHM": "TECHM.NS", "LTIM": "LTIM.NS", "COFORGE": "COFORGE.NS",
+    # --- Energy / Oil / Metals ---
+    "ONGC": "ONGC.NS", "COALINDIA": "COALINDIA.NS", "NTPC": "NTPC.NS", "POWERGRID": "POWERGRID.NS",
+    "TATASTEEL": "TATASTEEL.NS", "JSWSTEEL": "JSWSTEEL.NS", "HINDALCO": "HINDALCO.NS",
+    "JINDALSTEL": "JINDALSTEL.NS", "SAIL": "SAIL.NS", "VEDL": "VEDL.NS",
+    "NATIONALUM": "NATIONALUM.NS", "HINDZINC": "HINDZINC.NS",
+    "GAIL": "GAIL.NS", "IGL": "IGL.NS", "PETRONET": "PETRONET.NS", "OIL": "OIL.NS",
+    # --- Auto ---
+    "MARUTI": "MARUTI.NS", "TATAMOTORS": "TATAMOTORS.NS", "M&M": "M&M.NS",
+    "EICHERMOT": "EICHERMOT.NS", "BOSCHLTD": "BOSCHLTD.NS", "HEROMOTOCO": "HEROMOTOCO.NS",
+    "BAJAJ-AUTO": "BAJAJ-AUTO.NS", "TVSMOTOR": "TVSMOTOR.NS", "ASHOKLEY": "ASHOKLEY.NS",
+    "MOTHERSON": "MOTHERSON.NS", "BALKRISIND": "BALKRISIND.NS", "TIINDIA": "TIINDIA.NS",
+    # --- FMCG / Consumer ---
+    "ITC": "ITC.NS", "HINDUNILVR": "HINDUNILVR.NS", "NESTLEIND": "NESTLEIND.NS",
+    "BRITANNIA": "BRITANNIA.NS", "DABUR": "DABUR.NS", "TATACONSUM": "TATACONSUM.NS",
+    "VARUNBEVER": "VARUNBEVER.NS", "GODREJCP": "GODREJCP.NS", "MARICO": "MARICO.NS",
+    "COLPAL": "COLPAL.NS", "UNITDSPR": "UNITDSPR.NS",
+    # --- Pharma / Healthcare ---
+    "SUNPHARMA": "SUNPHARMA.NS", "DRREDDY": "DRREDDY.NS", "CIPLA": "CIPLA.NS",
+    "DIVISLAB": "DIVISLAB.NS", "APOLLOHOSP": "APOLLOHOSP.NS", "LUPIN": "LUPIN.NS",
+    "AUROPHARMA": "AUROPHARMA.NS", "BIOCON": "BIOCON.NS", "TORNTPHARM": "TORNTPHARM.NS",
+    "CADILAHC": "CADILAHC.NS", "ZYDUSLIFE": "ZYDUSLIFE.NS", "LAURUSLABS": "LAURUSLABS.NS",
+    # --- Telecom / Media ---
+    "BHARTIARTL": "BHARTIARTL.NS", "IDEA": "IDEA.NS", "SUNTV": "SUNTV.NS",
+    "ZEE": "ZEE.NS", "PVR": "PVR.NS", "INOXLEISUR": "INOXLEISUR.NS",
+    # --- Infra / Cement / Realty ---
+    "LT": "LT.NS", "ULTRACEMCO": "ULTRACEMCO.NS", "GRASIM": "GRASIM.NS",
+    "SHREECEM": "SHREECEM.NS", "AMBUJACEM": "AMBUJACEM.NS", "ACC": "ACC.NS",
+    "DLF": "DLF.NS", "GODREJPROP": "GODREJPROP.NS", "OBEROIRLTY": "OBEROIRLTY.NS",
+    "BRIGADE": "BRIGADE.NS", "PHOENIXTD": "PHOENIXTD.NS",
+    "ABB": "ABB.NS", "SIEMENS": "SIEMENS.NS", "BEL": "BEL.NS", "BHEL": "BHEL.NS",
+    # --- Retail / Paints / Misc ---
+    "ASIANPAINT": "ASIANPAINT.NS", "BERGEPAINT": "BERGEPAINT.NS", "TITAN": "TITAN.NS",
+    "TRENT": "TRENT.NS", "DMART": "DMART.NS", "NYKAA": "NYKAA.NS",
+    "ADANIENT": "ADANIENT.NS", "ADANIPORTS": "ADANIPORTS.NS", "ADANIPOWER": "ADANIPOWER.NS",
+    "JSWENERGY": "JSWENERGY.NS", "TATAPOWER": "TATAPOWER.NS", "IDEATECH": "IDEATECH.NS",
+    # --- Chemicals / Fertilizers ---
+    "UPL": "UPL.NS", "PIIND": "PIIND.NS", "SRF": "SRF.NS", "TATACHEM": "TATACHEM.NS",
+    "COROMANDEL": "COROMANDEL.NS", "CHAMBLFERT": "CHAMBLFERT.NS", "GNFC": "GNFC.NS",
+    # --- Others ---
+    "DIXON": "DIXON.NS", "AMBER": "AMBER.NS", "POLYCAB": "POLYCAB.NS",
+    "HAVELLS": "HAVELLS.NS", "VOLTAS": "VOLTAS.NS", "BLUESTAR": "BLUESTAR.NS",
+    "PAGEIND": "PAGEIND.NS", "BATAINDIA": "BATAINDIA.NS", "WHIRLPOOL": "WHIRLPOOL.NS",
+    "INDIGO": "INDIGO.NS", "JBL": "JBL.NS", "CONCOR": "CONCOR.NS",
+    "AARTIIND": "AARTIIND.NS", "ATUL": "ATUL.NS", "DEEPAKNTR": "DEEPAKNTR.NS",
+    "ALKEM": "ALKEM.NS", "GLENMARK": "GLENMARK.NS", "IPCAIND": "IPCAIND.NS",
+    "RAMCOCEM": "RAMCOCEM.NS", "INDUSTOWER": "INDUSTOWER.NS", "GMRINFRA": "GMRINFRA.NS",
+    "JPASSOCIAT": "JPASSOCIAT.NS", "IRCTC": "IRCTC.NS", "INDHOTEL": "INDHOTEL.NS",
+    "JINDALPOLY": "JINDALPOLY.NS", "MAZDOCK": "MAZDOCK.NS", "RBLBANK": "RBLBANK.NS",
+    "BANKINDIA": "BANKINDIA.NS", "IDBI": "IDBI.NS", "MCDOWELL-N": "MCDOWELL-N.NS",
+    "PEL": "PEL.NS", "TATAELXSI": "TATAELXSI.NS", "BANDHANBNK": "BANDHANBNK.NS",
+}
+
+# MCX commodities expanded for scanner (Silver added)
+SCAN_COMMODITY_SYMBOLS = {
+    "CRUDEOIL": "CL=F", "NATURALGAS": "NG=F",
+    "GOLD": "GC=F", "SILVER": "SI=F",
+}
+
+
+def scan_universe() -> dict:
+    """Flat {symbol: ticker} map of the full 150+ scan universe (NSE + MCX)."""
+    out = dict(SCAN_STOCK_SYMBOLS)
+    out.update(SCAN_COMMODITY_SYMBOLS)
+    out.update(INDEX_SYMBOLS)
+    return out
+
+
 # Combined universe grouped by segment
 UNIVERSE = {
     "index": {"label": "Index Options (NIFTY/BANKNIFTY)", "symbols": INDEX_SYMBOLS, "category": "equity"},
@@ -218,3 +304,43 @@ LIQUIDITY_TIER = {
 def liquidity_tier(symbol: str) -> int:
     """Return 1 (most liquid), 2, or 3 (least liquid)."""
     return LIQUIDITY_TIER.get(symbol, 3)
+
+
+# ============================================================
+# V6.5 — EXPIRY DAY SCHEDULE (Brain 3 zero-to-hero engine)
+# ============================================================
+# NSE weekly expiry schedule (default conventions, IST):
+#   NIFTY      → Thursday
+#   BANKNIFTY  → Wednesday  (post-Nov 2023; was Friday earlier)
+#   Stocks (monthly) → last Thursday of the month
+# MCX commodity expiry → last business day of the month (approx).
+EXPIRY_DAY_OF_WEEK = {
+    "NIFTY": 3,        # Thursday (0=Mon)
+    "BANKNIFTY": 2,    # Wednesday
+}
+
+
+def is_expiry_day(symbol: str, dt) -> bool:
+    """True if `dt` is the weekly/monthly expiry day for the symbol."""
+    import pandas as pd
+    d = pd.Timestamp(dt)
+    if d.tz is not None:
+        d = d.tz_convert("Asia/Kolkata")
+    dow = d.weekday()
+    # Index: weekly expiry on the assigned weekday
+    if symbol in EXPIRY_DAY_OF_WEEK:
+        return dow == EXPIRY_DAY_OF_WEEK[symbol]
+    # Stocks: monthly expiry = last Thursday of the month
+    if symbol in SCAN_STOCK_SYMBOLS or symbol in STOCK_SYMBOLS:
+        # last Thursday of the month
+        last_day = d + pd.offsets.MonthEnd(0)
+        # walk back to the last Thursday (weekday 3)
+        t = last_day
+        while t.weekday() != 3:
+            t = t - pd.Timedelta(days=1)
+        return d.date() == t.date()
+    # MCX commodities: last business day of month (approx)
+    if symbol in SCAN_COMMODITY_SYMBOLS or symbol in COMMODITY_SYMBOLS:
+        last_day = (d + pd.offsets.MonthEnd(0)).date()
+        return d.date() == last_day
+    return False
