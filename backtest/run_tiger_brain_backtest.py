@@ -77,6 +77,7 @@ from backtest.intraday_backtest import (
     spread_ok,
     check_intraday_exit,
     print_report,
+    MAX_SPREAD_PCT,
 )
 from pipeline.intraday_strategies import (
     detect_zones,
