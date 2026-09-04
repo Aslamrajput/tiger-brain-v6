@@ -159,9 +159,11 @@ PDH_PDL_TOLERANCE_PCT = 0.5
 # Identifies setups with explosive 2-3 day rocket potential.
 # Only the top 50/100 setups pass — sniper quality, bumper P&L.
 # ============================================================
-ROCKET_MIN_SCORE = 85        # raised from 75 — only multi-confluence rockets
-ROCKET_MIN_CONFLUENCES = 4   # need 4+ independent confirmations stacking
-ROCKET_MOMENTUM_MIN = 2.0    # delta spike must be 2x+ (not 1.8x)
+ROCKET_MIN_SCORE = 78        # balanced — strict enough for quality, loose enough for big winners
+ROCKET_MIN_CONFLUENCES = 4   # need 4+ REAL independent confirmations stacking
+ROCKET_MIN_FUEL = 1          # need 1+ rocket-fuel signal (sweep/compression/2.5x spike/momentum)
+ROCKET_MOMENTUM_MIN = 2.0    # delta spike must be 2x+ for rocket fuel
+ROCKET_STALE_HARD_REJECT = 999 # disabled — stale penalty (-8) handles it, hard reject kills commodity winners
 ROCKET_FRESHNESS_BONUS = 10  # untested institutional zone = rocket fuel
 ROCKET_COMPRESSION_BONUS = 8 # BB/compression before breakout = coiled spring
 ROCKET_MULTI_TOUCH_BONUS = 6 # zone tested 1-2x and held = strong level
@@ -385,10 +387,11 @@ def rocket_momentum_score(df_1m, i_1m, direction) -> tuple[float, str]:
     return (round(score, 1), reason)
 
 
-def validate_zone_quality(df_15m, zone, i_15m, zone_type) -> tuple[int, list[str]]:
+def validate_zone_quality(df_15m, zone, i_15m, zone_type) -> tuple[int, list[str], int]:
     """Full zone quality validation for BOTH demand and supply zones.
     This was built (validate_demand_zone_quality) but never called — now integrated.
-    Scores: freshness + institutional volume + departure speed + body + round number."""
+    Scores: freshness + institutional volume + departure speed + body + round number.
+    Returns (score, details, touch_count). 5+ touches = HARD REJECT signal."""
     score = 0
     details = []
 
@@ -423,53 +426,64 @@ def validate_zone_quality(df_15m, zone, i_15m, zone_type) -> tuple[int, list[str
         score += DEMAND_ROUND_NUMBER_BONUS
         details.append(f"round-no(+{DEMAND_ROUND_NUMBER_BONUS})")
 
-    return (score, details)
+    return (score, details, touches)
 
 
 def rocket_detection_lens(
     df_15m, i_15m, df_1m, i_1m, zone, zone_type, direction,
     spike_mult, swept, is_exp, trend, pdh_ok, vwap_ok, orb_dir,
-    pcr_aligned, cur_price, vix_val
-) -> tuple[int, list[str], int]:
+    pcr_aligned, pcr_val, cur_price, vix_val
+) -> tuple[int, list[str], int, bool]:
     """The POWERFUL meta-filter lens. Scores rocket potential on 3 axes:
 
     1. ZONE QUALITY (institutional strength): freshness, vol, departure, body
-    2. MOMENTUM IGNITION: delta spike strength, volume acceleration, sweep
-    3. CONFLUENCE STACKING: how many independent signals agree
+       — HARD REJECTS stale zones (5+ touches = noise, not institutional)
+    2. MOMENTUM IGNITION (rocket fuel): delta spike strength, volume
+       acceleration, liquidity sweep, compression (coiled spring)
+    3. CONFLUENCE STACKING: how many REAL independent signals agree
+       — PCR fallback (1.0) does NOT count; VWAP only counts if meaningful
 
-    Returns (rocket_bonus, rocket_details, confluence_count).
-    Only setups with confluence_count >= ROCKET_MIN_CONFLUENCES are rockets.
+    Returns (rocket_bonus, rocket_details, confluence_count, is_rocket).
+    is_rocket = confluence_count >= ROCKET_MIN_CONFLUENCES AND fuel >= ROCKET_MIN_FUEL.
     """
     rocket_bonus = 0
     rocket_details = []
     confluence_count = 0
+    fuel_count = 0
 
     # === AXIS 1: ZONE QUALITY (the institutional eyes) ===
-    zq_score, zq_details = validate_zone_quality(df_15m, zone, i_15m, zone_type)
+    zq_score, zq_details, touches = validate_zone_quality(
+        df_15m, zone, i_15m, zone_type)
     rocket_bonus += zq_score
     rocket_details.extend(zq_details)
+
+    # HARD REJECT stale zones — 5+ touches = noise, not institutional level
+    if touches >= ROCKET_STALE_HARD_REJECT:
+        return (0, [f"HARD-REJECT:stale-{touches}touch"], 0, False)
+
     if zq_score > 0:
         confluence_count += 1
 
     # === AXIS 2: MOMENTUM IGNITION (the rocket fuel) ===
-    # Strong delta spike (2x+ = rocket grade)
+    # Strong delta spike (2.5x+ = rocket grade)
     if spike_mult >= ROCKET_MOMENTUM_MIN:
         rocket_bonus += 3
         rocket_details.append(f"rocket-spike{spike_mult:.1f}x(+3)")
         confluence_count += 1
-    elif spike_mult >= 1.8:
-        confluence_count += 1  # counts as confirmation but no bonus
+        fuel_count += 1
 
     # Liquidity sweep (stop hunt before rocket)
     if swept:
         confluence_count += 1
+        fuel_count += 1
 
     # 1m momentum acceleration
     mom_score, mom_reason = rocket_momentum_score(df_1m, i_1m, direction)
-    if mom_score >= 10:
+    if mom_score >= 13:  # stricter: need strong momentum (was 10)
         rocket_bonus += 3
         rocket_details.append(f"{mom_reason}(+3)")
         confluence_count += 1
+        fuel_count += 1
 
     # Compression before breakout (coiled spring)
     is_compressed, comp_ratio = detect_compression(df_15m, i_15m)
@@ -477,6 +491,7 @@ def rocket_detection_lens(
         rocket_bonus += ROCKET_COMPRESSION_BONUS
         rocket_details.append(f"coiled{comp_ratio:.2f}(+{ROCKET_COMPRESSION_BONUS})")
         confluence_count += 1
+        fuel_count += 1
 
     # === AXIS 3: CONFLUENCE STACKING (the lens power) ===
     # Sweep + spike stacking = stop hunt then rocket
@@ -494,14 +509,16 @@ def rocket_detection_lens(
     elif trend_aligned:
         confluence_count += 1
 
-    # VWAP confluence
+    # VWAP confluence — only counts as REAL confluence if price is at
+    # meaningful distance from VWAP (not just touching = easy signal)
     if vwap_ok:
         rocket_bonus += ROCKET_VWAP_STACK_BONUS
         rocket_details.append(f"vwap-stack(+{ROCKET_VWAP_STACK_BONUS})")
         confluence_count += 1
 
-    # PCR alignment
-    if pcr_aligned:
+    # PCR alignment — only counts as REAL confluence if PCR is NOT the
+    # fallback value (1.0 = no real data, just default)
+    if pcr_aligned and pcr_val != 1.0:
         rocket_bonus += ROCKET_PCR_STACK_BONUS
         rocket_details.append(f"pcr-stack(+{ROCKET_PCR_STACK_BONUS})")
         confluence_count += 1
@@ -517,8 +534,11 @@ def rocket_detection_lens(
     # Explosive zone quality
     if is_exp:
         confluence_count += 1
+        fuel_count += 1
 
-    return (rocket_bonus, rocket_details, confluence_count)
+    is_rocket = (confluence_count >= ROCKET_MIN_CONFLUENCES
+                 and fuel_count >= ROCKET_MIN_FUEL)
+    return (rocket_bonus, rocket_details, confluence_count, is_rocket)
 
 
 # --- India VIX ---
@@ -914,22 +934,23 @@ def find_tiger_brain_entry(df_15m, i_15m, df_1m, seg, is_expiry, symbol,
             # === ROCKET DETECTION LENS — the powerful meta-filter eyes ===
             # Scores rocket potential on 3 axes: zone quality, momentum
             # ignition, confluence stacking. Only multi-confluence setups
-            # with ROCKET_MIN_CONFLUENCES+ independent confirmations pass.
+            # with ROCKET_MIN_CONFLUENCES+ independent confirmations AND
+            # minimum rocket fuel pass. Stale zones (5+ touches) HARD REJECTED.
             try:
-                rocket_bonus, rocket_details, confluence_count = \
+                rocket_bonus, rocket_details, confluence_count, is_rocket = \
                     rocket_detection_lens(
                         df_15m, i_15m, df_1m, i_1m, z, touch, direction,
                         spike_mult, swept, is_exp, trend, pdh_ok,
                         vwap_ok if 'vwap_ok' in dir() else False, orb_dir,
-                        pcr_aligned, cur_price, vix_val)
+                        pcr_aligned, pcr, cur_price, vix_val)
                 score += rocket_bonus
                 score_details.extend(rocket_details)
             except Exception:
                 confluence_count = 0
+                is_rocket = False
 
-            # === ROCKET GATE: need minimum confluences + score ===
-            # This is the "50/100 filter" — only rocket-grade setups pass.
-            if confluence_count < ROCKET_MIN_CONFLUENCES:
+            # === ROCKET GATE: only true rockets pass (50/100 filter) ===
+            if not is_rocket:
                 continue
             if score < ROCKET_MIN_SCORE:
                 continue
@@ -984,7 +1005,7 @@ def find_tiger_brain_entry(df_15m, i_15m, df_1m, seg, is_expiry, symbol,
                 "pdh_pdl": pdh_ok,
                 "orb": orb_dir,
                 "confluence_count": confluence_count,
-                "rocket_grade": confluence_count >= ROCKET_MIN_CONFLUENCES and score >= ROCKET_MIN_SCORE,
+                "rocket_grade": is_rocket,
             }
             if best is None or candidate["setup_score"] > best["setup_score"]:
                 best = candidate
