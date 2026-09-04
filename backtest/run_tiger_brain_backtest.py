@@ -94,6 +94,7 @@ from universe.fno_universe import (
     UNIVERSE, all_symbols, segment_of, lot_size, is_expiry_day,
 )
 from risk.risk_management import TradeCounterGuard
+from backtest.tiger_fund_brain import announce_fund_plan, size_trade_with_fund_brain
 
 logger = logging.getLogger("tiger_brain.one_man_army")
 logging.basicConfig(level=logging.INFO)
@@ -109,6 +110,16 @@ TREND_LOOKBACK = 10
 VOL_SURGE_MULT = 1.5        # 1.5x volume (balanced — not too strict, not too loose)
 VOL_LOOKBACK = 5
 MAX_ENTRIES_PER_DAY = 2     # top 2 entries by score per day (sniper quality)
+
+# ============================================================
+# DELIVERY MODE — 2-3 day rocket holding (Tiger V16)
+# ============================================================
+DELIVERY_ROCKET_MIN_SCORE = 90  # only ultra-high-conviction setups get delivery
+DELIVERY_MAX_HOLD_DAYS = 3      # max 3 days hold for delivery trades
+DELIVERY_HOLD_BARS_15M = 3 * 25 # 3 trading days * 25 bars/day (15m)
+DELIVERY_TRAIL_ACTIVATION = 40.0  # 40% gain before trailing (wider than intraday)
+DELIVERY_TRAIL_GIVEBACK = 20.0    # 20% giveback from peak (let winners run)
+DELIVERY_STOP_PCT = 30.0          # wider stop for delivery (30% vs 25%)
 
 # Score thresholds
 MIN_SCORE_TO_ENTER = 75     # raised from 68 — only strong multi-confluence setups
@@ -1096,7 +1107,7 @@ def _resolve_symbol_token(symbol: str) -> tuple[str, str] | None:
     return exchange, str(row["token"])
 
 
-def fetch_yfinance_fallback(symbol, ticker, days_15m=365, days_1m=60):
+def fetch_yfinance_fallback(symbol, ticker, days_15m=365, days_1m=90):
     """Fallback for MCX commodities when Angel One token resolution fails.
 
     Uses yfinance US futures (CL=F, GC=F, SI=F, NG=F) as proxy for MCX.
@@ -1140,21 +1151,25 @@ def fetch_yfinance_fallback(symbol, ticker, days_15m=365, days_1m=60):
     return data_15m, data_1m
 
 
-def fetch_angel_data(broker, days_15m=365, days_1m=60):
+def fetch_angel_data(broker, days_15m=365, days_1m=90, use_scan_universe=False):
     """Fetch 15m (1 year) + 1m (max available) historical candles.
 
     NSE symbols use Angel One (broker data, accurate).
     MCX commodities use yfinance fallback (US futures proxy, IST-converted)
     when Angel One token resolution fails.
+
+    Args:
+        use_scan_universe: if True, scan full 150+ F&O universe (Tiger V16).
+            if False, use default 40-symbol trading universe.
     """
-    from universe.fno_universe import COMMODITY_SYMBOLS
+    from universe.fno_universe import COMMODITY_SYMBOLS, scan_universe
     to_date = datetime.now().replace(hour=15, minute=30, second=0, microsecond=0)
     from_15m = to_date - timedelta(days=days_15m)
     from_1m = to_date - timedelta(days=days_1m)
     data_map, data_map_1m = {}, {}
     failed = []
     yf_used = []
-    syms = all_symbols()
+    syms = scan_universe() if use_scan_universe else all_symbols()
     total = len(syms)
     for idx, (sym, ticker) in enumerate(syms.items(), 1):
         tag = f"[{idx}/{total}] {sym}"
@@ -1218,7 +1233,8 @@ def run_tiger_brain_backtest(data_map, start_capital=150000.0,
                              max_loss_per_trade=2000.0,
                              max_capital_per_trade_pct=10.0,
                              dte_default=1.0, verbose=False,
-                             data_map_1m=None, broker=None):
+                             data_map_1m=None, broker=None,
+                             use_fund_brain=True, use_delivery_mode=True):
     use_sniper = data_map_1m is not None
     all_ts = sorted(set().union(*[set(d.index) for d in data_map.values()]))
     days_map = defaultdict(list)
@@ -1238,6 +1254,18 @@ def run_tiger_brain_backtest(data_map, start_capital=150000.0,
     filter_stats = defaultdict(int)
     brain_log = defaultdict(int)
     daily_entries_taken = defaultdict(int)
+
+    # === FUND BRAIN — pre-market capital announcement ===
+    fund_plan = None
+    if use_fund_brain:
+        fund_plan = announce_fund_plan(start_capital)
+        max_loss_per_trade = fund_plan.risk_per_trade_rupees
+        max_capital_per_trade_pct = fund_plan.max_capital_per_trade_pct
+        print("\n" + "=" * 72)
+        print("  🪖 TIGER FUND BRAIN — PRE-MARKET ANNOUNCEMENT")
+        print("=" * 72)
+        print(fund_plan.summary())
+        print("=" * 72)
 
     for day in sorted_days:
         day_ts = days_map[day]
@@ -1276,8 +1304,24 @@ def run_tiger_brain_backtest(data_map, start_capital=150000.0,
                     df_1m_pos = data_map_1m[sym]
                     if ts in df_1m_pos.index:
                         i_1m_pos = df_1m_pos.index.get_loc(ts)
-                ex = check_intraday_exit(pos, cur_underlying, cur_prem, sq_off,
-                                         df_1m=df_1m_pos, i_1m=i_1m_pos)
+                # === DELIVERY MODE — don't square off delivery trades ===
+                # Delivery trades hold 2-3 days. Only exit on stop/target/trail.
+                is_delivery_pos = pos.get("is_delivery", False)
+                if is_delivery_pos:
+                    sq_off = False  # override: delivery doesn't square off at close
+                    # Track hold days
+                    hold_bars = len(df_so_far) - pos["entry_idx"]
+                    pos["hold_days"] = hold_bars / 25  # approx trading days
+                    # Force exit if max hold days reached
+                    if pos["hold_days"] >= DELIVERY_MAX_HOLD_DAYS:
+                        ex = {"exit": True, "exit_premium": cur_prem,
+                              "reason": f"delivery_max_hold({DELIVERY_MAX_HOLD_DAYS}d)"}
+                    else:
+                        ex = check_intraday_exit(pos, cur_underlying, cur_prem, False,
+                                                 df_1m=df_1m_pos, i_1m=i_1m_pos)
+                else:
+                    ex = check_intraday_exit(pos, cur_underlying, cur_prem, sq_off,
+                                             df_1m=df_1m_pos, i_1m=i_1m_pos)
                 if ex["exit"]:
                     exit_prem = ex["exit_premium"]
                     slippage = exit_prem * 0.008 + pos["entry_premium"] * 0.008
@@ -1395,8 +1439,30 @@ def run_tiger_brain_backtest(data_map, start_capital=150000.0,
                     strike=strike, dte=dte_default, is_call=is_call, iv=iv)
 
                 lot_sz = lot_size(sym)
-                sizing = size_dynamic(entry_prem, stop_prem, lot_sz, capital,
-                                      max_loss_cap=max_loss_per_trade)
+
+                # === DELIVERY MODE — ultra-high-conviction rockets hold 2-3 days ===
+                is_delivery = (use_delivery_mode and
+                               setup.get("setup_score", 0) >= DELIVERY_ROCKET_MIN_SCORE)
+                if is_delivery:
+                    # Wider stop for delivery (let trade breathe over multiple days)
+                    stop_prem = min(stop_prem, entry_prem * (1 - DELIVERY_STOP_PCT / 100))
+                    stop_prem = max(stop_prem, 0.5)
+
+                # === FUND BRAIN SIZING — capital-based, not lot-based ===
+                if fund_plan is not None:
+                    current_exposure = sum(
+                        p["entry_premium"] * p["quantity"] for p in open_positions)
+                    sizing = size_trade_with_fund_brain(
+                        fund_plan, entry_prem, stop_prem, lot_sz,
+                        current_exposure=current_exposure,
+                        is_delivery=is_delivery)
+                    if sizing["quantity"] <= 0:
+                        filter_stats["rejected_fund_brain_sizing"] += 1
+                        continue
+                else:
+                    sizing = size_dynamic(entry_prem, stop_prem, lot_sz, capital,
+                                          max_loss_cap=max_loss_per_trade)
+
                 alloc = sizing["quantity"] * entry_prem
                 if alloc > capital * max_capital_per_trade_pct / 100:
                     max_alloc = capital * max_capital_per_trade_pct / 100
@@ -1463,6 +1529,8 @@ def run_tiger_brain_backtest(data_map, start_capital=150000.0,
                     "entry_gamma": entry_g["gamma"],
                     "entry_theta": entry_g["theta"],
                     "entry_vega": entry_g["vega"],
+                    "is_delivery": is_delivery,
+                    "hold_days": 0,
                 }
                 open_positions.append(pos)
                 if verbose:
@@ -1602,15 +1670,25 @@ def main():
         print(f"  ✗ Login failed: {exc}")
         return
 
-    print("\nFetching 60-day data from Angel One...")
-    data_map, data_map_1m, failed = fetch_angel_data(broker)
+    print("\nFetching 3-month (90-day) data from Angel One...")
+    # Full market scan: 150+ F&O stocks + index + commodities (Tiger V16)
+    use_full_scan = "--full-scan" in sys.argv
+    data_map, data_map_1m, failed = fetch_angel_data(broker, use_scan_universe=use_full_scan)
     if not data_map:
         print("\n✗ No data — cannot run.")
         return
 
-    print(f"\nRunning TIGER BRAIN ONE MAN ARMY (₹1.5L, {len(data_map)} symbols)...")
+    scan_label = "FULL 150+" if use_full_scan else "40 CORE"
+    print(f"\nRunning TIGER BRAIN ONE MAN ARMY V16 ({len(data_map)} symbols, {scan_label} scan)...")
+
+    # Capital from --capital flag (default ₹1.5L)
+    start_cap = 150000.0
+    for i, arg in enumerate(sys.argv):
+        if arg == "--capital" and i + 1 < len(sys.argv):
+            start_cap = float(sys.argv[i + 1])
+
     combined = run_tiger_brain_backtest(
-        data_map, start_capital=150000.0, max_loss_per_trade=2000.0,
+        data_map, start_capital=start_cap,
         data_map_1m=data_map_1m if data_map_1m else None, broker=broker)
 
     print("\n\n")

@@ -4,6 +4,19 @@
 Algorithmic trading platform for pure intraday Call/Put options buying on NSE/MCX.
 Core strategy: pure Supply/Demand zones (no VWAP/RS/EMA/Black-Scholes).
 
+## V16 Architecture (Current — Tiger Brain ARMY)
+- **Fund Announcement Brain** (Brain 0): `backtest/tiger_fund_brain.py`
+  - Reads account capital (₹10k to ₹10cr), classifies tier (MICRO/SMALL/MID/LARGE/WHALE)
+  - Pre-market: announces max trades, risk per trade, capital allocation
+  - Growth strategy: MICRO=30% monthly aggressive, WHALE=8% preservation
+  - Capital-based sizing (NOT lot-based): `size_trade_with_fund_brain()`
+- **Delivery Mode**: 2-3 day rocket holding for ultra-high-conviction setups
+  - `DELIVERY_ROCKET_MIN_SCORE = 90` — only score 90+ trades get delivery
+  - Delivery trades skip square-off, hold up to 3 days, wider stops (30%)
+- **Full Market Scanning**: `--full-scan` flag activates 150+ F&O universe
+- **3-month (90-day) backtest window** (was 60-day)
+- Backtest CLI: `python3 -m backtest.run_tiger_brain_backtest --capital 100000 [--full-scan]`
+
 ## Locked V6.6 Strategy Thresholds (DO NOT CHANGE)
 - `delta_spike_confirms`: 1.8x spike ratio (volume_delta proxy)
 - `zone_explosive_quality`: min_expansion_atr=1.0, expansion_lookback=5
@@ -33,8 +46,9 @@ Core strategy: pure Supply/Demand zones (no VWAP/RS/EMA/Black-Scholes).
 - V6.6.1 expanded to 48 stocks WITHOUT tier mappings → all blocked. Reverted.
 
 ## Key Commands
-- Tests: `python3 -m pytest tests/ -q` (299 tests, ~8s)
+- Tests: `python3 -m pytest tests/ -q` (329 tests, ~9s)
 - Full backtest: `python3 -m backtest.intraday_backtest`
+- Tiger V16 backtest: `python3 -m backtest.run_tiger_brain_backtest --capital 150000 [--full-scan]`
 - Original V6.6 commit: `1020b30`. Current: `ef005ae` (V6.6 bugfix).
 
 ## HDFCBANK Baseline (must be preserved)
