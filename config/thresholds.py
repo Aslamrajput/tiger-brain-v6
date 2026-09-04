@@ -221,5 +221,126 @@ AUTOMATION = {
     "NIGHTLY_REPLAY_TIME": "00:00",
 }
 
+# ============================================================
+# 5-BRAIN STRUCTURAL ARCHITECTURE (V6.1)
+# Brain 1: Market Scanner & Regime Detection
+# Brain 2: Setup Trigger & Entry Engine (SMC)
+# Brain 3: Option Chain & Greeks/OI Velocity Selector
+# Brain 4: Capital Allocation & Trade Counter Guard
+# Brain 5: Risk Guard, Gamma Tracking & Execution Exit
+# ============================================================
+
+BRAIN1 = {
+    # --- Momentum & Noise Filter (Brain 1 must reject chop) ---
+    # A candle body must be at least this fraction of its total range to
+    # count as directional (small body = wick-heavy chop).
+    "MIN_BODY_TO_RANGE_RATIO": 0.5,
+    # Volume velocity: current bar volume must exceed the rolling average
+    # by this multiplier to signal genuine momentum.
+    "VOLUME_VELOCITY_MULTIPLIER": 1.8,
+    # RS divergence: symbol's N-bar return must diverge from the benchmark
+    # (index) return by at least this many percentage points.
+    "RS_DIVERGENCE_MIN_PCT": 1.0,
+    # RS lookback window (bars) for divergence measurement.
+    "RS_LOOKBACK_BARS": 10,
+    # Volume average lookback (bars).
+    "VOLUME_LOOKBACK_BARS": 20,
+    # Choppy-range filter: if the last N bars' combined range is less than
+    # this multiple of ATR, the market is dead chop — skip.
+    "CHOP_LOOKBACK_BARS": 5,
+    "CHOP_RANGE_ATR_MULTIPLIER": 1.2,
+}
+
+BRAIN2 = {
+    # --- SMC Order Block detection ---
+    # Order block = last opposite-direction candle before a displacement
+    # move that breaks market structure. Displacement must cover at least
+    # this many ATRs to be structural, not noise.
+    "ORDER_BLOCK_MIN_DISPLACEMENT_ATR": 1.5,
+    # Max bars to look back for an order block from the current bar.
+    "ORDER_BLOCK_LOOKBACK_BARS": 30,
+    # --- Liquidity Sweep detection ---
+    # A sweep wick must pierce a swing level by at least this fraction of
+    # ATR, and the close must come back inside the level (rejection).
+    "LIQUIDITY_SWEEP_MIN_PIERCE_ATR": 0.25,
+    "SWING_LOOKBACK_BARS": 20,
+    # --- RS score (0-100) ---
+    # Relative strength vs benchmark, scaled to a 0-100 score for the
+    # setup confidence. RS >= this threshold counts as significant.
+    "RS_SCORE_SIGNIFICANT_MIN": 60,
+    # Minimum combined setup score (SMC + RS) to emit a setup to Brain 3.
+    "MIN_SETUP_SCORE": 55,
+    # Confidence weights within the setup score.
+    "SETUP_SCORE_WEIGHTS": {
+        "order_block": 0.35,
+        "liquidity_sweep": 0.30,
+        "rs_score": 0.35,
+    },
+}
+
+BRAIN3 = {
+    # Max acceptable bid-ask spread as % of option premium.
+    "MAX_SPREAD_PCT_OF_PREMIUM": 2.0,
+    # Minimum OI on the contract for liquidity.
+    "MIN_OPEN_INTEREST": 500,
+    # OI velocity (percent change in OI over lookback) above which a
+    # strike is considered "hot" (prefer these strikes).
+    "OI_VELOCITY_HOT_PCT": 15,
+    # Preferred option moneyness: buy slightly ITM to ATM options.
+    "MIN_DELTA": 0.45,
+    "MAX_DELTA": 0.75,
+    # Avoid options too close to expiry (gamma/theta burn) — minimum days.
+    "MIN_DAYS_TO_EXPIRY": 1,
+    # Max days to expiry we buy (avoid far-month illiquidity).
+    "MAX_DAYS_TO_EXPIRY": 14,
+}
+
+BRAIN4 = {
+    # Global daily trade counter limit across ALL markets (5-10 range).
+    "MAX_TRADES_PER_DAY_GLOBAL": 8,
+    "MAX_TRADES_PER_DAY_GLOBAL_MIN": 5,
+    "MAX_TRADES_PER_DAY_GLOBAL_MAX": 10,
+    # Commodity-market-specific daily trade counter limit (5-10 range).
+    "MAX_TRADES_PER_DAY_COMMODITY": 5,
+    "MAX_TRADES_PER_DAY_COMMODITY_MIN": 5,
+    "MAX_TRADES_PER_DAY_COMMODITY_MAX": 10,
+    # Dynamic position sizing: max % of live available capital per trade.
+    "MAX_CAPITAL_PER_TRADE_PCT": 10.0,
+    # Never allocate more than this fraction of capital across open trades.
+    "MAX_TOTAL_EXPOSURE_PCT": 50.0,
+    # If broker capital fetch fails, fall back to this (None = block trade).
+    "FALLBACK_CAPITAL_ON_BROKER_FAIL": None,
+}
+
+BRAIN5 = {
+    # Hard stop-loss on premium (% below entry).
+    "STOP_LOSS_PCT": 25.0,
+    # Profit target on premium (% above entry).
+    "TARGET_PCT": 50.0,
+    # Trailing stop activation (premium % gain before trail engages).
+    "TRAIL_ACTIVATION_PCT": 30.0,
+    # Trailing stop give-back (premium % from peak once trailing).
+    "TRAIL_GIVEBACK_PCT": 15.0,
+    # Time-based exit: square off intraday positions this many minutes
+    # before market close, regardless of P&L.
+    "SQUARE_OFF_MINUTES_BEFORE_CLOSE": 15,
+    # Gamma guard: if gamma (as % of premium per % move in underlying)
+    # exceeds this, position is too sensitive near expiry — tighten stop.
+    "GAMMA_RISK_THRESHOLD_PCT": 2.0,
+    # Theta guard: days-to-expiry at which gamma/theta exit rules engage.
+    "GAMMA_RISK_DAYS_TO_EXPIRY": 2,
+}
+
+# Market-category mapping for the trade counter guard.
+MARKET_CATEGORIES = {
+    "MCX": "commodity",
+    "NCDEX": "commodity",
+    "NSE": "equity",
+    "BSE": "equity",
+    "NFO": "equity",
+    "BFO": "equity",
+    "CDS": "currency",
+}
+
 import os
 DRY_RUN = os.getenv("TIGER_BRAIN_DRY_RUN", "false").lower() == "true"

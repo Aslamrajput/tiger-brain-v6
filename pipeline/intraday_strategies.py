@@ -1,0 +1,593 @@
+"""
+Tiger Brain V6.3 — PURE SUPPLY & DEMAND ZONE SCANNER (Brain 2)
+================================================================
+Koi VWAP nahi. Koi RS-Score nahi. Koi Black-Scholes nahi. Koi EMA
+nahi. Sirf SUPPLY aur DEMAND ZONES.
+
+Yahan major institutional zones detect hote hain:
+  - DEMAND ZONE (Support): jahan institutions buy karte hain.
+    Price yahan touch karega to rocket up.
+  - SUPPLY ZONE (Resistance): jahan institutions sell karte hain.
+    Price yahan touch karega to crash down.
+
+Zone detection — PURE PRICE ACTION (no indicators):
+  Ek zone = ek consolidation cluster jisme 3+ consecutive bars ka
+  tight range (low body-to-range, overlapping highs/lows) ban-ta hai,
+  uske pehle ek strong directional move aata hai (impulsive leg).
+  Zone ke high/low = cluster ke extreme wicks.
+
+Setup rule (dead simple):
+  - Price touches DEMAND ZONE (low <= zone_high)  ➔ BUY ATM Call
+  - Price touches SUPPLY ZONE (high >= zone_low)  ➔ BUY ATM Put
+
+⚠️ NO LOOKAHEAD — zone detection sirf `df.iloc[:i+1]` use karta hai.
+"""
+
+from __future__ import annotations
+
+import math
+from typing import Optional
+
+import numpy as np
+import pandas as pd
+
+
+# ============================================================
+# Zone detection — pure price action
+# ============================================================
+def _bar_body_ratio(c: pd.Series) -> float:
+    """Body / range ratio of a candle — low = consolidation bar."""
+    rng = (c["high"] - c["low"])
+    body = abs(c["close"] - c["open"])
+    if rng <= 0:
+        return 0.0
+    return body / rng
+
+
+def detect_zones(df: pd.DataFrame, i: int, lookback: int = 40,
+                 cluster_min: int = 3, impulse_min_pct: float = 0.4) -> list[dict]:
+    """
+    Detect major Supply & Demand zones up to bar i (no lookahead).
+
+    Method (institutional S/D logic):
+      1. Scan last `lookback` bars for a consolidation cluster:
+         `cluster_min` consecutive bars with overlapping ranges and
+         small bodies (body/range < 0.5) — this is the "base".
+      2. Before the base, there must be a strong impulsive move
+         (>= impulse_min_pct of price in one direction) — this is the
+         institutional leg that created the zone.
+      3. DEMAND zone = base BEFORE an up-move (institutions bought).
+      4. SUPPLY zone = base BEFORE a down-move (institutions sold).
+      Zone bounds = base's wick high & low.
+
+    Returns list of zones: {type: 'demand'|'supply', top, bottom, score, bar}
+    """
+    if i < cluster_min + 2:
+        return []
+    window = df.iloc[max(0, i - lookback):i + 1]
+    if len(window) < cluster_min + 1:
+        return []
+
+    zones = []
+    closes = window["close"].astype(float).values
+    opens = window["open"].astype(float).values
+    highs = window["high"].astype(float).values
+    lows = window["low"].astype(float).values
+
+    # Walk the window looking for clusters
+    j = 0
+    n = len(window)
+    while j < n - cluster_min:
+        # Check if bars [j, j+cluster_min-1] form a tight base
+        cluster = slice(j, j + cluster_min)
+        bodies = [abs(closes[k] - opens[k]) for k in range(j, j + cluster_min)]
+        ranges = [highs[k] - lows[k] for k in range(j, j + cluster_min)]
+        # tight base: small bodies + overlapping ranges
+        small_bodies = all(b / max(r, 1e-9) < 0.5 for b, r in zip(bodies, ranges))
+        # overlapping: consecutive bars' ranges overlap
+        overlapping = True
+        for k in range(j, j + cluster_min - 1):
+            if lows[k] > highs[k + 1] or highs[k] < lows[k + 1]:
+                overlapping = False
+                break
+        if not (small_bodies and overlapping):
+            j += 1
+            continue
+
+        base_high = max(highs[j:j + cluster_min])
+        base_low = min(lows[j:j + cluster_min])
+        base_mid = (base_high + base_low) / 2
+
+        # Look at the bar BEFORE the base (impulsive leg)
+        if j == 0:
+            j += 1
+            continue
+        prev_close = closes[j - 1]
+        prev_open = opens[j - 1]
+        leg_move = (prev_close - prev_open) / max(prev_open, 1e-9)
+
+        # Skip if base is too recent (we want mature zones, not current chop)
+        bars_since_base = n - (j + cluster_min)
+
+        # DEMAND zone: strong UP move before the base => institutions bought
+        if leg_move >= impulse_min_pct / 100:
+            # freshness: zone should not have been broken since
+            broken = any(lows[k] < base_low for k in range(j + cluster_min, n))
+            if not broken:
+                strength = abs(leg_move)
+                # prefer zones with more bars since (tested, mature)
+                score = 55 + min(strength * 30, 25) + min(bars_since_base * 0.3, 15)
+                zones.append({
+                    "type": "demand", "top": base_high, "bottom": base_low,
+                    "mid": base_mid, "score": round(score, 1),
+                    "bars_since": bars_since_base,
+                    "bar_idx": i - (n - (j + cluster_min)),
+                })
+        # SUPPLY zone: strong DOWN move before the base => institutions sold
+        elif leg_move <= -impulse_min_pct / 100:
+            broken = any(highs[k] > base_high for k in range(j + cluster_min, n))
+            if not broken:
+                strength = abs(leg_move)
+                score = 55 + min(strength * 30, 25) + min(bars_since_base * 0.3, 15)
+                zones.append({
+                    "type": "supply", "top": base_high, "bottom": base_low,
+                    "mid": base_mid, "score": round(score, 1),
+                    "bars_since": bars_since_base,
+                    "bar_idx": i - (n - (j + cluster_min)),
+                })
+        j += cluster_min  # skip past this cluster
+
+    # Dedupe: keep strongest zone per type within 0.5% of price
+    return zones
+
+
+# ============================================================
+# V6.6 — INSTITUTIONAL ZONE QUALITY (explosive rejection filter)
+# ============================================================
+def zone_explosive_quality(df: pd.DataFrame, base_bar_idx: int,
+                           zone_type: str, expansion_lookback: int = 5,
+                           min_expansion_atr: float = 1.0) -> tuple[bool, float]:
+    """
+    Only validate a zone if the HISTORICAL REJECTION from that level caused an
+    immediate, high-volume EXPLOSIVE expansion move. Weak/choppy/retail
+    consolidation zones are REJECTED.
+
+    Checks the `expansion_lookback` bars immediately AFTER the zone base:
+      - DEMAND zone: price must EXPAND UP (a close rises >= min_expansion_atr * ATR
+        above the base high within the window) on volume >= the prior average.
+      - SUPPLY zone: price must EXPAND DOWN (a close falls >= ... ATR below
+        the base low) on volume >= avg.
+
+    The expansion may develop over a few bars (not only the immediate next bar),
+    which matches how real institutional rejections unfold.
+
+    Returns (is_explosive, expansion_strength_pct).
+    """
+    n = len(df)
+    start = base_bar_idx + 1
+    end = min(n, start + expansion_lookback)
+    if end <= start or start < 1:
+        return (False, 0.0)
+    after = df.iloc[start:end]
+    if len(after) < 2:
+        return (False, 0.0)
+    base_high = float(df.iloc[base_bar_idx]["high"])
+    base_low = float(df.iloc[base_bar_idx]["low"])
+    # ATR proxy: average bar range over the 20 bars before the base
+    atr_win = df.iloc[max(0, base_bar_idx - 20):base_bar_idx]
+    atr = float((atr_win["high"] - atr_win["low"]).mean() or 1.0)
+    # volume baseline: avg volume over 20 bars before the base
+    vol_base = float(atr_win["volume"].mean() or 0.0)
+    after_vol = float(after["volume"].mean() or 0.0)
+    # volume surge: expansion must carry volume. Some sources (e.g. yfinance
+    # for ^NSEI/^NSEBANK index tickers) report ZERO volume — in that case
+    # skip the volume gate and rely on the expansion-ATR confirmation alone.
+    vol_surge = True if vol_base <= 0 else after_vol >= vol_base * 1.0
+
+    closes = after["close"].astype(float).values
+    if zone_type == "demand":
+        # explosive up-rejection: furthest close above base high
+        max_close = float(closes.max())
+        expansion = max_close - base_high
+    else:  # supply
+        min_close = float(closes.min())
+        expansion = base_low - min_close
+    expansion_atr = expansion / max(atr, 1e-9)
+    is_explosive = expansion_atr >= min_expansion_atr and vol_surge
+    expansion_pct = round(expansion / base_high * 100.0, 2) if base_high else 0.0
+    return (is_explosive, expansion_pct)
+
+
+def detect_zones_explosive(df: pd.DataFrame, i: int, lookback: int = 40,
+                           cluster_min: int = 3, impulse_min_pct: float = 0.4,
+                           require_explosive: bool = True,
+                           expansion_lookback: int = 3,
+                           min_expansion_atr: float = 1.5) -> list[dict]:
+    """
+    V6.6 zone detection: detect_zones + the explosive-rejection quality gate.
+    Each returned zone carries `explosive` (bool) and `expansion_pct`.
+    If require_explosive, only explosive-quality zones are returned.
+    """
+    zones = detect_zones(df, i, lookback, cluster_min, impulse_min_pct)
+    kept = []
+    for z in zones:
+        is_exp, exp_pct = zone_explosive_quality(
+            df, z["bar_idx"], z["type"], expansion_lookback, min_expansion_atr
+        )
+        z["explosive"] = is_exp
+        z["expansion_pct"] = exp_pct
+        if require_explosive and not is_exp:
+            continue
+        # boost score for stronger explosive rejections
+        if is_exp:
+            z["score"] = round(z["score"] + min(exp_pct * 1.5, 20), 1)
+        kept.append(z)
+    return kept
+
+
+# ============================================================
+# V6.6 — 1m LIQUIDITY SWEEP (smart-money stop-hunt confirmation)
+# ============================================================
+def liquidity_sweep(df_1m, i: int, direction: str, lookback: int = 20) -> tuple[bool, str]:
+    """
+    Detect a recent 1-minute liquidity sweep (institutional stop-hunt) that
+    confirms the boom entry.
+
+    A liquidity sweep = price briefly PIERCES a recent local extreme then
+    snaps back — institutions grab stops then reverse.
+      - For DEMAND/BUY: a 1m low within the last `lookback` bars made a NEW
+        local low (below the prior lookback-low) but a later bar closed back
+        ABOVE that level → bear-trap sweep.
+      - For SUPPLY/SELL: a 1m high made a NEW local high then closed back
+        BELOW → bull-trap sweep.
+
+    Returns (swept, reason). Looks back up to `lookback` 1m bars.
+    """
+    if i < lookback + 2:
+        return (False, "insufficient 1m bars")
+    window = df_1m.iloc[i - lookback:i + 1]
+    lows = window["low"].astype(float).values
+    highs = window["high"].astype(float).values
+    closes = window["close"].astype(float).values
+    n = len(window)
+    # reference range = the FIRST half of the window (the established range
+    # before the sweep). Using the full window would include the sweep itself.
+    ref_end = max(n // 2, 2)
+    if direction == "BUY":  # demand → bear-trap sweep (sweep lows then reverse up)
+        prior_low = float(lows[:ref_end].min())
+        pierced = [k for k in range(ref_end, n) if lows[k] < prior_low]
+        if not pierced:
+            return (False, "no low sweep")
+        last_pierce = pierced[-1]
+        snap = any(closes[k] > prior_low for k in range(last_pierce + 1, n))
+        if snap:
+            return (True, "bear-trap-sweep")
+        return (False, "no snap-back")
+    else:  # SELL → bull-trap sweep (sweep highs then reverse down)
+        prior_high = float(highs[:ref_end].max())
+        pierced = [k for k in range(ref_end, n) if highs[k] > prior_high]
+        if not pierced:
+            return (False, "no high sweep")
+        last_pierce = pierced[-1]
+        snap = any(closes[k] < prior_high for k in range(last_pierce + 1, n))
+        if snap:
+            return (True, "bull-trap-sweep")
+        return (False, "no snap-back")
+
+
+# ============================================================
+def _rejection_wick(bar) -> tuple[float, str]:
+    """Return (wick_ratio, side) — institutional rejection wick size + side."""
+    o, c, h, l = (float(bar["open"]), float(bar["close"]),
+                  float(bar["high"]), float(bar["low"]))
+    rng = h - l
+    if rng <= 0:
+        return (0.0, "none")
+    body = abs(c - o)
+    upper_wick = h - max(o, c)
+    lower_wick = min(o, c) - l
+    if lower_wick > upper_wick and lower_wick > body * 0.8:
+        return (lower_wick / rng, "lower")
+    if upper_wick > lower_wick and upper_wick > body * 0.8:
+        return (upper_wick / rng, "upper")
+    return (max(upper_wick, lower_wick) / rng, "none")
+
+
+def confirm_zone_reversal(df, i, zone_type) -> tuple[bool, str]:
+    """
+    5-min equivalent reversal confirmation on the 15m bar AFTER a zone touch.
+
+    A zone touch at bar i-1 must be CONFIRMED by bar i before entry:
+      - DEMAND (buy call): bar i closes bullish (close > open) AND shows a
+        lower rejection wick (institutions bought the dip), OR closes above
+        the touch bar's high (lower-timeframe structural break up).
+      - SUPPLY (buy put): bar i closes bearish (close < open) AND shows an
+        upper rejection wick (institutions sold the rip), OR closes below
+        the touch bar's low (structural break down).
+
+    Returns (confirmed, reason). Uses only bars i-1 and i (no lookahead).
+    """
+    if i < 2:
+        return (False, "insufficient bars")
+    cur = df.iloc[i]
+    prev = df.iloc[i - 1]
+    o, c, h, l = (float(cur["open"]), float(cur["close"]),
+                  float(cur["high"]), float(cur["low"]))
+    prev_h, prev_l = float(prev["high"]), float(prev["low"])
+    wick_ratio, wick_side = _rejection_wick(cur)
+
+    if zone_type == "demand":
+        bullish_close = c > o
+        rejection = wick_side == "lower" and wick_ratio >= 0.35
+        struct_break = c > prev_h  # broke above the touch bar's high
+        if bullish_close and (rejection or struct_break):
+            why = "lower-rejection" if rejection else "struct-break-up"
+            return (True, why)
+        return (False, f"no bullish confirm (close {c:.0f} vs open {o:.0f})")
+    # supply
+    bearish_close = c < o
+    rejection = wick_side == "upper" and wick_ratio >= 0.35
+    struct_break = c < prev_l  # broke below the touch bar's low
+    if bearish_close and (rejection or struct_break):
+        why = "upper-rejection" if rejection else "struct-break-down"
+        return (True, why)
+    return (False, f"no bearish confirm (close {c:.0f} vs open {o:.0f})")
+
+
+def scan_zones(df: pd.DataFrame, i: int, lookback: int = 40, require_confirm: bool = True) -> list[dict]:
+    """
+    Scan for CONFIRMED zone-touch setups at bar i (no lookahead).
+
+    Flow:
+      1. Detect zones using data up to bar i.
+      2. Check if the PREVIOUS bar (i-1) touched a zone.
+      3. If require_confirm: bar i must confirm the reversal (institutional
+         rejection wick or structural break) before a setup fires.
+      4. Entry triggers on bar i close only when confirmed.
+
+    This prevents operator fakeouts — no blind raw zone touches.
+
+    Returns list of confirmed setups with direction/score/entry/stop/zone.
+    """
+    if i < lookback:
+        return []
+    zones = detect_zones(df, i, lookback=lookback)
+    if not zones:
+        return []
+
+    # The touch happens on the PREVIOUS bar (i-1); confirmation on bar i.
+    touch_bar = df.iloc[i - 1]
+    touch_high = float(touch_bar["high"])
+    touch_low = float(touch_bar["low"])
+    touch_close = float(touch_bar["close"])
+    cur = df.iloc[i]
+    cur_close = float(cur["close"])
+    atr = _simple_range(df, i)
+
+    setups = []
+    for z in zones:
+        # Did the previous bar touch this zone?
+        demand_touched = (z["type"] == "demand" and touch_low <= z["top"]
+                          and touch_close >= z["bottom"])
+        supply_touched = (z["type"] == "supply" and touch_high >= z["bottom"]
+                          and touch_close <= z["top"])
+        if not (demand_touched or supply_touched):
+            continue
+
+        zone_type = z["type"]
+        if require_confirm:
+            confirmed, why = confirm_zone_reversal(df, i, zone_type)
+            if not confirmed:
+                continue
+        else:
+            why = "no-confirm-mode"
+
+        if zone_type == "demand":
+            entry = cur_close
+            stop = z["bottom"] - atr * 0.3
+            score = z["score"] + (5 if why.startswith(("lower", "upper")) else 3)
+            setups.append({
+                "strategy": "Demand_Zone",
+                "direction": "BUY",
+                "setup_score": round(score, 1),
+                "entry_price": entry,
+                "stop_loss": stop,
+                "zone_type": "demand",
+                "zone_top": z["top"],
+                "zone_bottom": z["bottom"],
+                "confirmation": why,
+                "note": f"demand touch@{i-1} + {why} zone[{z['bottom']:.1f}-{z['top']:.1f}]",
+                "setup_found": True,
+            })
+        else:
+            entry = cur_close
+            stop = z["top"] + atr * 0.3
+            score = z["score"] + (5 if why.startswith(("lower", "upper")) else 3)
+            setups.append({
+                "strategy": "Supply_Zone",
+                "direction": "SELL",
+                "setup_score": round(score, 1),
+                "entry_price": entry,
+                "stop_loss": stop,
+                "zone_type": "supply",
+                "zone_top": z["top"],
+                "zone_bottom": z["bottom"],
+                "confirmation": why,
+                "note": f"supply touch@{i-1} + {why} zone[{z['bottom']:.1f}-{z['top']:.1f}]",
+                "setup_found": True,
+            })
+
+    return setups
+
+
+def _simple_range(df: pd.DataFrame, i: int, window: int = 20) -> float:
+    """Average bar range over last `window` bars (no stddev, no ATR formula)."""
+    if i < window:
+        return float(df["high"].iloc[:i + 1].max() - df["low"].iloc[:i + 1].min() or 1.0)
+    w = df.iloc[i - window + 1:i + 1]
+    return float((w["high"] - w["low"]).mean() or 1.0)
+
+
+# ============================================================
+# V6.5 — 1-minute VOLUME DELTA sniper (Brain 2 sharp entry)
+# ============================================================
+def volume_delta(bar) -> float:
+    """
+    Approximate 1-minute volume delta (buy-minus-sell pressure).
+
+    True volume delta needs tick-level bid/ask trade classification (tick
+    rule). yfinance 1m OHLCV gives only candle OHLC + volume, so we use the
+    standard proxy: split the bar's volume by the fraction of the range
+    above/below the open.
+      - close > open (bullish)  => positive delta (buy pressure)
+      - close < open (bearish)  => negative delta (sell pressure)
+      magnitude = volume * |close-open| / range
+    This is a well-known proxy used when tick data is unavailable.
+
+    Volume-unavailable fallback: some data sources report ZERO volume for
+    instruments that are not directly tradeable (e.g. yfinance returns 0
+    volume for ^NSEI/^NSEBANK index tickers — an index, not a listed
+    contract). When volume is genuinely absent (v<=0), we fall back to a
+    pure price-pressure delta = direction * (|close-open|/range), a 0..1
+    body-fraction measure. This preserves the 1.8x spike-ratio test in
+    delta_spike_confirms exactly (the ratio is scale-invariant) without
+    fabricating volume or weakening the confirmation for assets that DO
+    report volume.
+    """
+    o, c, h, l, v = (float(bar["open"]), float(bar["close"]),
+                     float(bar["high"]), float(bar["low"]),
+                     float(bar.get("volume", 0) or 0))
+    rng = h - l
+    if rng <= 0:
+        return 0.0
+    direction = 1.0 if c >= o else -1.0
+    strength = abs(c - o) / rng  # 0..1 body fraction
+    if v > 0:
+        return direction * v * strength
+    # volume genuinely unavailable — price-pressure proxy (scale-invariant)
+    return direction * strength
+
+
+def delta_spike_confirms(df_1m, i, zone_type, lookback: int = 5) -> tuple[bool, float, str]:
+    """
+    Check if the 1m bar at index i shows a sharp volume-delta spike that
+    CONFIRMS institutional buying (demand) or selling (supply).
+
+    A "spike" = current |delta| >= 1.8x the average |delta| of the last
+    `lookback` 1m bars AND in the correct direction.
+
+    Returns (confirmed, delta_value, reason).
+    """
+    if i < lookback + 1:
+        return (False, 0.0, "insufficient 1m bars")
+    cur_delta = volume_delta(df_1m.iloc[i])
+    recent_deltas = [abs(volume_delta(df_1m.iloc[j]))
+                     for j in range(i - lookback, i)]
+    avg_abs = sum(recent_deltas) / len(recent_deltas) if recent_deltas else 0.0
+    if avg_abs <= 0:
+        return (False, cur_delta, "no prior volume")
+    spike = abs(cur_delta) >= avg_abs * 1.8
+    if zone_type == "demand":
+        if cur_delta > 0 and spike:
+            return (True, cur_delta, f"buy-delta-spike {abs(cur_delta)/avg_abs:.1f}x")
+        return (False, cur_delta, "no buy-delta spike")
+    # supply
+    if cur_delta < 0 and spike:
+        return (True, cur_delta, f"sell-delta-spike {abs(cur_delta)/avg_abs:.1f}x")
+    return (False, cur_delta, "no sell-delta spike")
+
+
+def zone_touched_on_1m(bar, zone) -> str | None:
+    """
+    Did a 1m bar TOUCH a 15m zone? Returns 'demand' / 'supply' / None.
+      demand touch: 1m low <= zone top  AND 1m low >= zone bottom*0.98
+      supply touch: 1m high >= zone bottom AND 1m high <= zone top*1.02
+    """
+    low = float(bar["low"])
+    high = float(bar["high"])
+    if zone["type"] == "demand" and low <= zone["top"] and low >= zone["bottom"] * 0.98:
+        return "demand"
+    if zone["type"] == "supply" and high >= zone["bottom"] and high <= zone["top"] * 1.02:
+        return "supply"
+    return None
+
+
+# ============================================================
+# V6.5 — 1m STRUCTURAL EXHAUSTION (Brain 5 trailing exit)
+# ============================================================
+def one_min_exhaustion(df_1m, i, direction: str, lookback: int = 4) -> tuple[bool, str]:
+    """
+    Detect structural exhaustion on the 1m chart to exit a trend rider.
+
+    For a BUY (long call) position:
+      - exhaustion = a bearish 1m reversal candle with above-average volume
+        (institutional distribution) OR 3 consecutive lower highs.
+    For a SELL (long put) position:
+      - exhaustion = a bullish 1m reversal candle with above-average volume
+        OR 3 consecutive higher lows.
+
+    Returns (exhausted, reason).
+    """
+    if i < lookback + 1:
+        return (False, "insufficient 1m bars")
+    bars = df_1m.iloc[i - lookback + 1:i + 1]
+    avg_vol = float(bars["volume"].mean() or 1)
+    cur = df_1m.iloc[i]
+    cur_vol = float(cur.get("volume", 0) or 0)
+    cur_close, cur_open = float(cur["close"]), float(cur["open"])
+    cur_high, cur_low = float(cur["high"]), float(cur["low"])
+    cur_rng = max(cur_high - cur_low, 1e-9)
+    body_frac = abs(cur_close - cur_open) / cur_rng
+    # vol spike: real volume when available; price-pressure proxy (strong body)
+    # when the data source reports zero volume (index tickers).
+    vol_spike = (cur_vol > avg_vol * 1.3) if avg_vol > 0 else (body_frac >= 0.5)
+
+    if direction == "BUY":
+        # bearish reversal candle w/ volume = exhaustion
+        bearish = cur_close < cur_open
+        vol_spike = cur_vol > avg_vol * 1.3
+        # 3 consecutive lower highs
+        highs = [float(bars.iloc[j]["high"]) for j in range(len(bars))]
+        lower_highs = len(highs) >= 3 and all(highs[k] < highs[k - 1] for k in range(1, len(highs)))
+        if bearish and vol_spike:
+            return (True, "bearish-reversal-vol")
+        if lower_highs:
+            return (True, "3-lower-highs")
+    else:  # SELL (long put)
+        bullish = cur_close > cur_open
+        vol_spike = cur_vol > avg_vol * 1.3
+        lows = [float(bars.iloc[j]["low"]) for j in range(len(bars))]
+        higher_lows = len(lows) >= 3 and all(lows[k] > lows[k - 1] for k in range(1, len(lows)))
+        if bullish and vol_spike:
+            return (True, "bullish-reversal-vol")
+        if higher_lows:
+            return (True, "3-higher-lows")
+    return (False, "trend-intact")
+
+
+def find_opposing_zone(df_15m, i_15m, entry_zone_type: str,
+                       lookback: int = 40) -> dict | None:
+    """
+    Find the nearest OPPOSING 15m institutional zone for the trend-rider exit.
+      Bought at DEMAND → exit at the nearest SUPPLY zone.
+      Bought at SUPPLY → exit at the nearest DEMAND zone.
+    Returns the zone dict (with top/bottom) or None.
+    """
+    zones = detect_zones(df_15m, i_15m, lookback=lookback)
+    target_type = "supply" if entry_zone_type == "demand" else "demand"
+    opp = [z for z in zones if z["type"] == target_type]
+    if not opp:
+        return None
+    cur_price = float(df_15m.iloc[i_15m]["close"])
+    # nearest zone by distance to current price (in the trade direction)
+    if entry_zone_type == "demand":
+        # going up, pick nearest supply ABOVE current price
+        above = [z for z in opp if z["bottom"] > cur_price]
+        if above:
+            return min(above, key=lambda z: z["bottom"])
+        return max(opp, key=lambda z: z["top"])  # fallback closest
+    else:
+        below = [z for z in opp if z["top"] < cur_price]
+        if below:
+            return max(below, key=lambda z: z["top"])
+        return min(opp, key=lambda z: z["bottom"])

@@ -1,6 +1,34 @@
 # tiger-brain-v6
 Tiger Brain V6.0 - Algorithmic Trading Platform
 
+## 5-Brain Structural Architecture (V6.1)
+
+System options-buying ke liye 5 functional brains mein divided hai. Har brain
+ka apna module hai aur flow `pipeline/brain_flow.py` sabko wire karta hai:
+
+| Brain | Module | Kaam |
+|-------|--------|------|
+| **Brain 1** — Market Scanner & Regime Detection | `pipeline/brain1_scanner.py` | Momentum & noise filter: choppy candles reject, sirf high volume velocity YA significant RS divergence wale setups aage jaate hain. Regime detection bhi yahan hai. |
+| **Brain 2** — Setup Trigger & Entry Engine | `pipeline/smart_money_scanner.py` | SMC (Smart Money Concepts): Order Blocks, Liquidity Sweeps, RS score (0-100). Direction + entry + structural stop-loss nikalta hai. |
+| **Brain 3** — Option Chain & Greeks/OI Velocity Selector | `broker/option_selector.py` | Direction se CE/PE chunta hai, delta band (ATM/slightly-ITM), liquidity gates (spread/OI), OI-velocity hot strikes preference, expiry window guard. |
+| **Brain 4** — Capital Allocation & Trade Counter Guard | `risk/risk_management.py` + `broker/position_sizer.py` | Daily trade counters (global max 5-10, commodity-specific max 5-10 — limit hit to us category ke naye trades band). Live broker capital se dynamic sizing (max 10% per trade), kabhi hardcoded lot nahi. |
+| **Brain 5** — Risk Guard, Gamma Tracking & Execution Exit | `risk/exit_brain.py` | Stop-loss/target/trailing/time-based exits + gamma tracking (expiry ke paas gamma spike se bachav) + structural stop (Brain 2 ka SMC level). |
+
+```bash
+# Pura flow demo (synthetic data pe):
+python3 -m pipeline.brain_flow
+```
+
+Key rules (config `BRAIN1`-`BRAIN5` sections in `config/thresholds.py`):
+- **Trade limits**: global 8/day (clamped 5-10), commodity 5/day (clamped 5-10). Nayadin pe auto-reset.
+- **Capital**: Angel One `getRMS()` se live available cash; per-trade cap 10%, total exposure cap 50%. Broker fail + no fallback = trade block (fail-safe).
+- **Market category**: MCX/NCDEX symbols = commodity (counter alag); NSE/BSE/NFO = equity.
+
+Note: ye 5-Brain layer purane 5-stage pipeline (stage1-stage5) ke SAATH hai —
+stage pipeline backtest engine use karta hai, brain architecture live flow
+ke liye hai.
+
+
 ## Backtest chalana (Phase 2)
 
 Saare commands repo ROOT se chalane hain.
