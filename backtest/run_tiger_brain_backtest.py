@@ -154,6 +154,26 @@ VWAP_TOLERANCE_PCT = 0.3
 # PDH/PDL tolerance (zone within this % of PDH/PDL = confluence)
 PDH_PDL_TOLERANCE_PCT = 0.5
 
+# ============================================================
+# ROCKET DETECTION LENS — the "powerful eyes" meta-filter
+# Identifies setups with explosive 2-3 day rocket potential.
+# Only the top 50/100 setups pass — sniper quality, bumper P&L.
+# ============================================================
+ROCKET_MIN_SCORE = 85        # raised from 75 — only multi-confluence rockets
+ROCKET_MIN_CONFLUENCES = 4   # need 4+ independent confirmations stacking
+ROCKET_MOMENTUM_MIN = 2.0    # delta spike must be 2x+ (not 1.8x)
+ROCKET_FRESHNESS_BONUS = 10  # untested institutional zone = rocket fuel
+ROCKET_COMPRESSION_BONUS = 8 # BB/compression before breakout = coiled spring
+ROCKET_MULTI_TOUCH_BONUS = 6 # zone tested 1-2x and held = strong level
+ROCKET_INST_VOL_BONUS = 8    # institutional volume at creation
+ROCKET_DEPARTURE_BONUS = 6   # fast departure from zone
+ROCKET_BODY_BONUS = 5        # strong impulse body
+ROCKET_SWEEP_STACK_BONUS = 5 # sweep + spike stacking = stop hunt before rocket
+ROCKET_TREND_STACK_BONUS = 5 # trend + PDH/PDL stacking = breakout confirm
+ROCKET_PCR_STACK_BONUS = 3   # PCR aligned with direction
+ROCKET_ORB_STACK_BONUS = 3   # ORB breakout confirm
+ROCKET_VWAP_STACK_BONUS = 4  # VWAP confluence
+
 ANGEL_EXCHANGE = {
     "NIFTY": ("NSE", "Nifty 50"),
     "BANKNIFTY": ("NSE", "Nifty Bank"),
@@ -311,6 +331,194 @@ def orb_direction(cur_price, or_high, or_low) -> str:
     if cur_price < or_low:
         return "bearish"
     return "neutral"
+
+
+# ============================================================
+# ROCKET DETECTION LENS — the "powerful eyes" meta-filter
+# ============================================================
+# Scans 15m data for compression (coiled spring) before breakout.
+# A rocket needs: tight consolidation → explosive expansion → zone touch.
+# This detects the "coiled" phase that precedes 2-3 day rocket moves.
+
+def detect_compression(df_15m, i, lookback=20) -> tuple[bool, float]:
+    """BB-width compression: current range vs 20-bar avg range.
+    Returns (is_compressed, compression_ratio)."""
+    if i < lookback:
+        return (False, 1.0)
+    window = df_15m.iloc[i - lookback:i + 1]
+    ranges = (window["high"] - window["low"]).astype(float)
+    if len(ranges) < 5:
+        return (False, 1.0)
+    recent_range = float(ranges.iloc[-5:].mean())
+    avg_range = float(ranges.mean())
+    if avg_range <= 0:
+        return (False, 1.0)
+    ratio = recent_range / avg_range
+    # compressed if recent range < 70% of average (tight coil)
+    return (ratio < 0.70, round(ratio, 2))
+
+
+def rocket_momentum_score(df_1m, i_1m, direction) -> tuple[float, str]:
+    """1m momentum rocket check: consecutive bars in direction + accelerating volume.
+    Returns (momentum_score, reason)."""
+    if i_1m < 3:
+        return (0.0, "insufficient")
+    bars = df_1m.iloc[i_1m - 2:i_1m + 1]
+    closes = bars["close"].astype(float).values
+    vols = bars["volume"].astype(float).values
+
+    # Count consecutive bars closing in direction
+    if direction == "BUY":
+        bullish = sum(1 for k in range(len(closes) - 1) if closes[k + 1] > closes[k])
+        momentum = bullish / max(len(closes) - 1, 1)
+    else:
+        bearish = sum(1 for k in range(len(closes) - 1) if closes[k + 1] < closes[k])
+        momentum = bearish / max(len(closes) - 1, 1)
+
+    # Volume acceleration: is volume increasing?
+    vol_accel = 1.0
+    if vols[-1] > 0 and vols[-2] > 0:
+        vol_accel = vols[-1] / max(vols[-2], 1.0)
+
+    score = momentum * 10 + min(vol_accel, 3.0) * 3
+    reason = f"mom{momentum:.0%} vol-acc{vol_accel:.1f}x"
+    return (round(score, 1), reason)
+
+
+def validate_zone_quality(df_15m, zone, i_15m, zone_type) -> tuple[int, list[str]]:
+    """Full zone quality validation for BOTH demand and supply zones.
+    This was built (validate_demand_zone_quality) but never called — now integrated.
+    Scores: freshness + institutional volume + departure speed + body + round number."""
+    score = 0
+    details = []
+
+    touches = count_zone_touches(df_15m, zone, i_15m)
+    if touches == 0:
+        score += ROCKET_FRESHNESS_BONUS
+        details.append(f"fresh-untested(+{ROCKET_FRESHNESS_BONUS})")
+    elif touches <= 2:
+        score += ROCKET_MULTI_TOUCH_BONUS
+        details.append(f"confirmed-{touches}touch(+{ROCKET_MULTI_TOUCH_BONUS})")
+    else:
+        score += DEMAND_STALE_PENALTY
+        details.append(f"stale-{touches}touch({DEMAND_STALE_PENALTY})")
+
+    vol_ratio, is_high_vol = zone_creation_volume(df_15m, zone)
+    if is_high_vol:
+        score += ROCKET_INST_VOL_BONUS
+        details.append(f"inst-vol{vol_ratio:.1f}x(+{ROCKET_INST_VOL_BONUS})")
+
+    dep_pct, is_fast = zone_departure_speed(df_15m, zone, zone_type)
+    if is_fast:
+        score += ROCKET_DEPARTURE_BONUS
+        details.append(f"fast-departure{dep_pct:.1f}%(-{ROCKET_DEPARTURE_BONUS})")
+
+    body_ratio, is_strong = impulse_body_strength(df_15m, zone)
+    if is_strong:
+        score += ROCKET_BODY_BONUS
+        details.append(f"strong-body{body_ratio:.0f}%(+{ROCKET_BODY_BONUS})")
+
+    zone_mid = (zone["top"] + zone["bottom"]) / 2
+    if near_round_number(zone_mid):
+        score += DEMAND_ROUND_NUMBER_BONUS
+        details.append(f"round-no(+{DEMAND_ROUND_NUMBER_BONUS})")
+
+    return (score, details)
+
+
+def rocket_detection_lens(
+    df_15m, i_15m, df_1m, i_1m, zone, zone_type, direction,
+    spike_mult, swept, is_exp, trend, pdh_ok, vwap_ok, orb_dir,
+    pcr_aligned, cur_price, vix_val
+) -> tuple[int, list[str], int]:
+    """The POWERFUL meta-filter lens. Scores rocket potential on 3 axes:
+
+    1. ZONE QUALITY (institutional strength): freshness, vol, departure, body
+    2. MOMENTUM IGNITION: delta spike strength, volume acceleration, sweep
+    3. CONFLUENCE STACKING: how many independent signals agree
+
+    Returns (rocket_bonus, rocket_details, confluence_count).
+    Only setups with confluence_count >= ROCKET_MIN_CONFLUENCES are rockets.
+    """
+    rocket_bonus = 0
+    rocket_details = []
+    confluence_count = 0
+
+    # === AXIS 1: ZONE QUALITY (the institutional eyes) ===
+    zq_score, zq_details = validate_zone_quality(df_15m, zone, i_15m, zone_type)
+    rocket_bonus += zq_score
+    rocket_details.extend(zq_details)
+    if zq_score > 0:
+        confluence_count += 1
+
+    # === AXIS 2: MOMENTUM IGNITION (the rocket fuel) ===
+    # Strong delta spike (2x+ = rocket grade)
+    if spike_mult >= ROCKET_MOMENTUM_MIN:
+        rocket_bonus += 3
+        rocket_details.append(f"rocket-spike{spike_mult:.1f}x(+3)")
+        confluence_count += 1
+    elif spike_mult >= 1.8:
+        confluence_count += 1  # counts as confirmation but no bonus
+
+    # Liquidity sweep (stop hunt before rocket)
+    if swept:
+        confluence_count += 1
+
+    # 1m momentum acceleration
+    mom_score, mom_reason = rocket_momentum_score(df_1m, i_1m, direction)
+    if mom_score >= 10:
+        rocket_bonus += 3
+        rocket_details.append(f"{mom_reason}(+3)")
+        confluence_count += 1
+
+    # Compression before breakout (coiled spring)
+    is_compressed, comp_ratio = detect_compression(df_15m, i_15m)
+    if is_compressed:
+        rocket_bonus += ROCKET_COMPRESSION_BONUS
+        rocket_details.append(f"coiled{comp_ratio:.2f}(+{ROCKET_COMPRESSION_BONUS})")
+        confluence_count += 1
+
+    # === AXIS 3: CONFLUENCE STACKING (the lens power) ===
+    # Sweep + spike stacking = stop hunt then rocket
+    if swept and spike_mult >= ROCKET_MOMENTUM_MIN:
+        rocket_bonus += ROCKET_SWEEP_STACK_BONUS
+        rocket_details.append(f"sweep+spike-stack(+{ROCKET_SWEEP_STACK_BONUS})")
+
+    # Trend + PDH/PDL stacking = breakout confirmation
+    trend_aligned = (direction == "BUY" and trend == "up") or \
+                    (direction == "SELL" and trend == "down")
+    if trend_aligned and pdh_ok:
+        rocket_bonus += ROCKET_TREND_STACK_BONUS
+        rocket_details.append(f"trend+PDH-stack(+{ROCKET_TREND_STACK_BONUS})")
+        confluence_count += 1
+    elif trend_aligned:
+        confluence_count += 1
+
+    # VWAP confluence
+    if vwap_ok:
+        rocket_bonus += ROCKET_VWAP_STACK_BONUS
+        rocket_details.append(f"vwap-stack(+{ROCKET_VWAP_STACK_BONUS})")
+        confluence_count += 1
+
+    # PCR alignment
+    if pcr_aligned:
+        rocket_bonus += ROCKET_PCR_STACK_BONUS
+        rocket_details.append(f"pcr-stack(+{ROCKET_PCR_STACK_BONUS})")
+        confluence_count += 1
+
+    # ORB confirmation
+    orb_aligned = (direction == "BUY" and orb_dir == "bullish") or \
+                  (direction == "SELL" and orb_dir == "bearish")
+    if orb_aligned:
+        rocket_bonus += ROCKET_ORB_STACK_BONUS
+        rocket_details.append(f"orb-stack(+{ROCKET_ORB_STACK_BONUS})")
+        confluence_count += 1
+
+    # Explosive zone quality
+    if is_exp:
+        confluence_count += 1
+
+    return (rocket_bonus, rocket_details, confluence_count)
 
 
 # --- India VIX ---
@@ -703,7 +911,30 @@ def find_tiger_brain_entry(df_15m, i_15m, df_1m, seg, is_expiry, symbol,
                 score += ORB_BONUS
                 score_details.append(f"orb-bear(+{ORB_BONUS})")
 
-            # === MINIMUM SCORE CHECK ===
+            # === ROCKET DETECTION LENS — the powerful meta-filter eyes ===
+            # Scores rocket potential on 3 axes: zone quality, momentum
+            # ignition, confluence stacking. Only multi-confluence setups
+            # with ROCKET_MIN_CONFLUENCES+ independent confirmations pass.
+            try:
+                rocket_bonus, rocket_details, confluence_count = \
+                    rocket_detection_lens(
+                        df_15m, i_15m, df_1m, i_1m, z, touch, direction,
+                        spike_mult, swept, is_exp, trend, pdh_ok,
+                        vwap_ok if 'vwap_ok' in dir() else False, orb_dir,
+                        pcr_aligned, cur_price, vix_val)
+                score += rocket_bonus
+                score_details.extend(rocket_details)
+            except Exception:
+                confluence_count = 0
+
+            # === ROCKET GATE: need minimum confluences + score ===
+            # This is the "50/100 filter" — only rocket-grade setups pass.
+            if confluence_count < ROCKET_MIN_CONFLUENCES:
+                continue
+            if score < ROCKET_MIN_SCORE:
+                continue
+
+            # === MINIMUM SCORE CHECK (legacy floor, now superseded by rocket gate) ===
             if score < MIN_SCORE_TO_ENTER:
                 continue
 
@@ -752,6 +983,8 @@ def find_tiger_brain_entry(df_15m, i_15m, df_1m, seg, is_expiry, symbol,
                 "vwap_confluence": vwap_ok if 'vwap_ok' in dir() else False,
                 "pdh_pdl": pdh_ok,
                 "orb": orb_dir,
+                "confluence_count": confluence_count,
+                "rocket_grade": confluence_count >= ROCKET_MIN_CONFLUENCES and score >= ROCKET_MIN_SCORE,
             }
             if best is None or candidate["setup_score"] > best["setup_score"]:
                 best = candidate
