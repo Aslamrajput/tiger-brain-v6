@@ -93,6 +93,13 @@ from pipeline.intraday_strategies import (
 from universe.fno_universe import (
     UNIVERSE, all_symbols, segment_of, lot_size, is_expiry_day,
 )
+from backtest.tiger_premium_brain import (
+    PremiumDiscountTracker, compute_premium_strike, check_premium_exit,
+)
+from backtest.tiger_session_brain import (
+    get_current_session, get_session_score_threshold,
+    should_force_hunt, HuntStatus, print_session_schedule,
+)
 from risk.risk_management import TradeCounterGuard
 from backtest.tiger_fund_brain import announce_fund_plan, size_trade_with_fund_brain
 
@@ -109,7 +116,118 @@ PREMIUM_MIN = 3.0
 TREND_LOOKBACK = 10
 VOL_SURGE_MULT = 1.5        # 1.5x volume (balanced — not too strict, not too loose)
 VOL_LOOKBACK = 5
-MAX_ENTRIES_PER_DAY = 2     # top 2 entries by score per day (sniper quality)
+MAX_ENTRIES_PER_DAY = 8     # raised from 2 — 10-20 trades/day target, 8 balanced
+
+def compute_iv(df_so_far, vix_val, symbol, is_call, strike, underlying):
+    """V19 IV model: blend India VIX (implied) with realized vol.
+
+    India VIX = market's implied volatility expectation (forward-looking).
+    Realized vol = actual price movement (backward-looking).
+    Blend: 60% VIX + 40% realized = better IV estimate than either alone.
+
+    Skew adjustment: OTM puts have higher IV than ATM (volatility smile).
+    For CALL options: ITM strikes get slightly lower IV (0.95x).
+    For PUT options: OTM strikes get slightly higher IV (1.05x).
+    """
+    rv = max(min(realized_vol_simple(df_so_far), 0.80), 0.12)
+    vix = max(min(vix_val / 100.0, 0.80), 0.12) if vix_val > 0 else rv
+
+    # Blend: VIX is forward-looking (60%), realized is backward (40%)
+    blended = 0.60 * vix + 0.40 * rv
+    blended = max(min(blended, 0.80), 0.10)
+
+    # Simple skew: OTM options get slight IV bump (smile effect)
+    moneyness = strike / underlying if underlying > 0 else 1.0
+    if is_call:
+        # OTM call (strike > underlying) gets slight IV bump
+        if moneyness > 1.0:
+            blended *= 1.03
+        # ITM call gets slight discount
+        elif moneyness < 0.98:
+            blended *= 0.97
+    else:
+        # OTM put (strike < underlying) gets IV bump (demand for protection)
+        if moneyness < 1.0:
+            blended *= 1.05
+        elif moneyness > 1.02:
+            blended *= 0.97
+
+    return max(min(blended, 0.80), 0.10)
+
+
+# ============================================================
+# V19 EXIT ENGINE — tighter trail + fixed target booking
+# ============================================================
+V19_TRAIL_ACTIVATE_PCT = 20.0   # activate trail at +20% (was 30%)
+V19_TRAIL_LOCK_PCT = 65.0       # lock 65% of peak (was 55% — gives back less)
+V19_FIXED_TARGET_PCT = 100.0    # book 50% at +100% (2x), ride rest
+V19_FIXED_TARGET_BOOK = 0.5     # book 50% of position at target
+V19_RUNAWAY_EXIT_PCT = 250.0    # absolute safety exit
+
+
+def check_intraday_exit_v19(pos, cur_underlying, cur_premium, is_square_off_bar,
+                            df_1m=None, i_1m=None) -> dict:
+    """V19 exit engine — tighter trailing + fixed target booking.
+
+    Improvements over V6.6:
+      1. Trail activates at +20% (not +30%) — locks profit sooner
+      2. Trail locks 65% of peak (not 55%) — gives back 15% less
+      3. Fixed target at +100%: books 50% of position, rides rest
+      4. Runaway safety at +250% (unchanged)
+
+    Locked V6.6 exit (check_intraday_exit) is NOT modified.
+    """
+    # 1. Square-off
+    if is_square_off_bar:
+        return {"exit": True, "reason": "square_off", "exit_premium": cur_premium}
+
+    # 2. Hard stop
+    if cur_premium <= pos["stop_premium"]:
+        return {"exit": True, "reason": "stop_loss_2000",
+                "exit_premium": max(cur_premium, 0.5)}
+
+    gain_pct = (cur_premium - pos["entry_premium"]) / pos["entry_premium"] * 100
+
+    # 3. Opposing zone
+    opp = pos.get("opposing_zone_edge")
+    if opp is not None:
+        if pos["direction"] == "BUY" and cur_underlying >= opp:
+            return {"exit": True, "reason": "opposing_zone_reached",
+                    "exit_premium": max(cur_premium, 0.5)}
+        if pos["direction"] == "SELL" and cur_underlying <= opp:
+            return {"exit": True, "reason": "opposing_zone_reached",
+                    "exit_premium": max(cur_premium, 0.5)}
+
+    # 4. FIXED TARGET — book 50% at +100% (first time only)
+    if gain_pct >= V19_FIXED_TARGET_PCT and not pos.get("target_booked", False):
+        pos["target_booked"] = True
+        pos["quantity"] = max(1, int(pos["quantity"] * (1 - V19_FIXED_TARGET_BOOK)))
+        return {"exit": True, "reason": "fixed_target_100pct_book50",
+                "exit_premium": cur_premium}
+
+    # 5. Dynamic trail — activates at +20% (tighter than V6.6's +30%)
+    if gain_pct >= V19_TRAIL_ACTIVATE_PCT:
+        peak = max(pos.get("peak_premium", cur_premium), cur_premium)
+        peak_gain = (peak - pos["entry_premium"]) / pos["entry_premium"]
+        trail_floor = pos["entry_premium"] * (1 + peak_gain * V19_TRAIL_LOCK_PCT / 100)
+        if cur_premium <= trail_floor:
+            return {"exit": True, "reason": "v19_trail_lock_65pct",
+                    "exit_premium": max(cur_premium, 0.5)}
+
+    # 6. 1m exhaustion (only after +15% gain, same as V6.6)
+    if df_1m is not None and i_1m is not None and gain_pct >= 15.0:
+        exhausted, why = one_min_exhaustion(df_1m, i_1m, pos["direction"])
+        if exhausted:
+            return {"exit": True, "reason": f"1m_exhaustion:{why}",
+                    "exit_premium": max(cur_premium, 0.5)}
+
+    # 7. Runaway safety
+    if gain_pct >= V19_RUNAWAY_EXIT_PCT:
+        return {"exit": True, "reason": "runaway_safety_250pct",
+                "exit_premium": cur_premium}
+
+    return {"exit": False}
+
 
 # ============================================================
 # DELIVERY MODE — 2-3 day rocket holding (Tiger V16)
@@ -170,8 +288,8 @@ PDH_PDL_TOLERANCE_PCT = 0.5
 # Identifies setups with explosive 2-3 day rocket potential.
 # Only the top 50/100 setups pass — sniper quality, bumper P&L.
 # ============================================================
-ROCKET_MIN_SCORE = 78        # balanced — strict enough for quality, loose enough for big winners
-ROCKET_MIN_CONFLUENCES = 4   # need 4+ REAL independent confirmations stacking
+ROCKET_MIN_SCORE = 72        # relaxed from 78 — more entries while keeping quality
+ROCKET_MIN_CONFLUENCES = 3   # relaxed from 4 — one less confirmation needed
 ROCKET_MIN_FUEL = 1          # need 1+ rocket-fuel signal (sweep/compression/2.5x spike/momentum)
 ROCKET_MOMENTUM_MIN = 2.0    # delta spike must be 2x+ for rocket fuel
 ROCKET_STALE_HARD_REJECT = 999 # disabled — stale penalty (-8) handles it, hard reject kills commodity winners
@@ -389,9 +507,13 @@ def rocket_momentum_score(df_1m, i_1m, direction) -> tuple[float, str]:
         momentum = bearish / max(len(closes) - 1, 1)
 
     # Volume acceleration: is volume increasing?
-    vol_accel = 1.0
+    # For 0-volume sources (indexes), use price-range acceleration as proxy
     if vols[-1] > 0 and vols[-2] > 0:
         vol_accel = vols[-1] / max(vols[-2], 1.0)
+    else:
+        # Price-range proxy: current bar range vs previous bar range
+        ranges = (bars["high"] - bars["low"]).astype(float).values
+        vol_accel = ranges[-1] / max(ranges[-2], 1e-9) if len(ranges) >= 2 else 1.0
 
     score = momentum * 10 + min(vol_accel, 3.0) * 3
     reason = f"mom{momentum:.0%} vol-acc{vol_accel:.1f}x"
@@ -791,6 +913,134 @@ def volume_confirmed(df_1m, i_1m, zone_type) -> tuple[bool, str]:
 # ============================================================
 # SCORING ENTRY ENGINE — ALL 5 BRAINS AS SCORERS
 # ============================================================
+def find_tiger_brain_entry_15m(df_15m, i_15m, seg, is_expiry, symbol, vix_val):
+    """15m-only entry path for symbols without 1m data (indexes, illiquid).
+
+    Uses 15m bar for zone touch + momentum confirmation instead of 1m sniper.
+    Simpler but works when 1m data is unavailable (e.g., NIFTY/BANKNIFTY
+    where Angel One doesn't provide direct index 1m candles).
+
+    HARD GATES: zone touch on 15m bar + body confirmation.
+    """
+    if i_15m < 40:
+        return None
+
+    bar = df_15m.iloc[i_15m]
+    cur_price = float(bar["close"])
+
+    zone_idx = max(0, i_15m - 1)
+    zones = detect_zones(df_15m, zone_idx, lookback=zone_idx)
+    if not zones:
+        return None
+
+    trend = detect_15m_trend(df_15m, i_15m)
+    current_date = df_15m.index[i_15m].date() if df_15m.index[i_15m].tz is None \
+        else df_15m.index[i_15m].tz_convert("Asia/Kolkata").date()
+    pdh, pdl = compute_pdh_pdl(df_15m, current_date)
+
+    best = None
+    for z in zones:
+        touch = zone_touched_on_1m(bar, z)
+        if touch is None:
+            continue
+
+        direction = "BUY" if touch == "demand" else "SELL"
+
+        # HARD GATE: bar body must confirm direction (replaces 1m volume delta)
+        o, c = float(bar["open"]), float(bar["close"])
+        body_ok = (c > o and direction == "BUY") or (c < o and direction == "SELL")
+        if not body_ok:
+            continue
+
+        score = z["score"]
+        score_details = [f"15m-body-confirm"]
+
+        # Explosive quality
+        try:
+            is_exp, exp_pct = zone_explosive_quality(
+                df_15m, z.get("bar_idx", zone_idx), touch)
+            if is_exp:
+                score += EXPLOSIVE_BONUS
+                score_details.append(f"explosive(+{EXPLOSIVE_BONUS})")
+        except Exception:
+            is_exp, exp_pct = False, 0.0
+
+        # Trend alignment
+        trend_aligned = (direction == "BUY" and trend == "up") or \
+                        (direction == "SELL" and trend == "down")
+        if trend_aligned:
+            score += TREND_BONUS
+            score_details.append(f"trend(+{TREND_BONUS})")
+
+        # PDH/PDL confluence
+        pdh_ok, pdh_reason = pdh_pdl_confluence(z["top"], z["bottom"], pdh, pdl)
+        if pdh_ok:
+            score += PDH_PDL_BONUS
+            score_details.append(f"{pdh_reason}(+{PDH_PDL_BONUS})")
+
+        # Golden window
+        gw_bonus = golden_window_bonus(df_15m.index[i_15m], seg)
+        if gw_bonus > 0:
+            score += gw_bonus
+            score_details.append(f"window(+{gw_bonus})")
+
+        # VIX
+        if vix_val < VIX_LOW_MAX:
+            score += VIX_LOW_BONUS
+            score_details.append(f"vix{vix_val:.0f}(+{VIX_LOW_BONUS})")
+
+        # Zone quality validation
+        zq_score, zq_details, touches = validate_zone_quality(
+            df_15m, z, i_15m, touch)
+        score += zq_score
+        score_details.extend(zq_details)
+
+        # Compression
+        is_compressed, comp_ratio = detect_compression(df_15m, i_15m)
+        if is_compressed:
+            score += ROCKET_COMPRESSION_BONUS
+            score_details.append(f"coiled{comp_ratio:.2f}(+{ROCKET_COMPRESSION_BONUS})")
+
+        # Confluence count for 15m path (relaxed: 3 instead of 4)
+        confluence_count = 1  # zone quality
+        if is_exp: confluence_count += 1
+        if trend_aligned: confluence_count += 1
+        if pdh_ok: confluence_count += 1
+        if is_compressed: confluence_count += 1
+
+        # Relaxed rocket gate for 15m-only path
+        is_rocket = confluence_count >= 3
+        if not is_rocket:
+            continue
+        if score < ROCKET_MIN_SCORE - 6:  # relaxed by 6 for 15m-only
+            continue
+
+        # Strike selection
+        if touch == "demand" and is_exp:
+            strike_kind = "ATM"
+        elif is_exp or is_expiry:
+            strike_kind = "ITM"
+        else:
+            strike_kind = "ATM"
+
+        setup = {
+            "direction": direction, "zone_type": touch,
+            "zone_top": z["top"], "zone_bottom": z["bottom"],
+            "entry_price": cur_price, "entry_1m_ts": df_15m.index[i_15m],
+            "delta_reason": "15m-body-confirm",
+            "setup_score": score, "score_details": score_details,
+            "strategy": "15m_sniper" if is_exp else "15m_zone_touch",
+            "is_expiry": is_expiry, "explosive": is_exp,
+            "sweep": False, "strike_kind": strike_kind,
+            "confluence_count": confluence_count,
+        }
+
+        if best is None or score > best["setup_score"]:
+            best = setup
+
+    return best
+
+
 def find_tiger_brain_entry(df_15m, i_15m, df_1m, seg, is_expiry, symbol,
                            broker, pcr_cache, vix_val):
     """
@@ -1234,7 +1484,8 @@ def run_tiger_brain_backtest(data_map, start_capital=150000.0,
                              max_capital_per_trade_pct=10.0,
                              dte_default=1.0, verbose=False,
                              data_map_1m=None, broker=None,
-                             use_fund_brain=True, use_delivery_mode=True):
+                             use_fund_brain=True, use_delivery_mode=True,
+                             use_premium_brain=True, use_session_brain=True):
     use_sniper = data_map_1m is not None
     all_ts = sorted(set().union(*[set(d.index) for d in data_map.values()]))
     days_map = defaultdict(list)
@@ -1254,6 +1505,16 @@ def run_tiger_brain_backtest(data_map, start_capital=150000.0,
     filter_stats = defaultdict(int)
     brain_log = defaultdict(int)
     daily_entries_taken = defaultdict(int)
+
+    # === BRAIN 6: Premium Discount Tracker ===
+    premium_tracker = PremiumDiscountTracker() if use_premium_brain else None
+
+    # === BRAIN 7: Session Commander ===
+    if use_session_brain:
+        print("\n" + "=" * 72)
+        print("  🐅 TIGER SESSION COMMANDER — V19 SESSION SCHEDULE")
+        print("=" * 72)
+        print(print_session_schedule())
 
     # === FUND BRAIN — pre-market capital announcement ===
     fund_plan = None
@@ -1280,6 +1541,9 @@ def run_tiger_brain_backtest(data_map, start_capital=150000.0,
         # VIX for this day
         vix_val = get_vix_for_date(day)
 
+        # === BRAIN 7: Daily hunt status ===
+        daily_hunt = HuntStatus(date=str(sim_date)) if use_session_brain else None
+
         for ts in day_ts:
             # --- 1. EXIT (Brain 5) ---
             still_open = []
@@ -1292,11 +1556,35 @@ def run_tiger_brain_backtest(data_map, start_capital=150000.0,
                     continue
                 cur_underlying = float(df_sym.loc[ts, "close"])
                 df_so_far = df_sym.loc[:ts]
-                iv = max(min(realized_vol_simple(df_so_far), 0.80), 0.12)
                 is_call = pos["option_type"] == "CE"
+                iv = compute_iv(df_so_far, vix_val, sym, is_call, pos["strike"], cur_underlying)
                 cur_prem = bs_premium(cur_underlying, pos["strike"], pos["dte"], is_call, iv)
                 if cur_prem > pos.get("peak_premium", 0):
                     pos["peak_premium"] = cur_prem
+
+                # === BRAIN 6: IV expansion exit — sell when premium becomes expensive ===
+                if premium_tracker is not None:
+                    prem_exit = check_premium_exit(pos, current_iv=iv, tracker=premium_tracker)
+                    if prem_exit["exit"]:
+                        exit_prem = prem_exit.get("exit_premium", cur_prem)
+                        slippage = exit_prem * 0.008 + pos["entry_premium"] * 0.008
+                        brokerage = 20.0 * 2
+                        pnl = (exit_prem - pos["entry_premium"]) * pos["quantity"] - slippage * 2 - brokerage
+                        pnl = max(pnl, -max_loss_per_trade - brokerage - slippage * 2 + 1)
+                        capital += pnl
+                        exit_g = bs_greeks_full(cur_underlying, pos["strike"], pos["dte"], is_call, iv)
+                        trades.append({
+                            **pos, "exit_ts": ts, "exit_premium": exit_prem, "pnl": pnl,
+                            "exit_reason": prem_exit["reason"],
+                            "hold_bars": len(df_so_far) - pos["entry_idx"],
+                            "confirmation": pos.get("delta_reason", "A+"),
+                            "exit_delta": exit_g["delta"], "exit_gamma": exit_g["gamma"],
+                            "exit_theta": exit_g["theta"], "exit_vega": exit_g["vega"],
+                        })
+                        if verbose:
+                            logger.warning(f"EXIT {sym} {prem_exit['reason']} pnl={pnl:.0f}")
+                        continue
+
                 sq_off = _is_square_off_bar(ts, seg)
                 i_1m_pos = None
                 df_1m_pos = None
@@ -1317,11 +1605,11 @@ def run_tiger_brain_backtest(data_map, start_capital=150000.0,
                         ex = {"exit": True, "exit_premium": cur_prem,
                               "reason": f"delivery_max_hold({DELIVERY_MAX_HOLD_DAYS}d)"}
                     else:
-                        ex = check_intraday_exit(pos, cur_underlying, cur_prem, False,
-                                                 df_1m=df_1m_pos, i_1m=i_1m_pos)
+                        ex = check_intraday_exit_v19(pos, cur_underlying, cur_prem, False,
+                                                     df_1m=df_1m_pos, i_1m=i_1m_pos)
                 else:
-                    ex = check_intraday_exit(pos, cur_underlying, cur_prem, sq_off,
-                                             df_1m=df_1m_pos, i_1m=i_1m_pos)
+                    ex = check_intraday_exit_v19(pos, cur_underlying, cur_prem, sq_off,
+                                                 df_1m=df_1m_pos, i_1m=i_1m_pos)
                 if ex["exit"]:
                     exit_prem = ex["exit_premium"]
                     slippage = exit_prem * 0.008 + pos["entry_premium"] * 0.008
@@ -1377,6 +1665,14 @@ def run_tiger_brain_backtest(data_map, start_capital=150000.0,
                         filter_stats["rejected_low_score_or_volume"] += 1
                         continue
                     brain_log["entry_scored"] += 1
+                elif use_sniper:
+                    # No 1m data for this symbol — try 15m-only entry
+                    # (indexes often lack 1m data from Angel One)
+                    setup = find_tiger_brain_entry_15m(
+                        df_sym, idx, seg, expiry, sym, vix_val)
+                    if setup is None:
+                        continue
+                    brain_log["entry_scored"] += 1
                 else:
                     continue
 
@@ -1403,15 +1699,49 @@ def run_tiger_brain_backtest(data_map, start_capital=150000.0,
                 expiry = cand.get("expiry", False)
                 cur_underlying = float(df_sym.iloc[idx]["close"])
                 df_so_far = df_sym.loc[:ts]
-                iv = max(min(realized_vol_simple(df_so_far), 0.80), 0.12)
                 is_call = setup["direction"] == "BUY"
 
+                # === BRAIN 7: Session-based score threshold + force hunt ===
+                ts_ist = ts.tz_convert("Asia/Kolkata") if hasattr(ts, 'tz_convert') else ts
+                ts_time = ts_ist.time() if hasattr(ts_ist, 'time') else ts.time()
+                force_hunt = False
+                adjusted_score_threshold = ROCKET_MIN_SCORE
+                if use_session_brain and daily_hunt is not None:
+                    session_thresh = get_session_score_threshold(ts_time, seg)
+                    if session_thresh < 999:
+                        adjusted_score_threshold = min(adjusted_score_threshold, session_thresh)
+                    force_hunt, fh_thresh, _ = should_force_hunt(ts_time, daily_hunt, seg)
+                    if force_hunt:
+                        adjusted_score_threshold = min(adjusted_score_threshold, fh_thresh)
+
+                # === BRAIN 6: Premium discount strike override ===
+                iv_percentile = 50.0
+                premium_bonus = 0.0
+                prem_snap = None
+                if premium_tracker is not None:
+                    prem_snap = premium_tracker.evaluate(sym, current_iv=iv, setup_score=setup["setup_score"])
+                    iv_percentile = prem_snap.iv_percentile
+                    premium_bonus = prem_snap.discount_bonus
+                    # Block expensive premiums (unless force hunt)
+                    if not prem_snap.should_enter and not force_hunt:
+                        filter_stats["rejected_expensive_premium"] += 1
+                        continue
+                    # Override strike based on IV percentile
+                    if prem_snap.recommended_strike == "OTM":
+                        strike_kind = "OTM"
+                    elif prem_snap.recommended_strike == "ITM":
+                        strike_kind = "ITM"
+
+                # Strike determined first, then IV with skew
                 strike_kind = setup.get("strike_kind", "ATM")
                 delta_in_reason = "delta" in setup.get("delta_reason", "")
                 if (expiry and delta_in_reason) or strike_kind == "ITM":
                     strike = round(cur_underlying * 0.99) if is_call else round(cur_underlying * 1.01)
+                elif strike_kind == "OTM":
+                    strike = round(cur_underlying * 1.01) if is_call else round(cur_underlying * 0.99)
                 else:
                     strike = round(cur_underlying)
+                iv = compute_iv(df_so_far, vix_val, sym, is_call, strike, cur_underlying)
 
                 entry_prem = bs_premium(cur_underlying, strike, dte_default, is_call, iv)
                 entry_prem = max(entry_prem, 1.0)
@@ -1531,7 +1861,17 @@ def run_tiger_brain_backtest(data_map, start_capital=150000.0,
                     "entry_vega": entry_g["vega"],
                     "is_delivery": is_delivery,
                     "hold_days": 0,
+                    "iv_percentile": iv_percentile,
+                    "premium_bonus": premium_bonus,
+                    "force_hunt": force_hunt,
+                    "session": get_current_session(ts_time, seg).name if use_session_brain and get_current_session(ts_time, seg) else "OFF",
                 }
+                # === BRAIN 6: Update IV history ===
+                if premium_tracker is not None:
+                    premium_tracker.update(sym, iv)
+                # === BRAIN 7: Record hunt trade ===
+                if daily_hunt is not None:
+                    daily_hunt.record_trade(seg)
                 open_positions.append(pos)
                 if verbose:
                     logger.warning(
@@ -1553,8 +1893,8 @@ def run_tiger_brain_backtest(data_map, start_capital=150000.0,
         df_sym = data_map[sym]
         last_ts = df_sym.index[-1]
         cur_underlying = float(df_sym.iloc[-1]["close"])
-        iv = max(min(realized_vol_simple(df_sym), 0.80), 0.12)
         is_call = pos["option_type"] == "CE"
+        iv = compute_iv(df_sym, vix_val, sym, is_call, pos["strike"], cur_underlying)
         cur_prem = bs_premium(cur_underlying, pos["strike"], pos["dte"], is_call, iv)
         slippage = cur_prem * 0.008 + pos["entry_premium"] * 0.008
         brokerage = 20.0 * 2
@@ -1671,8 +2011,8 @@ def main():
         return
 
     print("\nFetching 3-month (90-day) data from Angel One...")
-    # Full market scan: 150+ F&O stocks + index + commodities (Tiger V16)
-    use_full_scan = "--full-scan" in sys.argv
+    # Full market scan: 150+ F&O stocks + index + commodities — DEFAULT ON
+    use_full_scan = "--no-full-scan" not in sys.argv  # opt-out instead of opt-in
     data_map, data_map_1m, failed = fetch_angel_data(broker, use_scan_universe=use_full_scan)
     if not data_map:
         print("\n✗ No data — cannot run.")
