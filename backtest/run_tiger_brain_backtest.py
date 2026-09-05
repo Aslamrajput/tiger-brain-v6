@@ -1714,7 +1714,18 @@ def run_tiger_brain_backtest(data_map, start_capital=150000.0,
                     if force_hunt:
                         adjusted_score_threshold = min(adjusted_score_threshold, fh_thresh)
 
-                # === BRAIN 6: Premium discount strike override ===
+                # === Strike selection + IV computation (must be before Brain 6) ===
+                strike_kind = setup.get("strike_kind", "ATM")
+                delta_in_reason = "delta" in setup.get("delta_reason", "")
+                if (expiry and delta_in_reason) or strike_kind == "ITM":
+                    strike = round(cur_underlying * 0.99) if is_call else round(cur_underlying * 1.01)
+                elif strike_kind == "OTM":
+                    strike = round(cur_underlying * 1.01) if is_call else round(cur_underlying * 0.99)
+                else:
+                    strike = round(cur_underlying)
+                iv = compute_iv(df_so_far, vix_val, sym, is_call, strike, cur_underlying)
+
+                # === BRAIN 6: Premium discount — uses computed IV ===
                 iv_percentile = 50.0
                 premium_bonus = 0.0
                 prem_snap = None
@@ -1729,19 +1740,12 @@ def run_tiger_brain_backtest(data_map, start_capital=150000.0,
                     # Override strike based on IV percentile
                     if prem_snap.recommended_strike == "OTM":
                         strike_kind = "OTM"
+                        strike = round(cur_underlying * 1.01) if is_call else round(cur_underlying * 0.99)
+                        iv = compute_iv(df_so_far, vix_val, sym, is_call, strike, cur_underlying)
                     elif prem_snap.recommended_strike == "ITM":
                         strike_kind = "ITM"
-
-                # Strike determined first, then IV with skew
-                strike_kind = setup.get("strike_kind", "ATM")
-                delta_in_reason = "delta" in setup.get("delta_reason", "")
-                if (expiry and delta_in_reason) or strike_kind == "ITM":
-                    strike = round(cur_underlying * 0.99) if is_call else round(cur_underlying * 1.01)
-                elif strike_kind == "OTM":
-                    strike = round(cur_underlying * 1.01) if is_call else round(cur_underlying * 0.99)
-                else:
-                    strike = round(cur_underlying)
-                iv = compute_iv(df_so_far, vix_val, sym, is_call, strike, cur_underlying)
+                        strike = round(cur_underlying * 0.99) if is_call else round(cur_underlying * 1.01)
+                        iv = compute_iv(df_so_far, vix_val, sym, is_call, strike, cur_underlying)
 
                 entry_prem = bs_premium(cur_underlying, strike, dte_default, is_call, iv)
                 entry_prem = max(entry_prem, 1.0)
