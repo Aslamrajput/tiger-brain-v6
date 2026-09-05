@@ -1,0 +1,22 @@
+# Conda environment for Tiger Brain V19
+# Mirrors requirements.txt so the CI Conda workflow can install dependencies.
+name: tiger-brain
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10
+  - pandas>=2.0.0
+  - numpy>=1.24.0
+  - requests>=2.31.0
+  - pytest
+  - flake8
+  - pip
+  - pip:
+      - yfinance>=0.2.36
+      - python-dotenv>=1.0.0
+      - smartapi-python
+      - pyotp
+      - logzero
+      - websocket-client
+      - pycryptodome
+      - apscheduler>=3.10.0
