@@ -26,6 +26,8 @@ from datetime import datetime, timedelta
 
 sys.path.insert(0, ".")
 
+import pandas as pd
+
 from broker.angel_connect import AngelBroker
 from data.loader import (
     fetch_angel_historical_candles,
