@@ -1567,7 +1567,7 @@ def run_tiger_brain_backtest(data_map, start_capital=150000.0,
                 if premium_tracker is not None:
                     prem_exit = check_premium_exit(pos, current_iv=iv, tracker=premium_tracker)
                     if prem_exit["exit"]:
-                        exit_prem = prem_exit.get("exit_premium", cur_prem)
+                        exit_prem = prem_exit.get("exit_premium") or cur_prem
                         slippage = exit_prem * 0.008 + pos["entry_premium"] * 0.008
                         brokerage = 20.0 * 2
                         pnl = (exit_prem - pos["entry_premium"]) * pos["quantity"] - slippage * 2 - brokerage
