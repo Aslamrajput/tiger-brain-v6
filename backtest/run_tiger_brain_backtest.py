@@ -72,6 +72,7 @@ from backtest.intraday_backtest import (
     _normalize_cols,
     _in_entry_window,
     _is_square_off_bar,
+    _to_ist,
     brain1_intraday_pass,
     realized_vol_simple,
     spread_ok,
@@ -93,6 +94,7 @@ from pipeline.intraday_strategies import (
 )
 from universe.fno_universe import (
     UNIVERSE, all_symbols, segment_of, lot_size, is_expiry_day,
+    square_off_for,
 )
 from backtest.tiger_premium_brain import (
     PremiumDiscountTracker, compute_premium_strike, check_premium_exit,
@@ -165,9 +167,30 @@ V19_FIXED_TARGET_PCT = 100.0    # book 50% at +100% (2x), ride rest
 V19_FIXED_TARGET_BOOK = 0.5     # book 50% of position at target
 V19_RUNAWAY_EXIT_PCT = 250.0    # absolute safety exit
 
+# SMART SQUARE-OFF (V19+) — don't blindly close profitable trades.
+# In the 15-min window before square-off, apply a tighter trail so that
+# profitable trades (trail already active) exit SMARTLY on trail instead
+# of getting blind force-closed at the square-off bar. Losses + small
+# (unprotected) profits still get force-closed at square-off.
+V19_PRE_SQOFF_TRAIL_LOCK_PCT = 80.0   # tighter lock in pre-sqoff window (was 65)
+V19_PRE_SQOFF_WINDOW_MINUTES = 15     # last 15 mins before square-off
+
+
+def _in_pre_square_off_window(ts, segment: str) -> bool:
+    """True if `ts` falls in the aggressive pre-square-off window.
+
+    NSE: 15:00-15:15 (square-off 15:15)
+    MCX: 23:00-23:15 (square-off 23:15)
+    """
+    ts = _to_ist(ts)
+    sq_str = square_off_for(segment)
+    sq = pd.Timestamp(f"2000-01-01 {sq_str}")
+    window_start = sq - pd.Timedelta(minutes=V19_PRE_SQOFF_WINDOW_MINUTES)
+    return window_start.time() <= ts.time() < sq.time()
+
 
 def check_intraday_exit_v19(pos, cur_underlying, cur_premium, is_square_off_bar,
-                            df_1m=None, i_1m=None) -> dict:
+                            df_1m=None, i_1m=None, ts=None, segment: str = "stock") -> dict:
     """V19 exit engine — tighter trailing + fixed target booking.
 
     Improvements over V6.6:
@@ -175,21 +198,46 @@ def check_intraday_exit_v19(pos, cur_underlying, cur_premium, is_square_off_bar,
       2. Trail locks 65% of peak (not 55%) — gives back 15% less
       3. Fixed target at +100%: books 50% of position, rides rest
       4. Runaway safety at +250% (unchanged)
+      5. SMART SQUARE-OFF (V19+): in the 15-min pre-sqoff window, profitable
+         trades with active trail get a TIGHTER trail (80% lock) so they
+         exit smartly before the hard square-off. At the square-off bar
+         itself, only LOSS / small-profit trades are force-closed — big
+         winners have already exited on trail.
 
     Locked V6.6 exit (check_intraday_exit) is NOT modified.
     """
-    # 1. Square-off
-    if is_square_off_bar:
-        return {"exit": True, "reason": "square_off", "exit_premium": cur_premium}
+    gain_pct = (cur_premium - pos["entry_premium"]) / pos["entry_premium"] * 100
 
-    # 2. Hard stop
+    # 1. SMART PRE-SQUARE-OFF TRAIL — exit profitable trades before blind close.
+    # Only applies inside the pre-sqoff window, only to trail-active (>=+20%)
+    # trades. Tighter 80% lock vs normal 65% → locks profit faster.
+    if ts is not None and _in_pre_square_off_window(ts, segment) \
+            and gain_pct >= V19_TRAIL_ACTIVATE_PCT:
+        peak = max(pos.get("peak_premium", cur_premium), cur_premium)
+        peak_gain = (peak - pos["entry_premium"]) / pos["entry_premium"]
+        trail_floor = pos["entry_premium"] * (1 + peak_gain * V19_PRE_SQOFF_TRAIL_LOCK_PCT / 100)
+        if cur_premium <= trail_floor:
+            return {"exit": True, "reason": "pre_sqoff_trail_lock_80pct",
+                    "exit_premium": max(cur_premium, 0.5)}
+
+    # 2. SQUARE-OFF — but NOT blind anymore.
+    #    Big winners (>=+20%) already exited above. Here we force-close
+    #    only LOSS / small-profit trades (trail not active = no protection).
+    if is_square_off_bar:
+        if gain_pct >= V19_TRAIL_ACTIVATE_PCT:
+            # Profitable trail-active trade somehow still open at sqoff:
+            # close it but as a smart close, not a blind loss cut.
+            return {"exit": True, "reason": "sqoff_smart_profit",
+                    "exit_premium": cur_premium}
+        return {"exit": True, "reason": "square_off",
+                "exit_premium": cur_premium}
+
+    # 3. Hard stop
     if cur_premium <= pos["stop_premium"]:
         return {"exit": True, "reason": "stop_loss_2000",
                 "exit_premium": max(cur_premium, 0.5)}
 
-    gain_pct = (cur_premium - pos["entry_premium"]) / pos["entry_premium"] * 100
-
-    # 3. Opposing zone
+    # 4. Opposing zone
     opp = pos.get("opposing_zone_edge")
     if opp is not None:
         if pos["direction"] == "BUY" and cur_underlying >= opp:
@@ -199,14 +247,14 @@ def check_intraday_exit_v19(pos, cur_underlying, cur_premium, is_square_off_bar,
             return {"exit": True, "reason": "opposing_zone_reached",
                     "exit_premium": max(cur_premium, 0.5)}
 
-    # 4. FIXED TARGET — book 50% at +100% (first time only)
+    # 5. FIXED TARGET — book 50% at +100% (first time only)
     if gain_pct >= V19_FIXED_TARGET_PCT and not pos.get("target_booked", False):
         pos["target_booked"] = True
         pos["quantity"] = max(1, int(pos["quantity"] * (1 - V19_FIXED_TARGET_BOOK)))
         return {"exit": True, "reason": "fixed_target_100pct_book50",
                 "exit_premium": cur_premium}
 
-    # 5. Dynamic trail — activates at +20% (tighter than V6.6's +30%)
+    # 6. Dynamic trail — activates at +20% (tighter than V6.6's +30%)
     if gain_pct >= V19_TRAIL_ACTIVATE_PCT:
         peak = max(pos.get("peak_premium", cur_premium), cur_premium)
         peak_gain = (peak - pos["entry_premium"]) / pos["entry_premium"]
@@ -215,14 +263,14 @@ def check_intraday_exit_v19(pos, cur_underlying, cur_premium, is_square_off_bar,
             return {"exit": True, "reason": "v19_trail_lock_65pct",
                     "exit_premium": max(cur_premium, 0.5)}
 
-    # 6. 1m exhaustion (only after +15% gain, same as V6.6)
+    # 7. 1m exhaustion (only after +15% gain, same as V6.6)
     if df_1m is not None and i_1m is not None and gain_pct >= 15.0:
         exhausted, why = one_min_exhaustion(df_1m, i_1m, pos["direction"])
         if exhausted:
             return {"exit": True, "reason": f"1m_exhaustion:{why}",
                     "exit_premium": max(cur_premium, 0.5)}
 
-    # 7. Runaway safety
+    # 8. Runaway safety
     if gain_pct >= V19_RUNAWAY_EXIT_PCT:
         return {"exit": True, "reason": "runaway_safety_250pct",
                 "exit_premium": cur_premium}
@@ -1607,10 +1655,12 @@ def run_tiger_brain_backtest(data_map, start_capital=150000.0,
                               "reason": f"delivery_max_hold({DELIVERY_MAX_HOLD_DAYS}d)"}
                     else:
                         ex = check_intraday_exit_v19(pos, cur_underlying, cur_prem, False,
-                                                     df_1m=df_1m_pos, i_1m=i_1m_pos)
+                                                     df_1m=df_1m_pos, i_1m=i_1m_pos,
+                                                     ts=ts, segment=seg)
                 else:
                     ex = check_intraday_exit_v19(pos, cur_underlying, cur_prem, sq_off,
-                                                 df_1m=df_1m_pos, i_1m=i_1m_pos)
+                                                 df_1m=df_1m_pos, i_1m=i_1m_pos,
+                                                 ts=ts, segment=seg)
                 if ex["exit"]:
                     exit_prem = ex["exit_premium"]
                     slippage = exit_prem * 0.008 + pos["entry_premium"] * 0.008
