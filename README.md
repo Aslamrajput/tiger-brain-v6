@@ -214,80 +214,13 @@ python3 -m pytest tests -q
 Tests poori tarah synthetic data pe chalte hain — na broker login chahiye,
 na internet.
 
-## Backtest Results — V16 vs V19
+## Tiger V19 — Production Status (LIVE on AWS)
 
-### V16 Baseline (HDFCBANK single-symbol)
+Tiger V19 full automation pe hai aur **AWS server pe live chal raha hai**
+real Angel One data ke saath. 24x7 cycle `automation/scheduler.py` chalati
+hai — pre-market wake, market open, square-off, nightly replay — sab automated.
 
-| Metric | Value |
-|--------|-------|
-| Symbol | HDFCBANK |
-| Return | +6.92% |
-| Wins | 3 |
-| Win Rate | 100% |
-| Premium captures | +73% / +62% / +58% |
-
-> Source: AGENTS.md — HDFCBANK baseline (must be preserved). V16 single-symbol
-> backtest on explosive capture trades.
-
-### V19 Backtest (7-symbol portfolio — synthetic trending data)
-
-V19 ne V16 ke saari 6 weaknesses fix ki + Brain 6 (Premium) + Brain 7 (Session)
-+ Brain 8 (Execution/Learning) add kiye. Neeche ka result 7-symbol portfolio
-> (NIFTY, BANKNIFTY, RELIANCE, SBIN, HDFCBANK, CRUDEOIL, GOLD) pe synthetic
-> trending data (20 trading days, 15m + 1m bars) par chala hai.
-
-> ⚠️ Ye synthetic data pe demo run hai — real Angel One data + live broker
-> login ke bina. Real P&L alag ho sakta hai. Ye sirf V19 exit engine + smart
-> square-off ka behavior demonstrate karta hai. `run_v19_backtest_demo.py`
-> chala ke reproduce kar sakte ho.
-
-#### Portfolio Summary
-
-| Metric | V16 (HDFCBANK) | V19 (7-symbol) |
-|--------|---------------|----------------|
-| Starting Capital | — | ₹150,000 |
-| Final Equity | — | ₹267,515 |
-| Total Return | +6.92% | **+78.34%** |
-| Net P&L | — | ₹117,515 |
-| Total Trades | 3 | 84 |
-| Win Rate | 100% | 55.95% |
-| Profit Factor | — | **2.71** |
-| Avg P&L / Trade | — | ₹1,399 |
-| Avg Winner | — | ₹3,964 |
-| Avg Loser | — | ₹1,859 |
-| Best Trade | — | ₹23,442 |
-| Worst Trade | — | ₹2,310 (capped near ₹2,000 stop) |
-| Max Drawdown | — | 5.99% |
-
-#### Segment Breakdown
-
-| Segment | Trades | Win% | Net P&L | PF |
-|---------|--------|------|---------|-----|
-| Index Options (NIFTY/BANKNIFTY) | 35 | 62.9% | ₹67,454 | 4.19 |
-| Stock Options (Top F&O) | 32 | 46.9% | ₹9,700 | 1.30 |
-| Commodity Options (CRUDE/GOLD) | 17 | 58.8% | ₹40,361 | 3.73 |
-
-#### Exit Reason Breakdown (V19 Smart Square-Off in action)
-
-| Exit Reason | Trades |
-|-------------|--------|
-| stop_loss_2000 (hard stop) | 23 |
-| fixed_target_100pct_book50 (+100% target) | 10 |
-| v19_trail_lock_65pct (dynamic trail) | 9 |
-| 1m_exhaustion (momentum reversal) | 18 |
-| iv_expansion_exit (Brain 6 premium sell) | 20 |
-| opposing_zone_reached | 2 |
-| square_off (loss/small-profit close) | 2 |
-| pre_sqoff_trail_lock_80pct (smart profit exit) | 0* |
-
-> *Pre-square-off smart trail exit (`pre_sqoff_trail_lock_80pct`) aur
-> `sqoff_smart_profit` is synthetic run mein trigger nahi hue kyunki
-> zyada-tar profitable trades pehle hi fixed-target / IV-expansion / trail
-> pe exit ho gaye. Real data pe jab trades square-off tak open rahenge,
-> tab ye smart exits active honge — loss trades blind close nahi honge,
-> profit trades trail pe smart exit milenge.
-
-### Smart Square-Off Behavior (V19+)
+### Smart Square-Off (V19+ Fix)
 
 NSE 15:15 / MCX 23:15 pe ab **blind close nahi** hota:
 
@@ -298,7 +231,7 @@ NSE 15:15 / MCX 23:15 pe ab **blind close nahi** hota:
 | Big profit (≥+20%) | exit on aggressive trail in pre-window (smart) |
 | Market close (15:30 / 23:30) | NO order execution — sab pehle hi close |
 
-Reproduce karne ke liye:
-```bash
-python3 run_v19_backtest_demo.py
-```
+### V16 Baseline (preserved)
+
+HDFCBANK: +6.92% return, 3 wins, 100% win rate,
++73%/+62%/+58% premium captures. (AGENTS.md)
