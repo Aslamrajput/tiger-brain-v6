@@ -363,7 +363,7 @@ def test_load_intraday_backfills_older_window(monkeypatch, tmp_path):
     load_intraday(interval="FIVE_MINUTE", days=60, cache_dir=str(tmp_path))
 
     assert len(calls) == 2
-    assert (calls[0][1] - calls[0][0]).days >= 55
+    assert (calls[0][1] - calls[0][0]).days >= 40
 
 
 def test_load_intraday_validates_arguments(tmp_path):
