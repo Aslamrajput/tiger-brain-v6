@@ -432,37 +432,49 @@ class TestPositionSizer:
         info = get_available_capital(None)
         assert info["available_capital"] is None
 
-    def test_sizing_within_10pct_cap(self):
-        # 100k capital, premium 200, lot 75 -> cap 10k -> 10k/(200*75)=0 lots
-        r = size_position(100000, 200, lot_size=75)
-        assert r["quantity"] == 0  # 10% cap makes expensive option unaffordable
-        # premium 40: 10000/(40*75) = 3 lots = 225 qty
-        r2 = size_position(100000, 40, lot_size=75)
-        assert r2["lots"] == 3
-        assert r2["quantity"] == 225
-        assert r2["allocated_capital"] == pytest.approx(3 * 40 * 75)
-        assert r2["allocation_pct"] <= BRAIN4["MAX_CAPITAL_PER_TRADE_PCT"] + 0.01
+    def test_sizing_within_confidence_cap(self):
+        # 100k capital, premium 200, lot 75, ROCKET score 92
+        # cap 100k * 100% = 100k -> 100k/(200*75) = 6 lots = 450 qty
+        r = size_position(100000, 200, lot_size=75, score=92)
+        assert r["quantity"] == 450
+        assert r["lots"] == 6
+        assert r["confidence_tier"] == "ROCKET"
+        # premium 40, strong score 82: 100k*80%=80k -> 80k/(40*75) = 26 lots
+        r2 = size_position(100000, 40, lot_size=75, score=82)
+        assert r2["lots"] == 26
+        assert r2["quantity"] == 1950
+        assert r2["allocated_capital"] == pytest.approx(26 * 40 * 75)
+        assert r2["confidence_tier"] == "strong"
 
-    def test_never_exceeds_10pct(self):
-        # cheap premium — allocation should still cap at 10%
-        r = size_position(100000, 1, lot_size=1)
-        assert r["allocated_capital"] <= 100000 * 0.10 + 0.01
+    def test_low_score_uses_decent_tier(self):
+        # low score still sizes (entry is brain2's job), uses decent tier
+        r = size_position(100000, 200, lot_size=75, score=60)
+        assert r["quantity"] > 0
+        assert r["confidence_tier"] == "decent"
 
     def test_exposure_cap_blocks(self):
-        r = size_position(100000, 40, lot_size=75, current_exposure=50000)
-        assert r["quantity"] == 0
-        assert any("exposure cap" in n for n in r["notes"])
+        # exposure now 100% — 50k current + 100k cap = headroom 50k
+        # score 92 (100%): allocatable 50k, premium 40 lot 75 = 3000/lot
+        # 50k/3000 = 16 lots
+        r = size_position(100000, 40, lot_size=75, current_exposure=50000, score=92)
+        assert r["quantity"] > 0
+        # full exposure used up
+        r_full = size_position(100000, 40, lot_size=75, current_exposure=100000, score=92)
+        assert r_full["quantity"] == 0
+        assert any("exposure cap" in n for n in r_full["notes"])
 
     def test_invalid_inputs(self):
-        assert size_position(None, 100)["quantity"] == 0
-        assert size_position(100000, 0)["quantity"] == 0
-        assert size_position(100000, -5)["quantity"] == 0
-        assert size_position(-100, 100)["quantity"] == 0
+        assert size_position(None, 100, score=92)["quantity"] == 0
+        assert size_position(100000, 0, score=92)["quantity"] == 0
+        assert size_position(100000, -5, score=92)["quantity"] == 0
+        assert size_position(-100, 100, score=92)["quantity"] == 0
 
     def test_no_lot_size_defaults_to_1(self):
-        r = size_position(100000, 100, lot_size=None)
-        assert r["quantity"] == 100  # 10k cap / 100 premium
-        assert r["lots"] == 100
+        # 100k, score 92 (100%), premium 100, lot None -> 1 lot = 100 per unit
+        # 100k/100 = 1000 lots
+        r = size_position(100000, 100, lot_size=None, score=92)
+        assert r["quantity"] == 1000
+        assert r["lots"] == 1000
 
 
 # ============================================================

@@ -140,10 +140,14 @@ def place_order(trade_instruction: dict, max_slippage_pct: float = 0.5,
             notes=["Direction missing hai trade_instruction mein — order nahi bhej sakte"],
         )
 
-    # Quantity calculation abhi placeholder hai — real lot-size, premium
-    # price, aur deployable_capital_used se calculate hoga jab options-chain
-    # data connect hoga
-    quantity = 1  # TODO: real lot-size calculation Phase 2/3 mein
+    # Quantity — trade_instruction se aata hai (Brain 4 confidence-based sizing).
+    # brain_flow.py ne size_position() se lots/quantity calculate kiya hoga.
+    quantity = trade_instruction.get("quantity") or 0
+    if quantity <= 0:
+        return OrderResult(
+            status="FAILED", symbol=symbol, direction=direction, quantity=0,
+            notes=["quantity 0 ya missing — Brain 4 sizing se valid lot nahi mila"],
+        )
 
     if DRY_RUN:
         logger.info(f"[DRY_RUN] Simulating order: {direction} {symbol} qty={quantity}")

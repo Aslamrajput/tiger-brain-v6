@@ -304,10 +304,17 @@ BRAIN4 = {
     "MAX_TRADES_PER_DAY_COMMODITY": 5,
     "MAX_TRADES_PER_DAY_COMMODITY_MIN": 5,
     "MAX_TRADES_PER_DAY_COMMODITY_MAX": 10,
-    # Dynamic position sizing: max % of live available capital per trade.
-    "MAX_CAPITAL_PER_TRADE_PCT": 10.0,
-    # Never allocate more than this fraction of capital across open trades.
-    "MAX_TOTAL_EXPOSURE_PCT": 50.0,
+    # Dynamic position sizing: full Angel One capital available for trading.
+    "MAX_CAPITAL_PER_TRADE_PCT": 100.0,
+    # Full capital deployable across trades (Angel One balance = 100% trading money).
+    "MAX_TOTAL_EXPOSURE_PCT": 100.0,
+    # Confidence-based sizing — high score = more capital allocated.
+    "CONFIDENCE_TIER_ROCKET_MIN": 90,   # 90+ score → 100% allocatable
+    "CONFIDENCE_TIER_STRONG_MIN": 80,   # 80-89 score → 80% allocatable
+    "CONFIDENCE_TIER_DECENT_MIN": 75,   # 75-79 score → 60% allocatable
+    "CONFIDENCE_ROCKET_PCT": 100.0,
+    "CONFIDENCE_STRONG_PCT": 80.0,
+    "CONFIDENCE_DECENT_PCT": 60.0,
     # If broker capital fetch fails, fall back to this (None = block trade).
     "FALLBACK_CAPITAL_ON_BROKER_FAIL": None,
 }

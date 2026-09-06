@@ -122,10 +122,11 @@ def test_no_lookahead_engine_uses_only_prior_bars():
 
 
 def test_position_sizing_respects_capital_cap():
-    """Allocated capital per trade must be <= 10% of capital (Brain 4 cap)."""
+    """Allocated capital per trade respects confidence-based cap (Brain 4)."""
     df = _synthetic_df(start=22000, slope=800, n=140, seed=3)
     bench = _synthetic_df(start=80000, slope=2000, n=140, seed=99)
     res = run_5brain_backtest({"NIFTY": df}, bench, start_capital=150000.0, warmup=30)
     for tr in res["trades"]:
-        # 10% cap with small tolerance for rounding
-        assert tr["allocated_capital"] <= 150000 * 0.10 + 100
+        # Full capital (100%) scaled by confidence tier (60-100%).
+        # Max possible = 100% of 150k = 150k.
+        assert tr["allocated_capital"] <= 150000 * 1.00 + 100

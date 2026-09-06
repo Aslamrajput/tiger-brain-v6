@@ -113,6 +113,7 @@ def run_brain_flow(
         premium=contract["ltp"],
         lot_size=contract.get("lot_size"),
         current_exposure=0.0,
+        score=b2["setup_score"],
     )
     if sizing["quantity"] <= 0:
         flow_notes.append("Brain 4 BLOCK: position size 0 — capital/premium issue")
