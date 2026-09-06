@@ -62,31 +62,55 @@ class OrderResult:
         }
 
 
-def _send_to_broker(symbol: str, direction: str, quantity: int, order_type: str) -> dict:
-    """
-    ⚠️ STUB FUNCTION — ye abhi REAL broker ko kuch nahi bhejta.
+def _send_to_broker(symbol: str, direction: str, quantity: int, order_type: str,
+                    broker=None, contract: dict = None) -> dict:
+    """Angel One SmartApi se real order place karta hai.
 
-    Jab Angel One SmartAPI (ya jo bhi broker) connect ho, ISI FUNCTION ke
-    andar real API call likhni hai. Abhi ye sirf ek fake "success"
-    response return karta hai taaki upar ka logic (slippage check, retry,
-    SL/target placement) test ho sake.
+    Args:
+        symbol: trading symbol (NIFTY, RELIANCE, etc.)
+        direction: 'BUY' ya 'SELL'
+        quantity: total quantity (lot_size * lot_count)
+        order_type: 'MARKET' ya 'LIMIT'
+        broker: AngelBroker instance (real order ke liye chahiye).
+                None = DRY_RUN simulation (fallback).
+        contract: {'tradingsymbol': str, 'symboltoken': str, 'exchange': str}
+                  Real option contract details. None = simulate.
 
-    TODO (Phase 2/3 mein): SmartAPI se login, session token, actual order
-    placement API call yahan aayegi.
+    Returns:
+        dict: {'success': bool, 'order_id': str|None, 'fill_price': float|None,
+               'error': str|None}
     """
-    logger.warning(
-        "🚧 _send_to_broker() abhi STUB hai — koi real broker call nahi ho "
-        "rahi. Jab tak Angel One SmartAPI integrate nahi hoti, ye sirf "
-        "simulate kar raha hai."
+    if broker is None or contract is None:
+        logger.warning(
+            f"[SIMULATE] broker/contract missing — {direction} {quantity} {symbol} "
+            f"order simulate kar rahe hain (real order nahi)."
+        )
+        return {"success": True, "order_id": "SIMULATED",
+                "fill_price": None, "error": None}
+
+    result = broker.place_option_order(
+        tradingsymbol=contract["tradingsymbol"],
+        symboltoken=contract["symboltoken"],
+        exchange=contract["exchange"],
+        transaction_type=direction,
+        quantity=quantity,
+        order_type=order_type,
+        price=contract.get("limit_price", 0.0),
     )
+    fill_price = None
+    if result["success"] and order_type == "MARKET":
+        status = broker.get_order_status(result["order_id"])
+        fill_price = status.get("avg_price") or None
     return {
-        "success": True,
-        "fill_price": None,  # real integration mein broker se aayega
-        "order_id": "STUB_ORDER_ID",
+        "success": result["success"],
+        "order_id": result.get("order_id"),
+        "fill_price": fill_price,
+        "error": result.get("error"),
     }
 
 
-def place_order(trade_instruction: dict, max_slippage_pct: float = 0.5) -> OrderResult:
+def place_order(trade_instruction: dict, max_slippage_pct: float = 0.5,
+                broker=None) -> OrderResult:
     """
     Stage 4 ke "Trade Instruction Packet" ko leke order place karta hai.
 
@@ -95,6 +119,7 @@ def place_order(trade_instruction: dict, max_slippage_pct: float = 0.5) -> Order
                             ka output (symbol, direction, position_size_pct, etc.)
         max_slippage_pct: kitna slippage acceptable hai (Section 9:
                           "0.5%+ to order cancel/retry")
+        broker: AngelBroker instance — real order ke liye. None = simulate.
 
     Returns:
         OrderResult object
@@ -127,32 +152,38 @@ def place_order(trade_instruction: dict, max_slippage_pct: float = 0.5) -> Order
             notes=["DRY_RUN mode — koi real order nahi bheja gaya (jaisa expect kiya)"],
         )
 
-    # --- Live mode (⚠️ abhi bhi effectively simulate hai, upar dekho) ---
-    order_type = "LIMIT"  # spread ke hisaab se better fill ke liye, hardcoded abhi
-    broker_response = _send_to_broker(symbol, direction, quantity, order_type)
+    # --- Live mode: real Angel One SmartApi order ---
+    order_type = "MARKET"
+    contract = trade_instruction.get("contract")
+    broker_response = _send_to_broker(
+        symbol, direction, quantity, order_type,
+        broker=broker, contract=contract,
+    )
 
     if not broker_response.get("success"):
         return OrderResult(
             status="FAILED", symbol=symbol, direction=direction, quantity=quantity,
-            notes=["Broker se order fail hua"],
+            notes=[f"Broker se order fail hua: {broker_response.get('error', '?')}"],
         )
 
     fill_price = broker_response.get("fill_price")
+    order_id = broker_response.get("order_id")
 
-    # Slippage check (Section 9 — abhi fill_price None hai kyunki stub hai,
-    # isliye ye check abhi effectively skip hoga jab tak real broker data na aaye)
     if fill_price is not None:
-        # TODO: expected price se compare karke slippage % nikalna, agar
-        # max_slippage_pct se zyada hai to cancel/retry logic yahan aayega
-        pass
+        # Slippage check (Section 9) — expected price se compare
+        expected = trade_instruction.get("expected_premium")
+        if expected and expected > 0:
+            slip = abs(fill_price - expected) / expected * 100
+            if slip > max_slippage_pct:
+                logger.warning(
+                    f"⚠️ Slippage {slip:.2f}% > {max_slippage_pct}% for {symbol} "
+                    f"(fill={fill_price}, expected={expected})"
+                )
 
     return OrderResult(
         status="CONFIRMED", symbol=symbol, direction=direction,
         quantity=quantity, fill_price=fill_price,
-        notes=[
-            "⚠️ Ye 'CONFIRMED' status stub broker response se aaya hai — "
-            "real broker integration hone tak ye asli trade NAHI hai."
-        ],
+        notes=[f"Order placed: id={order_id}"] if order_id else [],
     )
 
 

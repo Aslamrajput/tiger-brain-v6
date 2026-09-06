@@ -194,6 +194,126 @@ class AngelBroker:
                 self.session_data = None
                 self.login_time = None
 
+    # ============================================================
+    # LIVE ORDER PLACEMENT (SmartApi placeOrder)
+    # ============================================================
+    def place_option_order(
+        self,
+        tradingsymbol: str,
+        symboltoken: str,
+        exchange: str,
+        transaction_type: str,
+        quantity: int,
+        product_type: str = "INTRADAY",
+        order_type: str = "MARKET",
+        price: float = 0.0,
+    ) -> dict:
+        """Real option order Angel One SmartApi se place karta hai.
+
+        Args:
+            tradingsymbol: Angel One tradingsymbol (jaise 'NIFTY24SEP22500CE')
+            symboltoken: Angel One symbol token (numeric string)
+            exchange: 'NSE' ya 'MCX'
+            transaction_type: 'BUY' ya 'SELL'
+            quantity: lot count * lot size
+            product_type: 'INTRADAY' (default) ya 'CARRYFORWARD'
+            order_type: 'MARKET' (default) ya 'LIMIT'
+            price: LIMIT order ke liye limit price (MARKET ke liye 0)
+
+        Returns:
+            dict: {'success': bool, 'order_id': str, 'error': str|None}
+        """
+        self.ensure_logged_in()
+        if transaction_type not in ("BUY", "SELL"):
+            return {"success": False, "order_id": None,
+                    "error": f"Invalid transaction_type: {transaction_type}"}
+
+        params = {
+            "variety": "NORMAL",
+            "tradingsymbol": tradingsymbol,
+            "symboltoken": str(symboltoken),
+            "transactiontype": transaction_type,
+            "exchange": exchange,
+            "ordertype": order_type,
+            "producttype": product_type,
+            "duration": "DAY",
+            "price": str(price),
+            "quantity": str(quantity),
+            "squareoff": "0",
+            "stoploss": "0",
+        }
+        try:
+            order_id = self.smart_api.placeOrder(params)
+            logger.info(
+                f"✅ Order placed: {transaction_type} {quantity} {tradingsymbol} "
+                f"@ {order_type} → order_id={order_id}"
+            )
+            return {"success": True, "order_id": str(order_id), "error": None}
+        except Exception as exc:
+            logger.error(
+                f"❌ Order fail: {transaction_type} {quantity} {tradingsymbol} — {exc}"
+            )
+            return {"success": False, "order_id": None, "error": str(exc)}
+
+    def get_order_status(self, order_id: str) -> dict:
+        """Ek placed order ka current status laata hai."""
+        self.ensure_logged_in()
+        try:
+            book = self.smart_api.orderBook()
+            if not book or not book.get("data"):
+                return {"status": "UNKNOWN", "filled_qty": 0, "avg_price": 0.0}
+            for o in book["data"]:
+                if str(o.get("orderid")) == str(order_id):
+                    return {
+                        "status": o.get("status", "UNKNOWN"),
+                        "filled_qty": int(o.get("filledquantity", 0) or 0),
+                        "avg_price": float(o.get("averageprice", 0) or 0),
+                    }
+            return {"status": "UNKNOWN", "filled_qty": 0, "avg_price": 0.0}
+        except Exception as exc:
+            logger.warning(f"Order status fetch fail: {exc}")
+            return {"status": "UNKNOWN", "filled_qty": 0, "avg_price": 0.0}
+
+    def get_positions(self) -> list:
+        """Current open positions laata hai (square-off ke liye)."""
+        self.ensure_logged_in()
+        try:
+            pos = self.smart_api.position()
+            return pos.get("data", []) if pos else []
+        except Exception as exc:
+            logger.warning(f"Position fetch fail: {exc}")
+            return []
+
+    def square_off_all(self) -> int:
+        """Sab open INTRADAY positions close karta hai.
+
+        Returns: kitne positions close karne ki koshish ki.
+        """
+        positions = self.get_positions()
+        closed = 0
+        for p in positions:
+            sym = p.get("tradingsymbol", "")
+            token = p.get("symboltoken", "")
+            exch = p.get("exchange", "")
+            qty = int(p.get("netqty", 0) or 0)
+            if qty == 0 or not sym:
+                continue
+            # Net long → SELL to close, net short → BUY to close
+            close_side = "SELL" if qty > 0 else "BUY"
+            close_qty = abs(qty)
+            res = self.place_option_order(
+                tradingsymbol=sym, symboltoken=token, exchange=exch,
+                transaction_type=close_side, quantity=close_qty,
+                product_type="INTRADAY", order_type="MARKET",
+            )
+            if res["success"]:
+                closed += 1
+                logger.info(f"Square-off: {close_side} {close_qty} {sym}")
+            else:
+                logger.error(f"Square-off FAIL {sym}: {res['error']}")
+        logger.info(f"Square-off complete: {closed}/{len(positions)} positions closed")
+        return closed
+
 
 # ============================================================
 # QUICK MANUAL TEST — ⚠️ Ye REAL Angel One account se connect

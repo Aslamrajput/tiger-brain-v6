@@ -15,6 +15,7 @@ logic (is_trading_day, get_day_mode, etc.) — ye pure Python hai, koi
 extra dependency nahi chahiye, aur neeche test bhi hua hai.
 """
 
+import sys
 from datetime import datetime, time
 
 try:
@@ -203,40 +204,41 @@ class TigerBrainScheduler:
 
 
 # ============================================================
-# QUICK MANUAL TEST — sirf day-logic (apscheduler ki zarurat nahi)
-# Chalane ka tarika: repo ROOT se → python3 -m automation.scheduler
+# ENTRY POINT — python3 -m automation.scheduler
+# Tiger V19 ko LIVE mode mein start karta hai (24x7 automation).
+# Day-logic test ke liye: python3 -m automation.scheduler --test
 # ============================================================
 if __name__ == "__main__":
-    from datetime import timedelta
+    if "--test" in sys.argv:
+        from datetime import timedelta
 
-    print("=== Day-Mode Logic Test (pure Python, apscheduler nahi chahiye) ===\n")
+        print("=== Day-Mode Logic Test (pure Python, apscheduler nahi chahiye) ===\n")
 
-    monday = datetime(2025, 1, 6)  # ye ek Monday hai
-    for i in range(7):
-        test_date = monday + timedelta(days=i)
-        day_name = WEEKDAY_MAP[test_date.weekday()]
-        mode = get_day_mode(test_date)
-        print(f"{day_name} ({test_date.date()}): {mode}")
+        monday = datetime(2025, 1, 6)  # ye ek Monday hai
+        for i in range(7):
+            test_date = monday + timedelta(days=i)
+            day_name = WEEKDAY_MAP[test_date.weekday()]
+            mode = get_day_mode(test_date)
+            print(f"{day_name} ({test_date.date()}): {mode}")
 
-    print("\n=== Market Hours Test ===")
-    trading_day = datetime(2025, 1, 6, 10, 30)
-    print(f"Monday 10:30 AM — is_market_hours: {is_market_hours(trading_day)}")
+        print("\n=== Market Hours Test ===")
+        trading_day = datetime(2025, 1, 6, 10, 30)
+        print(f"Monday 10:30 AM — is_market_hours: {is_market_hours(trading_day)}")
 
-    before_open = datetime(2025, 1, 6, 8, 45)
-    print(f"Monday 8:45 AM — is_market_hours: {is_market_hours(before_open)}")
+        before_open = datetime(2025, 1, 6, 8, 45)
+        print(f"Monday 8:45 AM — is_market_hours: {is_market_hours(before_open)}")
 
-    print("\n=== Opening Range Period Test ===")
-    just_after_open = datetime(2025, 1, 6, 9, 20)
-    print(f"9:20 AM (5 min after open) — is_opening_range: {is_opening_range_period(just_after_open)}")
+        print("\n=== Opening Range Period Test ===")
+        just_after_open = datetime(2025, 1, 6, 9, 20)
+        print(f"9:20 AM (5 min after open) — is_opening_range: {is_opening_range_period(just_after_open)}")
 
-    well_into_day = datetime(2025, 1, 6, 11, 0)
-    print(f"11:00 AM — is_opening_range: {is_opening_range_period(well_into_day)}")
+        well_into_day = datetime(2025, 1, 6, 11, 0)
+        print(f"11:00 AM — is_opening_range: {is_opening_range_period(well_into_day)}")
 
-    print("\n✅ Day-logic test complete — koi crash nahi hua.")
-    print(
-        "⚠️ REMINDER: TigerBrainScheduler class (apscheduler-based) is "
-        "sandbox mein untested hai kyunki apscheduler install nahi ho paya "
-        "(internet disabled). Apne server pe requirements.txt install "
-        "karne ke baad khud verify karna."
-      )
+        print("\n✅ Day-logic test complete — koi crash nahi hua.")
+    else:
+        # LIVE MODE — Tiger 24x7 automation start karo
+        from automation.tiger_live import TigerLiveRunner
+        runner = TigerLiveRunner()
+        runner.start()
   
