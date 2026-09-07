@@ -1425,29 +1425,45 @@ def fetch_yfinance_fallback(symbol, ticker, days_15m=365, days_1m=90):
     data_15m, data_1m = None, None
     try:
         raw15 = yf.download(ticker, start=from_15m, end=to_date,
-                            interval="15m", progress=False, auto_adjust=False)
+                            interval="15m", progress=False, auto_adjust=True)
         if raw15 is not None and not raw15.empty:
-            raw15 = raw15.dropna(subset=["Close"])
+            # Flatten MultiIndex or tuple-valued columns to simple strings
+            flat_cols = []
+            for c in raw15.columns:
+                if isinstance(c, tuple):
+                    flat_cols.append(c[0])
+                elif isinstance(c, str):
+                    flat_cols.append(c)
+                else:
+                    flat_cols.append(str(c))
+            raw15.columns = flat_cols
             if raw15.index.tz is None:
                 raw15.index = raw15.index.tz_localize("UTC")
             raw15.index = raw15.index.tz_convert("Asia/Kolkata")
-            # Flatten MultiIndex columns if present
-            if isinstance(raw15.columns, pd.MultiIndex):
-                raw15.columns = raw15.columns.get_level_values(0)
+            if "Close" in raw15.columns:
+                raw15 = raw15.dropna(subset=["Close"])
             data_15m = _normalize_cols(raw15)
     except Exception as exc:
         logger.warning(f"{symbol} (yfinance 15m): {exc}")
 
     try:
         raw1 = yf.download(ticker, start=from_1m, end=to_date,
-                           interval="1m", progress=False, auto_adjust=False)
+                           interval="1m", progress=False, auto_adjust=True)
         if raw1 is not None and not raw1.empty:
-            raw1 = raw1.dropna(subset=["Close"])
+            flat_cols = []
+            for c in raw1.columns:
+                if isinstance(c, tuple):
+                    flat_cols.append(c[0])
+                elif isinstance(c, str):
+                    flat_cols.append(c)
+                else:
+                    flat_cols.append(str(c))
+            raw1.columns = flat_cols
             if raw1.index.tz is None:
                 raw1.index = raw1.index.tz_localize("UTC")
             raw1.index = raw1.index.tz_convert("Asia/Kolkata")
-            if isinstance(raw1.columns, pd.MultiIndex):
-                raw1.columns = raw1.columns.get_level_values(0)
+            if "Close" in raw1.columns:
+                raw1 = raw1.dropna(subset=["Close"])
             data_1m = _normalize_cols(raw1)
     except Exception as exc:
         logger.warning(f"{symbol} (yfinance 1m): {exc}")
