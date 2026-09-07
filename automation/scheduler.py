@@ -151,6 +151,8 @@ class TigerBrainScheduler:
         intraday_fn=None,
         market_close_fn=None,
         nightly_replay_fn=None,
+        nse_square_off_fn=None,
+        mcx_square_off_fn=None,
     ):
         pre_h, pre_m = map(int, AUTOMATION["PRE_MARKET_WAKE_TIME"].split(":"))
         open_h, open_m = map(int, AUTOMATION["MARKET_OPEN_TIME"].split(":"))
@@ -178,6 +180,20 @@ class TigerBrainScheduler:
                 intraday_guarded, "interval",
                 minutes=AUTOMATION.get("RESCAN_INTERVAL_MINUTES", 20),
                 id="intraday_scan",
+            )
+
+        # NSE square-off at 15:15 (15 min before NSE close 15:30)
+        if nse_square_off_fn:
+            self.scheduler.add_job(
+                self._guarded(nse_square_off_fn), "cron",
+                hour=15, minute=15, id="nse_square_off",
+            )
+
+        # MCX square-off at 23:15 (15 min before MCX close 23:30)
+        if mcx_square_off_fn:
+            self.scheduler.add_job(
+                self._guarded(mcx_square_off_fn), "cron",
+                hour=23, minute=15, id="mcx_square_off",
             )
 
         if market_close_fn:

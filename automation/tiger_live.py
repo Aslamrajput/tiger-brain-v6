@@ -41,6 +41,9 @@ from data.loader import resolve_option_contract
 class TigerLiveRunner:
     """Poora live trading cycle manage karta hai — broker + scheduler + data."""
 
+    # Persist placed order keys to disk — restart pe duplicates nahi honge
+    _ORDER_KEYS_FILE = "/tmp/tiger_placed_orders.json"
+
     def __init__(self):
         self.broker: AngelBroker | None = None
         self.scheduler: TigerBrainScheduler | None = None
@@ -48,11 +51,33 @@ class TigerLiveRunner:
         self.data_map_1m: dict = {}
         self.instrument_master = None
         self._running = False
-        # Track placed order keys to avoid duplicate orders across scans
-        self._placed_order_keys: set[str] = set()
+        # Track placed order keys — disk se load, restart pe safe
+        self._placed_order_keys: set[str] = self._load_order_keys()
         self._order_log: list[dict] = []
         # Real account capital — Angel One se fetch hota hai pre-market
         self.account_capital: float = 0.0
+        # Capital lifecycle: start → after_entry → after_exit
+        self.capital_start: float = 0.0
+        self.capital_after_entry: float = 0.0
+        self.capital_after_exit: float = 0.0
+
+    def _load_order_keys(self) -> set[str]:
+        """Disk se placed order keys load karo (restart-safe)."""
+        import json
+        try:
+            with open(self._ORDER_KEYS_FILE) as f:
+                return set(json.load(f))
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            return set()
+
+    def _save_order_keys(self):
+        """Placed order keys disk pe save karo."""
+        import json
+        try:
+            with open(self._ORDER_KEYS_FILE, "w") as f:
+                json.dump(sorted(self._placed_order_keys), f)
+        except OSError as exc:
+            logger.warning(f"Order keys save fail: {exc}")
 
     # ============================================================
     # PRE-MARKET (09:00) — login + data load
@@ -90,11 +115,15 @@ class TigerLiveRunner:
         try:
             self.account_capital = self.broker.get_balance()
             if self.account_capital <= 0:
-                logger.warning("⚠️ Balance ₹0 — Angel One getRMS() fail. "
+                logger.warning("⚠️ Balance ₹0 — rmsLimit() fail. "
                                "Fallback ₹10,000.")
                 self.account_capital = 10000.0
+            self.capital_start = self.account_capital
+            self.capital_after_entry = self.account_capital
+            self.capital_after_exit = self.account_capital
             logger.info("💰 Trading capital: ₹%.0f (100%% of Angel One balance)",
                         self.account_capital)
+            logger.info("💰 Capital lifecycle START: ₹%.0f", self.capital_start)
         except Exception as exc:
             logger.error("❌ Balance fetch fail: %s — fallback ₹10,000", exc)
             self.account_capital = 10000.0
@@ -171,14 +200,16 @@ class TigerLiveRunner:
         Har trade se pehle Tiger khud ye check karta hai:
           1. Real Angel One balance fetch (₹)
           2. Option contract ka real lot_size (instrument master se)
-          3. Trade cost = quantity × entry_premium
-          4. Affordable? cost ≤ available balance
+          3. REAL market LTP fetch (ltpData API se — NOT simulated premium)
+          4. Real trade cost = quantity × real_ltp
+          5. Affordable? real_cost ≤ available balance
              → YES: order place karo
-             → NO:  quantity adjust ya skip karo
-          5. Full breakdown log karo
+             → NO:  skip (1 lot bhi fit nahi hua to)
+          6. Order place karne ke baad STATUS check (rejected to nahi?)
+          7. Full capital lifecycle log: start → after_entry → remaining
 
         Returns:
-            int: kitne real orders successfully place hue
+            int: kitne real orders successfully placed + accepted
         """
         if not trades or self.broker is None:
             return 0
@@ -195,8 +226,14 @@ class TigerLiveRunner:
             logger.warning("⚠️ Balance ₹0 — koi order nahi place hoga.")
             return 0
 
+        # Capital lifecycle
+        if self.capital_after_exit > 0:
+            available_balance = max(available_balance, self.capital_after_exit)
+
         logger.info("=" * 60)
         logger.info("💰 CAPITAL CHECK — Available balance: ₹%.0f", available_balance)
+        logger.info("💰 Capital lifecycle: START ₹%.0f → now ₹%.0f",
+                    self.capital_start, available_balance)
         logger.info("=" * 60)
 
         for t in trades:
@@ -216,7 +253,6 @@ class TigerLiveRunner:
             option_type = t.get("option_type", "")
             direction = t.get("direction", "")
             quantity = t.get("quantity", 0)
-            entry_premium = t.get("entry_premium", 0.0)
 
             # Duplicate check
             order_key = f"{symbol}_{strike}_{option_type}_{trade_date}"
@@ -234,57 +270,63 @@ class TigerLiveRunner:
             if real_lot_size <= 0:
                 real_lot_size = 1
 
-            # Step 3: Calculate trade cost
-            # quantity backtest se aaya — fund brain ne size kiya
-            # cost = quantity × premium (option buying — full premium upfront)
-            trade_cost = quantity * entry_premium
+            # Step 3: REAL LTP fetch (NOT simulated premium!)
+            sim_premium = t.get("entry_premium", 0.0)
+            real_ltp = self.broker.get_ltp(
+                contract["tradingsymbol"],
+                contract["symboltoken"],
+                contract["exchange"],
+            )
+            # Agar LTP fetch fail, simulated se fallback (with warning)
+            if real_ltp <= 0:
+                logger.warning(
+                    f"   ⚠️ LTP fetch fail — simulated premium ₹{sim_premium:.2f} use")
+                real_ltp = sim_premium if sim_premium > 0 else 0.5
 
-            # Step 4: Affordability check against REAL balance
-            affordable = trade_cost <= available_balance
+            # Step 4: Real trade cost with REAL market price
+            trade_cost = quantity * real_ltp
+            one_lot_cost = real_lot_size * real_ltp
 
             logger.info("-" * 60)
-            logger.info(
-                f"📊 {symbol} {strike}{option_type} ({direction})")
-            logger.info(
-                f"   Lot Size:     {real_lot_size}")
-            logger.info(
-                f"   Premium:      ₹{entry_premium:.2f}")
-            logger.info(
-                f"   Quantity:     {quantity} ({quantity // real_lot_size} lots)")
-            logger.info(
-                f"   Trade Cost:   ₹{trade_cost:,.0f}")
-            logger.info(
-                f"   Balance:      ₹{available_balance:,.0f}")
+            logger.info(f"📊 {symbol} {strike}{option_type} ({direction})")
+            logger.info(f"   Lot Size:      {real_lot_size}")
+            logger.info(f"   Sim Premium:   ₹{sim_premium:.2f} (backtest)")
+            logger.info(f"   REAL LTP:      ₹{real_ltp:.2f} (market)")
+            logger.info(f"   Quantity:      {quantity} ({quantity // real_lot_size} lots)")
+            logger.info(f"   Real Cost:     ₹{trade_cost:,.0f} ({quantity} × ₹{real_ltp:.2f})")
+            logger.info(f"   1 Lot Cost:    ₹{one_lot_cost:,.0f}")
+            logger.info(f"   Balance:       ₹{available_balance:,.0f}")
 
-            if not affordable:
-                # Try to reduce quantity to fit balance
-                affordable_lots = int(available_balance // (entry_premium * real_lot_size))
+            # Step 5: Affordability check against REAL cost + REAL balance
+            if one_lot_cost > available_balance:
+                logger.info(
+                    f"   ❌ SKIP — 1 lot (₹{one_lot_cost:,.0f}) > balance "
+                    f"(₹{available_balance:,.0f}) — afford nahi hota")
+                self._order_log.append({
+                    "time": datetime.now().isoformat(),
+                    "symbol": symbol, "strike": strike,
+                    "option_type": option_type,
+                    "tradingsymbol": contract["tradingsymbol"],
+                    "real_ltp": real_ltp, "one_lot_cost": one_lot_cost,
+                    "balance": available_balance,
+                    "success": False, "error": "not affordable — 1 lot > balance",
+                })
+                continue
+
+            if trade_cost > available_balance:
+                # Reduce lots to fit
+                affordable_lots = int(available_balance // one_lot_cost)
                 if affordable_lots >= 1:
                     quantity = affordable_lots * real_lot_size
-                    trade_cost = quantity * entry_premium
+                    trade_cost = quantity * real_ltp
                     logger.info(
-                        f"   ⚠️ Original cost exceeded balance → reduced to "
-                        f"{affordable_lots} lots = {quantity} qty = ₹{trade_cost:,.0f}")
-                    logger.info(
-                        f"   ✅ Affordable now: ₹{trade_cost:,.0f} ≤ ₹{available_balance:,.0f}")
+                        f"   ⚠️ Reduced to {affordable_lots} lots = {quantity} qty "
+                        f"= ₹{trade_cost:,.0f} (fit balance)")
                 else:
-                    logger.info(
-                        f"   ❌ NOT AFFORDABLE — ₹{trade_cost:,.0f} > ₹{available_balance:,.0f}")
-                    logger.info(
-                        f"   ❌ Even 1 lot (₹{real_lot_size * entry_premium:,.0f}) "
-                        f"exceeds balance — SKIP")
-                    self._order_log.append({
-                        "time": datetime.now().isoformat(),
-                        "symbol": symbol, "strike": strike,
-                        "option_type": option_type,
-                        "tradingsymbol": contract["tradingsymbol"],
-                        "quantity": quantity, "trade_cost": trade_cost,
-                        "balance": available_balance,
-                        "success": False, "error": "not affordable",
-                    })
+                    logger.info(f"   ❌ SKIP — can't fit any lot in balance")
                     continue
 
-            # Step 5: Place REAL BUY order (Tiger always buys options)
+            # Step 6: Place REAL BUY order (Tiger always buys options)
             transaction_type = "BUY"
             result = self.broker.place_option_order(
                 tradingsymbol=contract["tradingsymbol"],
@@ -297,10 +339,40 @@ class TigerLiveRunner:
             )
 
             if result.get("success"):
+                # Step 7: Check order STATUS — rejected to nahi?
+                import time as _time
+                _time.sleep(2)  # RMS ko process karne do
+                status = self.broker.get_order_status(result["order_id"])
+                order_status = status.get("status", "").lower()
+                reject_reason = status.get("reject_reason")
+
+                if "reject" in order_status or reject_reason:
+                    logger.error(
+                        f"   ❌ ORDER REJECTED by RMS: {reject_reason}")
+                    logger.error(
+                        f"   ❌ {transaction_type} {quantity} "
+                        f"{contract['tradingsymbol']} REJECTED")
+                    self._order_log.append({
+                        "time": datetime.now().isoformat(),
+                        "symbol": symbol, "strike": strike,
+                        "option_type": option_type,
+                        "tradingsymbol": contract["tradingsymbol"],
+                        "quantity": quantity, "real_ltp": real_ltp,
+                        "trade_cost": trade_cost,
+                        "order_id": result["order_id"],
+                        "success": False, "error": f"REJECTED: {reject_reason}",
+                        "reject_reason": reject_reason,
+                    })
+                    continue
+
+                # Order accepted!
                 placed_count += 1
                 self._placed_order_keys.add(order_key)
-                # Deduct cost from running balance (margin used)
+                self._save_order_keys()  # disk pe save — restart-safe
                 available_balance -= trade_cost
+                self.capital_after_entry = available_balance
+                logger.info(
+                    f"   ✅ Order accepted: {order_status}")
                 logger.info(
                     f"   🔥 REAL ORDER: BUY {quantity} "
                     f"{contract['tradingsymbol']} ({option_type}) "
@@ -319,7 +391,8 @@ class TigerLiveRunner:
                 "transaction_type": transaction_type,
                 "quantity": quantity,
                 "lot_size": real_lot_size,
-                "premium": entry_premium,
+                "sim_premium": sim_premium,
+                "real_ltp": real_ltp,
                 "trade_cost": trade_cost,
                 "balance": available_balance,
                 "tradingsymbol": contract["tradingsymbol"],
@@ -328,19 +401,93 @@ class TigerLiveRunner:
                 "error": result.get("error"),
             })
 
+        # Update capital lifecycle
+        self.capital_after_entry = available_balance
         logger.info("=" * 60)
-        logger.info("Scan orders: %d placed | Final balance: ₹%.0f",
-                    placed_count, available_balance)
+        logger.info("💰 Capital: START ₹%.0f → AFTER ENTRY ₹%.0f → "
+                    "orders placed: %d",
+                    self.capital_start, available_balance, placed_count)
         logger.info("=" * 60)
         return placed_count
 
     # ============================================================
-    # MARKET CLOSE (15:30) — square-off + logout
+    # MARKET CLOSE — NSE 15:15 square-off + MCX 23:15 square-off
     # ============================================================
-    def market_close(self):
-        """Market close — sab positions square-off + broker logout."""
+    def nse_square_off(self):
+        """NSE/NFO positions close karo (15:15 IST).
+
+        Sirf NFO positions close karta hai — MCX positions open rehte
+        hain kyunki MCX 23:30 tak khulta hai.
+        """
         logger.info("=" * 60)
-        logger.info("🐅 MARKET CLOSE — Square-off + cleanup")
+        logger.info("🐅 NSE SQUARE-OFF (15:15) — NFO positions close")
+        logger.info("=" * 60)
+        if self.broker is None:
+            logger.info("Broker nahi hai — kuch close nahi karna.")
+            return
+        try:
+            closed = self.broker.square_off_all(exchange="NFO")
+            logger.info("✅ NSE square-off: %d positions closed.", closed)
+        except Exception as exc:
+            logger.error("❌ NSE square-off error: %s", exc)
+        # Exit ke baad capital update
+        self._log_capital_after_exit("NSE square-off")
+
+    def mcx_square_off(self):
+        """MCX positions close karo (23:15 IST).
+
+        Commodity positions 23:15 pe close — MCX 23:30 tak khulta
+        hai isliye alag time pe close hota hai.
+        """
+        logger.info("=" * 60)
+        logger.info("🐅 MCX SQUARE-OFF (23:15) — MCX positions close")
+        logger.info("=" * 60)
+        if self.broker is None:
+            logger.info("Broker nahi hai — kuch close nahi karna.")
+            return
+        try:
+            closed = self.broker.square_off_all(exchange="MCX")
+            logger.info("✅ MCX square-off: %d positions closed.", closed)
+        except Exception as exc:
+            logger.error("❌ MCX square-off error: %s", exc)
+        # Exit ke baad capital update + logout
+        self._log_capital_after_exit("MCX square-off")
+        try:
+            self.broker.logout()
+            logger.info("✅ Broker logged out (end of trading day).")
+        except Exception as exc:
+            logger.warning("Logout warning: %s", exc)
+
+    def _log_capital_after_exit(self, label: str):
+        """Exit ke baad real balance fetch + P&L calculate karo.
+
+        Capital lifecycle complete:
+          START (pre-market) → AFTER ENTRY (orders placed) → AFTER EXIT
+        """
+        if self.broker is None:
+            return
+        try:
+            self.capital_after_exit = self.broker.get_balance()
+        except Exception:
+            pass
+        pnl = self.capital_after_exit - self.capital_start
+        pnl_pct = (pnl / self.capital_start * 100) if self.capital_start > 0 else 0
+        logger.info("=" * 60)
+        logger.info("💰 CAPITAL LIFECYCLE — %s", label)
+        logger.info("   START:        ₹%.0f", self.capital_start)
+        logger.info("   AFTER ENTRY:  ₹%.0f", self.capital_after_entry)
+        logger.info("   AFTER EXIT:   ₹%.0f", self.capital_after_exit)
+        logger.info("   P&L:          ₹%+.0f (%+.2f%%)", pnl, pnl_pct)
+        logger.info("=" * 60)
+
+    def market_close(self):
+        """Legacy market close — NSE + MCX sab close + logout.
+
+        15:30 pe NSE positions close + MCX bhi close (fallback).
+        23:15 pe alag se MCX-only close bhi scheduled hai.
+        """
+        logger.info("=" * 60)
+        logger.info("🐅 MARKET CLOSE (15:30) — Square-off + cleanup")
         logger.info("=" * 60)
         if self.broker is None:
             logger.info("Broker nahi hai — kuch close nahi karna.")
@@ -350,6 +497,7 @@ class TigerLiveRunner:
             logger.info("✅ Square-off done: %d positions closed.", closed)
         except Exception as exc:
             logger.error("❌ Square-off error: %s", exc)
+        self._log_capital_after_exit("Market close 15:30")
         try:
             self.broker.logout()
             logger.info("✅ Broker logged out.")
@@ -395,6 +543,8 @@ class TigerLiveRunner:
             intraday_fn=self.intraday_scan,
             market_close_fn=self.market_close,
             nightly_replay_fn=self.nightly_replay,
+            nse_square_off_fn=self.nse_square_off,
+            mcx_square_off_fn=self.mcx_square_off,
         )
         self.scheduler.start()
         self._running = True
@@ -402,7 +552,9 @@ class TigerLiveRunner:
         logger.info("   Pre-market:  09:00")
         logger.info("   Market open: 09:15")
         logger.info("   Intraday:    every 20 min")
-        logger.info("   Market close:15:30 (square-off 15:15 NSE / 23:15 MCX)")
+        logger.info("   NSE close:   15:15 (NFO square-off)")
+        logger.info("   Market close:15:30 (fallback square-off)")
+        logger.info("   MCX close:   23:15 (MCX square-off + logout)")
         logger.info("   Nightly:     00:00")
         logger.info("")
         logger.info("🐅 Tiger live hai. Ctrl+C pe shutdown hoga.")
