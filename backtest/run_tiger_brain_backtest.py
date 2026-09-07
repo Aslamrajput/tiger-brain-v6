@@ -1472,52 +1472,24 @@ def fetch_angel_data(broker, days_15m=365, days_1m=90, use_scan_universe=False):
     total = len(syms)
     for idx, (sym, ticker) in enumerate(syms.items(), 1):
         tag = f"[{idx}/{total}] {sym}"
-        mapping = _resolve_symbol_token(sym)
-        if mapping is None:
-            # Try yfinance fallback for commodities
-            if sym in COMMODITY_SYMBOLS:
-                d15, d1 = fetch_yfinance_fallback(sym, ticker, days_15m, days_1m)
-                if d15 is not None and not d15.empty:
-                    data_map[sym] = d15
-                    if d1 is not None and not d1.empty:
-                        data_map_1m[sym] = d1
-                    yf_used.append(sym)
-                    print(f"  {tag:30s}: 15m={len(d15):5d}  1m={len(data_map_1m.get(sym, [])):5d}  [yfinance]")
-                    continue
-            failed.append(sym)
-            continue
-        exchange, token = mapping
+        # Rate-limit-safe: yfinance se historical data lo (free, fast, no limit)
+        # Angel One sirf login + live order placement ke liye
         try:
-            d15 = fetch_angel_historical_candles(
-                broker, exchange, token, "FIFTEEN_MINUTE", from_15m, to_date)
+            d15, d1 = fetch_yfinance_fallback(sym, ticker, days_15m, days_1m)
             if d15 is not None and not d15.empty:
-                data_map[sym] = _normalize_cols(d15)
+                data_map[sym] = d15
+                if d1 is not None and not d1.empty:
+                    data_map_1m[sym] = d1
+                yf_used.append(sym)
+                print(f"  {tag:30s}: 15m={len(d15):5d}  1m={len(data_map_1m.get(sym, [])):5d}  [yfinance]")
+                continue
             else:
-                # Empty Angel data — try yfinance for commodities
-                if sym in COMMODITY_SYMBOLS:
-                    d15_yf, d1_yf = fetch_yfinance_fallback(sym, ticker, days_15m, days_1m)
-                    if d15_yf is not None and not d15_yf.empty:
-                        data_map[sym] = d15_yf
-                        if d1_yf is not None and not d1_yf.empty:
-                            data_map_1m[sym] = d1_yf
-                        yf_used.append(sym)
-                        print(f"  {tag:30s}: 15m={len(d15_yf):5d}  1m={len(data_map_1m.get(sym, [])):5d}  [yfinance]")
-                        continue
                 failed.append(sym)
                 continue
         except Exception as exc:
-            logger.error(f"{tag}: 15m error: {exc}")
+            logger.error(f"{tag}: yfinance error: {exc}")
             failed.append(sym)
             continue
-        try:
-            d1 = fetch_angel_historical_candles(
-                broker, exchange, token, "ONE_MINUTE", from_1m, to_date)
-            if d1 is not None and not d1.empty:
-                data_map_1m[sym] = _normalize_cols(d1)
-        except Exception as exc:
-            logger.warning(f"{tag}: 1m error: {exc}")
-        print(f"  {tag:30s}: 15m={len(data_map[sym]):5d}  1m={len(data_map_1m.get(sym, [])):5d}")
-        time.sleep(0.4)
     if yf_used:
         print(f"\n  yfinance fallback used for: {yf_used}")
     print(f"\nFailed: {failed}")
