@@ -168,11 +168,14 @@ class TigerLiveRunner:
     def _place_live_orders(self, trades: list[dict]) -> int:
         """Backtest signals → REAL Angel One orders.
 
-        Sirf aaj ke trades lete hai, aur jo abhi tak place na hue ho.
-        Har trade ke liye:
-          1. Symbol + strike + CE/PE → Angel One tradingsymbol + token
-          2. broker.place_option_order() se REAL order
-          3. Result log karo (success/fail + order_id)
+        Har trade se pehle Tiger khud ye check karta hai:
+          1. Real Angel One balance fetch (₹)
+          2. Option contract ka real lot_size (instrument master se)
+          3. Trade cost = quantity × entry_premium
+          4. Affordable? cost ≤ available balance
+             → YES: order place karo
+             → NO:  quantity adjust ya skip karo
+          5. Full breakdown log karo
 
         Returns:
             int: kitne real orders successfully place hue
@@ -183,11 +186,23 @@ class TigerLiveRunner:
         today = datetime.now().date()
         placed_count = 0
 
+        # Step 1: Real balance fetch (har scan pe fresh)
+        try:
+            available_balance = self.broker.get_balance()
+        except Exception:
+            available_balance = self.account_capital
+        if available_balance <= 0:
+            logger.warning("⚠️ Balance ₹0 — koi order nahi place hoga.")
+            return 0
+
+        logger.info("=" * 60)
+        logger.info("💰 CAPITAL CHECK — Available balance: ₹%.0f", available_balance)
+        logger.info("=" * 60)
+
         for t in trades:
             entry_ts = t.get("entry_ts")
             if entry_ts is None:
                 continue
-            # Sirf aaj ke trades (timezone-aware ho sakta hai)
             try:
                 trade_date = entry_ts.date() if hasattr(entry_ts, 'date') else \
                     pd.Timestamp(entry_ts).date()
@@ -201,25 +216,76 @@ class TigerLiveRunner:
             option_type = t.get("option_type", "")
             direction = t.get("direction", "")
             quantity = t.get("quantity", 0)
+            entry_premium = t.get("entry_premium", 0.0)
 
-            # Duplicate check — same symbol+strike+option_type sirf ek baar
+            # Duplicate check
             order_key = f"{symbol}_{strike}_{option_type}_{trade_date}"
             if order_key in self._placed_order_keys:
                 continue
 
-            # Token resolution
+            # Step 2: Resolve contract with real lot_size
             contract = resolve_option_contract(symbol, strike, option_type)
             if contract is None:
                 logger.warning(
                     f"⚠️ Order skip: {symbol} {strike}{option_type} token nahi mila")
                 continue
 
-            # Tiger ALWAYS BUYS options (options buying bot).
-            # direction="BUY" → BUY CE, direction="SELL" → BUY PE
-            # transaction_type is always BUY — never SELL.
-            transaction_type = "BUY"
+            real_lot_size = contract.get("lotsize", 1)
+            if real_lot_size <= 0:
+                real_lot_size = 1
 
-            # REAL ORDER PLACE
+            # Step 3: Calculate trade cost
+            # quantity backtest se aaya — fund brain ne size kiya
+            # cost = quantity × premium (option buying — full premium upfront)
+            trade_cost = quantity * entry_premium
+
+            # Step 4: Affordability check against REAL balance
+            affordable = trade_cost <= available_balance
+
+            logger.info("-" * 60)
+            logger.info(
+                f"📊 {symbol} {strike}{option_type} ({direction})")
+            logger.info(
+                f"   Lot Size:     {real_lot_size}")
+            logger.info(
+                f"   Premium:      ₹{entry_premium:.2f}")
+            logger.info(
+                f"   Quantity:     {quantity} ({quantity // real_lot_size} lots)")
+            logger.info(
+                f"   Trade Cost:   ₹{trade_cost:,.0f}")
+            logger.info(
+                f"   Balance:      ₹{available_balance:,.0f}")
+
+            if not affordable:
+                # Try to reduce quantity to fit balance
+                affordable_lots = int(available_balance // (entry_premium * real_lot_size))
+                if affordable_lots >= 1:
+                    quantity = affordable_lots * real_lot_size
+                    trade_cost = quantity * entry_premium
+                    logger.info(
+                        f"   ⚠️ Original cost exceeded balance → reduced to "
+                        f"{affordable_lots} lots = {quantity} qty = ₹{trade_cost:,.0f}")
+                    logger.info(
+                        f"   ✅ Affordable now: ₹{trade_cost:,.0f} ≤ ₹{available_balance:,.0f}")
+                else:
+                    logger.info(
+                        f"   ❌ NOT AFFORDABLE — ₹{trade_cost:,.0f} > ₹{available_balance:,.0f}")
+                    logger.info(
+                        f"   ❌ Even 1 lot (₹{real_lot_size * entry_premium:,.0f}) "
+                        f"exceeds balance — SKIP")
+                    self._order_log.append({
+                        "time": datetime.now().isoformat(),
+                        "symbol": symbol, "strike": strike,
+                        "option_type": option_type,
+                        "tradingsymbol": contract["tradingsymbol"],
+                        "quantity": quantity, "trade_cost": trade_cost,
+                        "balance": available_balance,
+                        "success": False, "error": "not affordable",
+                    })
+                    continue
+
+            # Step 5: Place REAL BUY order (Tiger always buys options)
+            transaction_type = "BUY"
             result = self.broker.place_option_order(
                 tradingsymbol=contract["tradingsymbol"],
                 symboltoken=contract["symboltoken"],
@@ -233,13 +299,17 @@ class TigerLiveRunner:
             if result.get("success"):
                 placed_count += 1
                 self._placed_order_keys.add(order_key)
+                # Deduct cost from running balance (margin used)
+                available_balance -= trade_cost
                 logger.info(
-                    f"🔥 REAL ORDER: BUY {quantity} "
+                    f"   🔥 REAL ORDER: BUY {quantity} "
                     f"{contract['tradingsymbol']} ({option_type}) "
-                    f"→ order_id={result['order_id']}")
+                    f"cost ₹{trade_cost:,.0f} → order_id={result['order_id']}")
+                logger.info(
+                    f"   💰 Remaining balance: ₹{available_balance:,.0f}")
             else:
                 logger.error(
-                    f"❌ Order fail: BUY {quantity} "
+                    f"   ❌ Order fail: BUY {quantity} "
                     f"{contract['tradingsymbol']} — {result.get('error', '?')}")
 
             self._order_log.append({
@@ -248,12 +318,20 @@ class TigerLiveRunner:
                 "option_type": option_type, "direction": direction,
                 "transaction_type": transaction_type,
                 "quantity": quantity,
+                "lot_size": real_lot_size,
+                "premium": entry_premium,
+                "trade_cost": trade_cost,
+                "balance": available_balance,
                 "tradingsymbol": contract["tradingsymbol"],
                 "order_id": result.get("order_id"),
                 "success": result.get("success", False),
                 "error": result.get("error"),
             })
 
+        logger.info("=" * 60)
+        logger.info("Scan orders: %d placed | Final balance: ₹%.0f",
+                    placed_count, available_balance)
+        logger.info("=" * 60)
         return placed_count
 
     # ============================================================
