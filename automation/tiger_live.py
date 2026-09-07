@@ -34,9 +34,22 @@ logging.basicConfig(
 from broker.angel_connect import AngelBroker, AngelConnectionError
 from automation.scheduler import (
     TigerBrainScheduler, get_day_mode, is_market_hours, is_opening_range_period,
+    is_mcx_hours,
 )
 from data.loader import resolve_option_contract
-from config.thresholds import AUTOMATION
+from config.thresholds import AUTOMATION, MARKET_CATEGORIES
+
+
+def resolve_exchange_for_symbol(symbol: str) -> str:
+    """Symbol se exchange guess karo (MCX commodity vs NFO equity/index)."""
+    if not symbol:
+        return "NFO"
+    upper = symbol.upper()
+    mcx_commodities = {"CRUDEOIL", "CRUDEOILM", "NATURALGAS", "NATGASMINI",
+                       "GOLD", "GOLDM", "SILVER", "SILVERM", "COPPER", "ZINC"}
+    if upper in mcx_commodities:
+        return "MCX"
+    return "NFO"
 
 
 class TigerLiveRunner:
@@ -232,7 +245,8 @@ class TigerLiveRunner:
         if self.capital_after_exit > 0:
             available_balance = max(available_balance, self.capital_after_exit)
 
-        # 3 PM cutoff check — 3:00 PM ke baad NO new intraday entries
+        # 3 PM cutoff check — 3:00 PM ke baad NO new NSE/equity intraday
+        # entries. MCX commodity entries EXEMPT (evening session 17:00-23:30).
         cutoff_str = AUTOMATION.get("INTRADAY_ENTRY_CUTOFF_TIME", "15:00")
         cutoff_h, cutoff_m = map(int, cutoff_str.split(":"))
         intraday_cutoff = now.replace(hour=cutoff_h, minute=cutoff_m,
@@ -241,8 +255,9 @@ class TigerLiveRunner:
 
         if is_after_cutoff:
             logger.info("=" * 60)
-            logger.info("⏰ 3 PM CUTOFF — Intraday entry bandh. "
-                        "Sirf profit booking (exits).")
+            logger.info("⏰ 3 PM CUTOFF — NSE intraday bandh. "
+                        "MCX commodity entries EXEMPT (evening session). "
+                        "Sirf profit booking (exits) for NSE.")
             logger.info("💰 Available balance: ₹%.0f", available_balance)
             logger.info("=" * 60)
         else:
@@ -272,11 +287,14 @@ class TigerLiveRunner:
             quantity = t.get("quantity", 0)
             is_delivery = t.get("is_delivery", False)
 
-            # 3 PM cutoff: 3 ke baad sirf delivery + exits, no new intraday
-            if is_after_cutoff and not is_delivery:
+            # 3 PM cutoff: NSE/equity intraday bandh after 3PM.
+            # MCX commodity EXEMPT — evening session (17:00-23:30) entries allowed.
+            is_mcx_commodity = MARKET_CATEGORIES.get(
+                resolve_exchange_for_symbol(symbol), "") == "commodity"
+            if is_after_cutoff and not is_delivery and not is_mcx_commodity:
                 logger.info(
                     f"   ⏰ SKIP {symbol} {strike}{option_type} — "
-                    f"intraday bandh after 3PM, sirf profit booking")
+                    f"NSE intraday bandh after 3PM, sirf profit booking")
                 continue
 
             # Duplicate check
@@ -311,6 +329,35 @@ class TigerLiveRunner:
             # Step 4: Real trade cost with REAL market price
             trade_cost = quantity * real_ltp
             one_lot_cost = real_lot_size * real_ltp
+
+            # MCX MINI fallback — agar full-size MCX contract afford nahi
+            # hota, to MINI variant try karo (chhota lot = kam capital).
+            from data.loader import MCX_MINI_FALLBACK
+            if (one_lot_cost > available_balance
+                    and symbol in MCX_MINI_FALLBACK):
+                mini_symbol = MCX_MINI_FALLBACK[symbol]
+                mini_contract = resolve_option_contract(
+                    mini_symbol, strike, option_type)
+                if mini_contract is not None:
+                    mini_lot = mini_contract.get("lotsize", 1) or 1
+                    mini_ltp = self.broker.get_ltp(
+                        mini_contract["tradingsymbol"],
+                        mini_contract["symboltoken"],
+                        mini_contract["exchange"],
+                    )
+                    if mini_ltp <= 0:
+                        mini_ltp = real_ltp
+                    mini_one_lot = mini_lot * mini_ltp
+                    if mini_one_lot <= available_balance:
+                        logger.info(
+                            f"   🔄 MINI fallback: {symbol}→{mini_symbol} "
+                            f"(lot {real_lot_size}→{mini_lot}, "
+                            f"cost ₹{one_lot_cost:,.0f}→₹{mini_one_lot:,.0f})")
+                        contract = mini_contract
+                        real_lot_size = mini_lot
+                        real_ltp = mini_ltp
+                        trade_cost = quantity * real_ltp
+                        one_lot_cost = mini_one_lot
 
             logger.info("-" * 60)
             logger.info(f"📊 {symbol} {strike}{option_type} ({direction})")

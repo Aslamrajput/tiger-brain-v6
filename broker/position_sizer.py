@@ -49,12 +49,10 @@ def get_available_capital(broker) -> dict:
                 "note": f"broker None — fallback capital {fallback} use hua"}
 
     try:
-        # Angel One SmartAPI: RMS = Risk Management System — available cash
-        rms = broker.smart_api.getRMS()
-        if not isinstance(rms, dict) or not rms.get("data"):
-            raise ValueError(f"getRMS ne unexpected response diya: {rms}")
-
-        available = float(rms["data"]["availablecash"])
+        # Angel One: broker.get_balance() uses rmsLimit() for real available cash.
+        available = broker.get_balance()
+        if available <= 0:
+            raise ValueError("get_balance() ne ₹0 diya — rmsLimit() fail")
         return {"available_capital": available, "source": "broker", "note": None}
 
     except Exception as exc:

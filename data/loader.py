@@ -543,9 +543,23 @@ OPTION_INSTRUMENT_TYPE = {
     "BANKNIFTY": ("OPTIDX", "NFO"),
     "FINNIFTY": ("OPTIDX", "NFO"),
     "CRUDEOIL": ("OPTFUT", "MCX"),
+    "CRUDEOILM": ("OPTFUT", "MCX"),
     "NATURALGAS": ("OPTFUT", "MCX"),
+    "NATGASMINI": ("OPTFUT", "MCX"),
     "GOLD": ("OPTFUT", "MCX"),
+    "GOLDM": ("OPTFUT", "MCX"),
     "SILVER": ("OPTFUT", "MCX"),
+    "SILVERM": ("OPTFUT", "MCX"),
+}
+
+# MCX MINI fallback — jab full-size contract afford nahi hota (small capital),
+# to Tiger MINI variant try karta hai (chhota lot size = kam capital).
+# Example: ₹10k account pe CRUDEOIL (lot 100) afford nahi → CRUDEOILM (lot 10).
+MCX_MINI_FALLBACK = {
+    "CRUDEOIL": "CRUDEOILM",      # lot 100 → 10
+    "NATURALGAS": "NATGASMINI",   # lot 1250 → 250
+    "GOLD": "GOLDM",              # lot 1 → 100 (premium-based, GOLDM cheaper)
+    "SILVER": "SILVERM",          # lot 30 → 1 (mini)
 }
 
 

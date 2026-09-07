@@ -89,8 +89,8 @@ class FundPlan:
 TIER_CONFIG = {
     TIER_MICRO: {
         "risk_per_trade_pct": 3.0,       # aggressive — ₹10k me ₹300 risk
-        "max_capital_per_trade_pct": 15.0, # 15% per trade (concentrated)
-        "max_total_exposure_pct": 60.0,    # 60% deployed at once
+        "max_capital_per_trade_pct": 80.0, # 80% per trade when fully sure
+        "max_total_exposure_pct": 100.0,   # full capital deployable
         "max_trades_today": 2,             # few trades, high conviction
         "max_trades_intraday": 1,
         "max_trades_delivery": 1,
@@ -102,8 +102,8 @@ TIER_CONFIG = {
     },
     TIER_SMALL: {
         "risk_per_trade_pct": 2.0,       # ₹1L me ₹2000 risk
-        "max_capital_per_trade_pct": 12.0,
-        "max_total_exposure_pct": 50.0,
+        "max_capital_per_trade_pct": 80.0, # 80% per trade when fully sure
+        "max_total_exposure_pct": 100.0,   # full capital deployable
         "max_trades_today": 3,
         "max_trades_intraday": 2,
         "max_trades_delivery": 1,
@@ -115,8 +115,8 @@ TIER_CONFIG = {
     },
     TIER_MID: {
         "risk_per_trade_pct": 1.5,       # ₹5L me ₹7500 risk
-        "max_capital_per_trade_pct": 10.0,
-        "max_total_exposure_pct": 45.0,
+        "max_capital_per_trade_pct": 80.0, # 80% per trade when fully sure
+        "max_total_exposure_pct": 100.0,   # full capital deployable
         "max_trades_today": 4,
         "max_trades_intraday": 3,
         "max_trades_delivery": 1,
@@ -128,8 +128,8 @@ TIER_CONFIG = {
     },
     TIER_LARGE: {
         "risk_per_trade_pct": 1.0,       # ₹50L me ₹50,000 risk
-        "max_capital_per_trade_pct": 8.0,
-        "max_total_exposure_pct": 40.0,
+        "max_capital_per_trade_pct": 80.0, # 80% per trade when fully sure
+        "max_total_exposure_pct": 100.0,   # full capital deployable
         "max_trades_today": 5,
         "max_trades_intraday": 4,
         "max_trades_delivery": 1,
@@ -141,8 +141,8 @@ TIER_CONFIG = {
     },
     TIER_WHALE: {
         "risk_per_trade_pct": 0.5,       # ₹10cr me ₹50,000 risk
-        "max_capital_per_trade_pct": 5.0,
-        "max_total_exposure_pct": 30.0,
+        "max_capital_per_trade_pct": 80.0, # 80% per trade when fully sure
+        "max_total_exposure_pct": 100.0,   # full capital deployable
         "max_trades_today": 6,
         "max_trades_intraday": 5,
         "max_trades_delivery": 1,
