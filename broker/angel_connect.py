@@ -195,8 +195,63 @@ class AngelBroker:
                 self.login_time = None
 
     # ============================================================
-    # LIVE ORDER PLACEMENT (SmartApi placeOrder)
+    # LIVE MARKET DATA + ORDER PLACEMENT (SmartApi)
     # ============================================================
+    def get_ltp(self, tradingsymbol: str, symboltoken: str,
+                exchange: str) -> float:
+        """Real market LTP (Last Traded Price) laata hai.
+
+        Tiger affordability check ke liye SIMULATED premium nahi,
+        REAL market price use karta hai.
+
+        Args:
+            tradingsymbol: jaise 'ICICIBANK29SEP261440PE'
+            symboltoken: numeric token
+            exchange: 'NFO' ya 'MCX'
+
+        Returns:
+            float: real LTP. 0 agar API fail.
+        """
+        self.ensure_logged_in()
+        try:
+            resp = self.smart_api.ltpData(
+                exchange, tradingsymbol, str(symboltoken))
+            if not resp or not resp.get("data"):
+                logger.warning(f"ltpData() fail for {tradingsymbol}")
+                return 0.0
+            data = resp["data"]
+            ltp = float(data.get("ltp", 0) or 0)
+            if ltp <= 0:
+                ltp = float(data.get("close", 0) or 0)
+            return ltp
+        except Exception as exc:
+            logger.error(f"LTP fetch fail {tradingsymbol}: {exc}")
+            return 0.0
+
+    def get_balance(self) -> float:
+        """Angel One account ka real available balance laata hai.
+
+        SmartApi rmsLimit() se available margin nikalta hai.
+        Tiger isse capital ke hisaab se position sizing karta hai.
+
+        Returns:
+            float: available cash/margin for trading. 0 agar API fail.
+        """
+        self.ensure_logged_in()
+        try:
+            rms = self.smart_api.rmsLimit()
+            if not rms or not rms.get("data"):
+                logger.warning("rmsLimit() ne koi data nahi diya.")
+                return 0.0
+            data = rms["data"]
+            # availablecash = cash available for trading
+            avail = float(data.get("availablecash", 0) or 0)
+            logger.info(f"💰 Angel One balance: ₹{avail:,.2f}")
+            return avail
+        except Exception as exc:
+            logger.error(f"Balance fetch fail: {exc}")
+            return 0.0
+
     def place_option_order(
         self,
         tradingsymbol: str,
@@ -256,23 +311,37 @@ class AngelBroker:
             return {"success": False, "order_id": None, "error": str(exc)}
 
     def get_order_status(self, order_id: str) -> dict:
-        """Ek placed order ka current status laata hai."""
+        """Placed order ka actual status — accepted, rejected, executed?
+
+        placeOrder() order_id return karta hai but ye ensure nahi karta
+        ki RMS ne accept kiya. reject_reason se pata chalta hai kyun
+        reject hua (jaise 'Insufficient Margin').
+
+        Returns:
+            dict: {'status': str, 'filled_qty': int, 'avg_price': float,
+                   'reject_reason': str|None}
+        """
         self.ensure_logged_in()
         try:
             book = self.smart_api.orderBook()
             if not book or not book.get("data"):
-                return {"status": "UNKNOWN", "filled_qty": 0, "avg_price": 0.0}
+                return {"status": "UNKNOWN", "filled_qty": 0,
+                        "avg_price": 0.0, "reject_reason": None}
             for o in book["data"]:
                 if str(o.get("orderid")) == str(order_id):
                     return {
                         "status": o.get("status", "UNKNOWN"),
                         "filled_qty": int(o.get("filledquantity", 0) or 0),
                         "avg_price": float(o.get("averageprice", 0) or 0),
+                        "reject_reason": o.get("text", None) or
+                                         o.get("rejectreason", None),
                     }
-            return {"status": "UNKNOWN", "filled_qty": 0, "avg_price": 0.0}
+            return {"status": "UNKNOWN", "filled_qty": 0,
+                    "avg_price": 0.0, "reject_reason": None}
         except Exception as exc:
             logger.warning(f"Order status fetch fail: {exc}")
-            return {"status": "UNKNOWN", "filled_qty": 0, "avg_price": 0.0}
+            return {"status": "UNKNOWN", "filled_qty": 0,
+                    "avg_price": 0.0, "reject_reason": None}
 
     def get_positions(self) -> list:
         """Current open positions laata hai (square-off ke liye)."""
@@ -284,8 +353,12 @@ class AngelBroker:
             logger.warning(f"Position fetch fail: {exc}")
             return []
 
-    def square_off_all(self) -> int:
+    def square_off_all(self, exchange: str = None) -> int:
         """Sab open INTRADAY positions close karta hai.
+
+        Args:
+            exchange: None = sab positions. 'MCX' = sirf MCX.
+                      NSE/NFO positions 15:15 pe close, MCX 23:15 pe.
 
         Returns: kitne positions close karne ki koshish ki.
         """
@@ -298,6 +371,9 @@ class AngelBroker:
             qty = int(p.get("netqty", 0) or 0)
             if qty == 0 or not sym:
                 continue
+            # Exchange filter — sirf specified exchange ke positions
+            if exchange and exch != exchange:
+                continue
             # Net long → SELL to close, net short → BUY to close
             close_side = "SELL" if qty > 0 else "BUY"
             close_qty = abs(qty)
@@ -308,10 +384,11 @@ class AngelBroker:
             )
             if res["success"]:
                 closed += 1
-                logger.info(f"Square-off: {close_side} {close_qty} {sym}")
+                logger.info(f"Square-off: {close_side} {close_qty} {sym} [{exch}]")
             else:
-                logger.error(f"Square-off FAIL {sym}: {res['error']}")
-        logger.info(f"Square-off complete: {closed}/{len(positions)} positions closed")
+                logger.error(f"Square-off FAIL {sym} [{exch}]: {res['error']}")
+        logger.info(f"Square-off complete: {closed} positions closed"
+                    f"{' (' + exchange + ')' if exchange else ''}")
         return closed
 
 

@@ -219,6 +219,16 @@ AUTOMATION = {
     "OPENING_RANGE_WAIT_MINUTES": VOLUME["OPENING_RANGE_MINUTES"],
     "MARKET_CLOSE_TIME": "15:30",
     "NIGHTLY_REPLAY_TIME": "00:00",
+    # Intraday entry cutoff — 3:00 PM ke baad NO new intraday orders,
+    # sirf profit booking (exits). Delivery orders 3:00 pe lagte hain.
+    "INTRADAY_ENTRY_CUTOFF_TIME": "15:00",
+    # Delivery snapshot time — 3:00 PM pe Tiger next-day direction decide
+    # karke delivery (overnight) orders lagata hai.
+    "DELIVERY_SNAPSHOT_TIME": "15:00",
+    # NSE square-off — 15:15 (15 min before NSE close 15:30)
+    "NSE_SQUARE_OFF_TIME": "15:15",
+    # MCX square-off — 23:15 (15 min before MCX close 23:30)
+    "MCX_SQUARE_OFF_TIME": "23:15",
 }
 
 # ============================================================

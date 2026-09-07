@@ -535,6 +535,20 @@ INDEX_UNDERLYING_TOKENS = {
 }
 
 
+# Index options → OPTIDX on NFO, Stock options → OPTSTK on NFO,
+# Commodity options → OPTFUT on MCX. Ye mapping resolve_option_contract
+# ke liye chahiye taaki har segment ke options token mil sake.
+OPTION_INSTRUMENT_TYPE = {
+    "NIFTY": ("OPTIDX", "NFO"),
+    "BANKNIFTY": ("OPTIDX", "NFO"),
+    "FINNIFTY": ("OPTIDX", "NFO"),
+    "CRUDEOIL": ("OPTFUT", "MCX"),
+    "NATURALGAS": ("OPTFUT", "MCX"),
+    "GOLD": ("OPTFUT", "MCX"),
+    "SILVER": ("OPTFUT", "MCX"),
+}
+
+
 def get_option_chain_instruments(
     underlying: str = "NIFTY", expiry_date: str = None
 ) -> pd.DataFrame:
@@ -542,8 +556,12 @@ def get_option_chain_instruments(
     Instrument master se ek underlying (jaise NIFTY) ke saare options
     contracts nikalta hai ek expiry ke liye.
 
+    Index options (NIFTY/BANKNIFTY/FINNIFTY) → OPTIDX on NFO.
+    Stock options (RELIANCE/TCS/etc) → OPTSTK on NFO.
+    Commodity options (CRUDEOIL/GOLD/etc) → OPTFUT on MCX.
+
     Args:
-        underlying: 'NIFTY', 'BANKNIFTY', etc.
+        underlying: 'NIFTY', 'BANKNIFTY', 'RELIANCE', 'GOLD', etc.
         expiry_date: format 'DDMMMYYYY' jaisa '28OCT2025'. None = sabse
                      nearest (jaldi expire hone wali) expiry khud chunega.
 
@@ -553,15 +571,19 @@ def get_option_chain_instruments(
     """
     df = load_angel_instrument_master()
 
+    instr_type, exchange = OPTION_INSTRUMENT_TYPE.get(
+        underlying, ("OPTSTK", "NFO"))
+
     mask = (
         (df["name"] == underlying)
-        & (df["instrumenttype"] == "OPTIDX")
-        & (df["exch_seg"] == "NFO")
+        & (df["instrumenttype"] == instr_type)
+        & (df["exch_seg"] == exchange)
     )
     options = df[mask].copy()
 
     if options.empty:
-        logger.warning(f"'{underlying}' ke options nahi mile instrument master mein.")
+        logger.warning(f"'{underlying}' ke options nahi mile instrument master mein "
+                       f"(type={instr_type}, exch={exchange}).")
         return pd.DataFrame()
 
     # Strike master mein *100 hoke stored hai
@@ -592,6 +614,46 @@ def get_option_chain_instruments(
     ].reset_index(drop=True)
 
     return result
+
+
+def resolve_option_contract(
+    underlying: str, strike: float, option_type: str, expiry_date: str = None
+) -> dict | None:
+    """Symbol + strike + CE/PE → Angel One tradingsymbol + symboltoken.
+
+    Live order placement ke liye — intraday_scan har trade signal pe
+    ye call karega taaki real order place ho sake.
+
+    Args:
+        underlying: 'NIFTY', 'RELIANCE', 'GOLD', etc.
+        strike: strike price (jaise 24400.0)
+        option_type: 'CE' ya 'PE'
+        expiry_date: 'DDMMMYYYY' format, None = nearest expiry
+
+    Returns:
+        {'tradingsymbol': str, 'symboltoken': str, 'exchange': str,
+         'lotsize': int} ya None agar contract nahi mila.
+    """
+    chain = get_option_chain_instruments(underlying, expiry_date)
+    if chain is None or chain.empty:
+        return None
+
+    matches = chain[
+        (chain["option_type"] == option_type)
+        & (chain["strike"] == float(strike))
+    ]
+    if matches.empty:
+        nearest_idx = (chain["strike"] - float(strike)).abs().idxmin()
+        matches = chain.loc[[nearest_idx]]
+
+    row = matches.iloc[0]
+    _, exchange = OPTION_INSTRUMENT_TYPE.get(underlying, ("OPTSTK", "NFO"))
+    return {
+        "tradingsymbol": row["symbol"],
+        "symboltoken": str(row["token"]),
+        "exchange": exchange,
+        "lotsize": int(row["lotsize"]),
+    }
 
 
 def fetch_option_chain_oi(
