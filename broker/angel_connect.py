@@ -200,7 +200,7 @@ class AngelBroker:
     def get_balance(self) -> float:
         """Angel One account ka real available balance laata hai.
 
-        SmartApi getRMS() se available margin nikalta hai.
+        SmartApi rmsLimit() se available margin nikalta hai.
         Tiger isse capital ke hisaab se position sizing karta hai.
 
         Returns:
@@ -208,15 +208,14 @@ class AngelBroker:
         """
         self.ensure_logged_in()
         try:
-            rms = self.smart_api.getRMS()
+            rms = self.smart_api.rmsLimit()
             if not rms or not rms.get("data"):
-                logger.warning("getRMS() ne koi data nahi diya.")
+                logger.warning("rmsLimit() ne koi data nahi diya.")
                 return 0.0
             data = rms["data"]
-            # available_margin = cash available for trading
-            avail = float(data.get("availablecash", 0) or
-                          data.get("net", 0) or 0)
-            logger.info(f"💰 Angel One balance: ₹{avail:,.0f}")
+            # availablecash = cash available for trading
+            avail = float(data.get("availablecash", 0) or 0)
+            logger.info(f"💰 Angel One balance: ₹{avail:,.2f}")
             return avail
         except Exception as exc:
             logger.error(f"Balance fetch fail: {exc}")
