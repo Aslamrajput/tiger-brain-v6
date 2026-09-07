@@ -350,8 +350,8 @@ ANGEL_INTERVAL_MAX_DAYS = {
 # "Access denied because of exceeding access rate" bhejta hai). Chunked
 # download mein ye error aana normal hai, isliye har chunk ke beech ruko
 # aur rate-limit wale error pe badhte hue intezaar ke saath retry karo.
-ANGEL_CHUNK_PAUSE_SEC = 1.0
-ANGEL_MAX_RETRIES = 4
+ANGEL_CHUNK_PAUSE_SEC = 3.0
+ANGEL_MAX_RETRIES = 5
 ANGEL_RETRY_BACKOFF_SEC = 5.0
 
 _RATE_LIMIT_MARKERS = (
