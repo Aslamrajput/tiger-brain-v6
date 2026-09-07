@@ -1407,13 +1407,18 @@ def _resolve_symbol_token(symbol: str) -> tuple[str, str] | None:
 
 
 def fetch_yfinance_fallback(symbol, ticker, days_15m=365, days_1m=90):
-    """Fallback for MCX commodities when Angel One token resolution fails.
+    """yfinance se 15m + 1m data laata hai (rate-limit-free, free API).
 
-    Uses yfinance US futures (CL=F, GC=F, SI=F, NG=F) as proxy for MCX.
-    Timezone converted to IST so MCX entry windows (09:00-23:00 IST) work.
+    yfinance limits:
+      - 15m interval: max 60 days
+      - 1m interval: max 7 days per request
+    Isliye days ko cap karte hain yfinance ke limits pe.
     """
     import yfinance as yf
     to_date = datetime.now()
+    # yfinance caps: 15m=60d, 1m=7d
+    days_15m = min(days_15m, 60)
+    days_1m = min(days_1m, 7)
     from_15m = to_date - timedelta(days=days_15m)
     from_1m = to_date - timedelta(days=days_1m)
 
