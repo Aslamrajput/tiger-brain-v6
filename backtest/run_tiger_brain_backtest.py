@@ -1416,8 +1416,8 @@ def fetch_yfinance_fallback(symbol, ticker, days_15m=365, days_1m=90):
     """
     import yfinance as yf
     to_date = datetime.now()
-    # yfinance caps: 15m=60d, 1m=7d
-    days_15m = min(days_15m, 60)
+    # yfinance caps: 15m=30d (safe), 1m=7d
+    days_15m = min(days_15m, 30)
     days_1m = min(days_1m, 7)
     from_15m = to_date - timedelta(days=days_15m)
     from_1m = to_date - timedelta(days=days_1m)
