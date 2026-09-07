@@ -133,7 +133,7 @@ class TigerBrainScheduler:
                 "(ya poora requirements.txt install karo)"
             )
 
-        self.scheduler = BackgroundScheduler()
+        self.scheduler = BackgroundScheduler(timezone="Asia/Kolkata")
 
     def _guarded(self, fn, required_mode="TRADING"):
         """Wrapper — job ke andar day-mode check karta hai pehle."""

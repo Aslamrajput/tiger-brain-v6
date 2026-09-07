@@ -51,6 +51,8 @@ class TigerLiveRunner:
         # Track placed order keys to avoid duplicate orders across scans
         self._placed_order_keys: set[str] = set()
         self._order_log: list[dict] = []
+        # Real account capital — Angel One se fetch hota hai pre-market
+        self.account_capital: float = 0.0
 
     # ============================================================
     # PRE-MARKET (09:00) — login + data load
@@ -83,6 +85,19 @@ class TigerLiveRunner:
                         len(self.instrument_master) if self.instrument_master is not None else 0)
         except Exception as exc:
             logger.error("❌ Instrument master fail: %s", exc)
+
+        # 2b. REAL account balance — Angel One se fetch
+        try:
+            self.account_capital = self.broker.get_balance()
+            if self.account_capital <= 0:
+                logger.warning("⚠️ Balance ₹0 — Angel One getRMS() fail. "
+                               "Fallback ₹10,000.")
+                self.account_capital = 10000.0
+            logger.info("💰 Trading capital: ₹%.0f (100%% of Angel One balance)",
+                        self.account_capital)
+        except Exception as exc:
+            logger.error("❌ Balance fetch fail: %s — fallback ₹10,000", exc)
+            self.account_capital = 10000.0
 
         # 3. Fetch fresh data
         try:
@@ -129,8 +144,9 @@ class TigerLiveRunner:
         logger.info("🐅 INTRADAY SCAN — %s", datetime.now().strftime("%H:%M"))
         try:
             from backtest.run_tiger_brain_backtest import run_tiger_brain_backtest
+            capital = self.account_capital if self.account_capital > 0 else 10000.0
             combined = run_tiger_brain_backtest(
-                self.data_map, start_capital=150000.0,
+                self.data_map, start_capital=capital,
                 data_map_1m=self.data_map_1m if self.data_map_1m else None,
                 broker=self.broker)
             trades = combined.get("trades", [])
@@ -186,8 +202,8 @@ class TigerLiveRunner:
             direction = t.get("direction", "")
             quantity = t.get("quantity", 0)
 
-            # Duplicate check — same symbol+strike+direction sirf ek baar
-            order_key = f"{symbol}_{strike}_{option_type}_{direction}_{trade_date}"
+            # Duplicate check — same symbol+strike+option_type sirf ek baar
+            order_key = f"{symbol}_{strike}_{option_type}_{trade_date}"
             if order_key in self._placed_order_keys:
                 continue
 
@@ -198,12 +214,17 @@ class TigerLiveRunner:
                     f"⚠️ Order skip: {symbol} {strike}{option_type} token nahi mila")
                 continue
 
+            # Tiger ALWAYS BUYS options (options buying bot).
+            # direction="BUY" → BUY CE, direction="SELL" → BUY PE
+            # transaction_type is always BUY — never SELL.
+            transaction_type = "BUY"
+
             # REAL ORDER PLACE
             result = self.broker.place_option_order(
                 tradingsymbol=contract["tradingsymbol"],
                 symboltoken=contract["symboltoken"],
                 exchange=contract["exchange"],
-                transaction_type=direction,
+                transaction_type=transaction_type,
                 quantity=quantity,
                 product_type="INTRADAY",
                 order_type="MARKET",
@@ -213,17 +234,19 @@ class TigerLiveRunner:
                 placed_count += 1
                 self._placed_order_keys.add(order_key)
                 logger.info(
-                    f"🔥 REAL ORDER: {direction} {quantity} "
-                    f"{contract['tradingsymbol']} → order_id={result['order_id']}")
+                    f"🔥 REAL ORDER: BUY {quantity} "
+                    f"{contract['tradingsymbol']} ({option_type}) "
+                    f"→ order_id={result['order_id']}")
             else:
                 logger.error(
-                    f"❌ Order fail: {direction} {quantity} "
+                    f"❌ Order fail: BUY {quantity} "
                     f"{contract['tradingsymbol']} — {result.get('error', '?')}")
 
             self._order_log.append({
                 "time": datetime.now().isoformat(),
                 "symbol": symbol, "strike": strike,
                 "option_type": option_type, "direction": direction,
+                "transaction_type": transaction_type,
                 "quantity": quantity,
                 "tradingsymbol": contract["tradingsymbol"],
                 "order_id": result.get("order_id"),
