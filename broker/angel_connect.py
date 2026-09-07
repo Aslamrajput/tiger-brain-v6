@@ -214,17 +214,15 @@ class AngelBroker:
         """
         self.ensure_logged_in()
         try:
-            params = {
-                "exchange": exchange,
-                "tradingsymbol": tradingsymbol,
-                "symboltoken": str(symboltoken),
-            }
-            resp = self.smart_api.ltpData(params)
+            resp = self.smart_api.ltpData(
+                exchange, tradingsymbol, str(symboltoken))
             if not resp or not resp.get("data"):
                 logger.warning(f"ltpData() fail for {tradingsymbol}")
                 return 0.0
-            ltp = float(resp["data"].get("ltp", 0) or
-                        resp["data"].get("close", 0) or 0)
+            data = resp["data"]
+            ltp = float(data.get("ltp", 0) or 0)
+            if ltp <= 0:
+                ltp = float(data.get("close", 0) or 0)
             return ltp
         except Exception as exc:
             logger.error(f"LTP fetch fail {tradingsymbol}: {exc}")

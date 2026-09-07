@@ -153,11 +153,15 @@ class TigerBrainScheduler:
         nightly_replay_fn=None,
         nse_square_off_fn=None,
         mcx_square_off_fn=None,
+        delivery_snapshot_fn=None,
     ):
         pre_h, pre_m = map(int, AUTOMATION["PRE_MARKET_WAKE_TIME"].split(":"))
         open_h, open_m = map(int, AUTOMATION["MARKET_OPEN_TIME"].split(":"))
         close_h, close_m = map(int, AUTOMATION["MARKET_CLOSE_TIME"].split(":"))
         replay_h, replay_m = map(int, AUTOMATION["NIGHTLY_REPLAY_TIME"].split(":"))
+        nse_h, nse_m = map(int, AUTOMATION.get("NSE_SQUARE_OFF_TIME", "15:15").split(":"))
+        mcx_h, mcx_m = map(int, AUTOMATION.get("MCX_SQUARE_OFF_TIME", "23:15").split(":"))
+        deliv_h, deliv_m = map(int, AUTOMATION.get("DELIVERY_SNAPSHOT_TIME", "15:00").split(":"))
 
         if pre_market_fn:
             self.scheduler.add_job(
@@ -182,18 +186,26 @@ class TigerBrainScheduler:
                 id="intraday_scan",
             )
 
+        # Delivery snapshot at 3:00 PM — Tiger next-day direction decide
+        # karke overnight delivery orders lagata hai
+        if delivery_snapshot_fn:
+            self.scheduler.add_job(
+                self._guarded(delivery_snapshot_fn), "cron",
+                hour=deliv_h, minute=deliv_m, id="delivery_snapshot",
+            )
+
         # NSE square-off at 15:15 (15 min before NSE close 15:30)
         if nse_square_off_fn:
             self.scheduler.add_job(
                 self._guarded(nse_square_off_fn), "cron",
-                hour=15, minute=15, id="nse_square_off",
+                hour=nse_h, minute=nse_m, id="nse_square_off",
             )
 
         # MCX square-off at 23:15 (15 min before MCX close 23:30)
         if mcx_square_off_fn:
             self.scheduler.add_job(
                 self._guarded(mcx_square_off_fn), "cron",
-                hour=23, minute=15, id="mcx_square_off",
+                hour=mcx_h, minute=mcx_m, id="mcx_square_off",
             )
 
         if market_close_fn:

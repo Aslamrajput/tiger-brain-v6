@@ -36,6 +36,7 @@ from automation.scheduler import (
     TigerBrainScheduler, get_day_mode, is_market_hours, is_opening_range_period,
 )
 from data.loader import resolve_option_contract
+from config.thresholds import AUTOMATION
 
 
 class TigerLiveRunner:
@@ -216,6 +217,7 @@ class TigerLiveRunner:
 
         today = datetime.now().date()
         placed_count = 0
+        now = datetime.now()
 
         # Step 1: Real balance fetch (har scan pe fresh)
         try:
@@ -230,11 +232,26 @@ class TigerLiveRunner:
         if self.capital_after_exit > 0:
             available_balance = max(available_balance, self.capital_after_exit)
 
-        logger.info("=" * 60)
-        logger.info("💰 CAPITAL CHECK — Available balance: ₹%.0f", available_balance)
-        logger.info("💰 Capital lifecycle: START ₹%.0f → now ₹%.0f",
-                    self.capital_start, available_balance)
-        logger.info("=" * 60)
+        # 3 PM cutoff check — 3:00 PM ke baad NO new intraday entries
+        cutoff_str = AUTOMATION.get("INTRADAY_ENTRY_CUTOFF_TIME", "15:00")
+        cutoff_h, cutoff_m = map(int, cutoff_str.split(":"))
+        intraday_cutoff = now.replace(hour=cutoff_h, minute=cutoff_m,
+                                      second=0, microsecond=0)
+        is_after_cutoff = now >= intraday_cutoff
+
+        if is_after_cutoff:
+            logger.info("=" * 60)
+            logger.info("⏰ 3 PM CUTOFF — Intraday entry bandh. "
+                        "Sirf profit booking (exits).")
+            logger.info("💰 Available balance: ₹%.0f", available_balance)
+            logger.info("=" * 60)
+        else:
+            logger.info("=" * 60)
+            logger.info("💰 CAPITAL CHECK — Available balance: ₹%.0f",
+                        available_balance)
+            logger.info("💰 Capital lifecycle: START ₹%.0f → now ₹%.0f",
+                        self.capital_start, available_balance)
+            logger.info("=" * 60)
 
         for t in trades:
             entry_ts = t.get("entry_ts")
@@ -253,6 +270,14 @@ class TigerLiveRunner:
             option_type = t.get("option_type", "")
             direction = t.get("direction", "")
             quantity = t.get("quantity", 0)
+            is_delivery = t.get("is_delivery", False)
+
+            # 3 PM cutoff: 3 ke baad sirf delivery + exits, no new intraday
+            if is_after_cutoff and not is_delivery:
+                logger.info(
+                    f"   ⏰ SKIP {symbol} {strike}{option_type} — "
+                    f"intraday bandh after 3PM, sirf profit booking")
+                continue
 
             # Duplicate check
             order_key = f"{symbol}_{strike}_{option_type}_{trade_date}"
@@ -327,14 +352,16 @@ class TigerLiveRunner:
                     continue
 
             # Step 6: Place REAL BUY order (Tiger always buys options)
+            # Delivery = CARRYFORWARD (overnight), Intraday = INTRADAY
             transaction_type = "BUY"
+            product_type = "CARRYFORWARD" if is_delivery else "INTRADAY"
             result = self.broker.place_option_order(
                 tradingsymbol=contract["tradingsymbol"],
                 symboltoken=contract["symboltoken"],
                 exchange=contract["exchange"],
                 transaction_type=transaction_type,
                 quantity=quantity,
-                product_type="INTRADAY",
+                product_type=product_type,
                 order_type="MARKET",
             )
 
@@ -409,6 +436,44 @@ class TigerLiveRunner:
                     self.capital_start, available_balance, placed_count)
         logger.info("=" * 60)
         return placed_count
+
+    def delivery_snapshot(self):
+        """3:00 PM — Tiger next-day direction decide karke delivery orders.
+
+        Tiger EOD pe market dekh ke decide karta hai:
+        - Gup-up likely → BUY CE (call option) delivery
+        - Gup-down likely → BUY PE (put option) delivery
+
+        Delivery = CARRYFORWARD (overnight hold), next day square-off.
+
+        3 PM ke baad intraday new orders bandh, sirf ye delivery + exits.
+        """
+        logger.info("=" * 60)
+        logger.info("🐅 DELIVERY SNAPSHOT (3:00 PM) — Next-day direction")
+        logger.info("=" * 60)
+        if self.broker is None:
+            logger.info("Broker nahi hai — delivery skip.")
+            return
+        try:
+            combined = run_tiger_brain_backtest(
+                self.data_map, start_capital=self.account_capital)
+            trades = combined.get("trades", [])
+            totals = combined.get("totals", {})
+            # Filter sirf delivery trades
+            delivery_trades = [t for t in trades
+                               if t.get("is_delivery", False)]
+            today_str = datetime.now().strftime("%Y-%m-%d")
+            delivery_trades = [t for t in delivery_trades
+                               if str(t.get("entry_ts", ""))[:10] == today_str]
+            logger.info("Delivery signals: %d / %d total trades",
+                        len(delivery_trades), len(trades))
+            if delivery_trades:
+                placed = self._place_live_orders(delivery_trades)
+                logger.info("Delivery orders placed: %d", placed)
+            else:
+                logger.info("Koi delivery signal nahi — aaj overnight nahi.")
+        except Exception as exc:
+            logger.error("Delivery snapshot error: %s", exc)
 
     # ============================================================
     # MARKET CLOSE — NSE 15:15 square-off + MCX 23:15 square-off
@@ -545,13 +610,15 @@ class TigerLiveRunner:
             nightly_replay_fn=self.nightly_replay,
             nse_square_off_fn=self.nse_square_off,
             mcx_square_off_fn=self.mcx_square_off,
+            delivery_snapshot_fn=self.delivery_snapshot,
         )
         self.scheduler.start()
         self._running = True
         logger.info("✅ Tiger scheduler STARTED. 24x7 cycle active.")
         logger.info("   Pre-market:  09:00")
         logger.info("   Market open: 09:15")
-        logger.info("   Intraday:    every 20 min")
+        logger.info("   Intraday:    every 20 min (entry bandh 3PM)")
+        logger.info("   Delivery:    15:00 (overnight direction)")
         logger.info("   NSE close:   15:15 (NFO square-off)")
         logger.info("   Market close:15:30 (fallback square-off)")
         logger.info("   MCX close:   23:15 (MCX square-off + logout)")
