@@ -22,6 +22,8 @@ import sys
 import time
 from datetime import datetime
 
+import pandas as pd
+
 logger = logging.getLogger("tiger_brain.tiger_live")
 logging.basicConfig(
     level=logging.INFO,
@@ -33,6 +35,7 @@ from broker.angel_connect import AngelBroker, AngelConnectionError
 from automation.scheduler import (
     TigerBrainScheduler, get_day_mode, is_market_hours, is_opening_range_period,
 )
+from data.loader import resolve_option_contract
 
 
 class TigerLiveRunner:
@@ -45,6 +48,9 @@ class TigerLiveRunner:
         self.data_map_1m: dict = {}
         self.instrument_master = None
         self._running = False
+        # Track placed order keys to avoid duplicate orders across scans
+        self._placed_order_keys: set[str] = set()
+        self._order_log: list[dict] = []
 
     # ============================================================
     # PRE-MARKET (09:00) — login + data load
@@ -103,7 +109,11 @@ class TigerLiveRunner:
     # INTRADAY SCAN (every 20 min) — entry signals + exits
     # ============================================================
     def intraday_scan(self):
-        """Har 20 min pe zones scan karo, entry signal dhoondo, exit check karo."""
+        """Har 20 min pe zones scan karo, entry signal dhoondo, exit check karo.
+
+        Backtest engine strategy signals generate karta hai. Phir _place_live_orders()
+        un signals ko REAL Angel One orders mein convert karta hai.
+        """
         if get_day_mode() != "TRADING":
             return
         if not is_market_hours():
@@ -125,12 +135,103 @@ class TigerLiveRunner:
                 broker=self.broker)
             trades = combined.get("trades", [])
             totals = combined.get("totals", {})
-            logger.info("Scan done: %d trades today, equity ₹%.0f, return %.2f%%",
-                        len(trades),
+
+            # === LIVE EXECUTION BRIDGE ===
+            # Backtest ne signals generate kiye. Ab unhe REAL orders mein
+            # convert karo — sirf aaj ke + abhi tak place na hue trades.
+            placed = self._place_live_orders(trades)
+
+            logger.info("Scan done: %d signals, %d real orders placed, "
+                        "equity ₹%.0f, return %.2f%%",
+                        len(trades), placed,
                         totals.get("final_equity", 0),
                         totals.get("total_return_pct", 0))
         except Exception as exc:
             logger.error("Intraday scan error: %s", exc)
+
+    def _place_live_orders(self, trades: list[dict]) -> int:
+        """Backtest signals → REAL Angel One orders.
+
+        Sirf aaj ke trades lete hai, aur jo abhi tak place na hue ho.
+        Har trade ke liye:
+          1. Symbol + strike + CE/PE → Angel One tradingsymbol + token
+          2. broker.place_option_order() se REAL order
+          3. Result log karo (success/fail + order_id)
+
+        Returns:
+            int: kitne real orders successfully place hue
+        """
+        if not trades or self.broker is None:
+            return 0
+
+        today = datetime.now().date()
+        placed_count = 0
+
+        for t in trades:
+            entry_ts = t.get("entry_ts")
+            if entry_ts is None:
+                continue
+            # Sirf aaj ke trades (timezone-aware ho sakta hai)
+            try:
+                trade_date = entry_ts.date() if hasattr(entry_ts, 'date') else \
+                    pd.Timestamp(entry_ts).date()
+            except Exception:
+                continue
+            if trade_date != today:
+                continue
+
+            symbol = t.get("symbol", "")
+            strike = t.get("strike", 0)
+            option_type = t.get("option_type", "")
+            direction = t.get("direction", "")
+            quantity = t.get("quantity", 0)
+
+            # Duplicate check — same symbol+strike+direction sirf ek baar
+            order_key = f"{symbol}_{strike}_{option_type}_{direction}_{trade_date}"
+            if order_key in self._placed_order_keys:
+                continue
+
+            # Token resolution
+            contract = resolve_option_contract(symbol, strike, option_type)
+            if contract is None:
+                logger.warning(
+                    f"⚠️ Order skip: {symbol} {strike}{option_type} token nahi mila")
+                continue
+
+            # REAL ORDER PLACE
+            result = self.broker.place_option_order(
+                tradingsymbol=contract["tradingsymbol"],
+                symboltoken=contract["symboltoken"],
+                exchange=contract["exchange"],
+                transaction_type=direction,
+                quantity=quantity,
+                product_type="INTRADAY",
+                order_type="MARKET",
+            )
+
+            if result.get("success"):
+                placed_count += 1
+                self._placed_order_keys.add(order_key)
+                logger.info(
+                    f"🔥 REAL ORDER: {direction} {quantity} "
+                    f"{contract['tradingsymbol']} → order_id={result['order_id']}")
+            else:
+                logger.error(
+                    f"❌ Order fail: {direction} {quantity} "
+                    f"{contract['tradingsymbol']} — {result.get('error', '?')}")
+
+            self._order_log.append({
+                "time": datetime.now().isoformat(),
+                "symbol": symbol, "strike": strike,
+                "option_type": option_type, "direction": direction,
+                "quantity": quantity,
+                "tradingsymbol": contract["tradingsymbol"],
+                "order_id": result.get("order_id"),
+                "success": result.get("success", False),
+                "error": result.get("error"),
+            })
+
+        return placed_count
 
     # ============================================================
     # MARKET CLOSE (15:30) — square-off + logout
