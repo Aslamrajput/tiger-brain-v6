@@ -455,10 +455,12 @@ class TigerLiveRunner:
             logger.info("Broker nahi hai — delivery skip.")
             return
         try:
+            from backtest.run_tiger_brain_backtest import run_tiger_brain_backtest
             combined = run_tiger_brain_backtest(
-                self.data_map, start_capital=self.account_capital)
+                self.data_map, start_capital=self.account_capital,
+                data_map_1m=self.data_map_1m if self.data_map_1m else None,
+                broker=self.broker)
             trades = combined.get("trades", [])
-            totals = combined.get("totals", {})
             # Filter sirf delivery trades
             delivery_trades = [t for t in trades
                                if t.get("is_delivery", False)]
