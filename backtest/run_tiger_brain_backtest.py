@@ -1511,6 +1511,8 @@ def fetch_angel_data(broker, days_15m=365, days_1m=90, use_scan_universe=False):
                         data_map_1m[sym] = d1
                     angel_used.append(sym)
                     print(f"  {tag:30s}: 15m={len(d15):5d}  1m={len(data_map_1m.get(sym, [])):5d}  [ANGEL]")
+                    import time as _t
+                    _t.sleep(1.0)  # rate-limit friendly: 1s gap between symbols
                     continue
             except Exception as exc:
                 logger.warning(f"{tag}: Angel fetch fail — yfinance fallback: {exc}")

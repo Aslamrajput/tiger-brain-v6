@@ -356,6 +356,7 @@ ANGEL_RETRY_BACKOFF_SEC = 5.0
 
 _RATE_LIMIT_MARKERS = (
     "access rate", "rate limit", "exceeding access", "too many request",
+    "too many requests", "ab1021",
 )
 
 
