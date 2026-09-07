@@ -63,6 +63,7 @@ sys.path.insert(0, ".")
 from broker.angel_connect import AngelBroker
 from data.loader import (
     fetch_angel_historical_candles,
+    fetch_angel_underlying_candles,
     fetch_india_vix_history,
     find_symbol_token,
     load_angel_instrument_master,
@@ -1474,27 +1475,47 @@ def fetch_yfinance_fallback(symbol, ticker, days_15m=365, days_1m=90):
 def fetch_angel_data(broker, days_15m=365, days_1m=90, use_scan_universe=False):
     """Fetch 15m (1 year) + 1m (max available) historical candles.
 
-    NSE symbols use Angel One (broker data, accurate).
-    MCX commodities use yfinance fallback (US futures proxy, IST-converted)
-    when Angel One token resolution fails.
+    PRIMARY: Angel One real historical candles (accurate market data).
+    FALLBACK: yfinance (US futures proxy, IST-converted) — sirf tab jab
+    Angel One fail ho (rate limit, token resolve fail, etc).
 
     Args:
         use_scan_universe: if True, scan full 150+ F&O universe (Tiger V16).
             if False, use default 40-symbol trading universe.
     """
-    from universe.fno_universe import COMMODITY_SYMBOLS, scan_universe
+    from universe.fno_universe import scan_universe
     to_date = datetime.now().replace(hour=15, minute=30, second=0, microsecond=0)
     from_15m = to_date - timedelta(days=days_15m)
     from_1m = to_date - timedelta(days=days_1m)
     data_map, data_map_1m = {}, {}
     failed = []
     yf_used = []
+    angel_used = []
     syms = scan_universe() if use_scan_universe else all_symbols()
     total = len(syms)
     for idx, (sym, ticker) in enumerate(syms.items(), 1):
         tag = f"[{idx}/{total}] {sym}"
-        # Rate-limit-safe: yfinance se historical data lo (free, fast, no limit)
-        # Angel One sirf login + live order placement ke liye
+
+        # PRIMARY: Angel One se real historical candles
+        if broker is not None and broker.smart_api is not None:
+            try:
+                d15 = fetch_angel_underlying_candles(
+                    broker, sym, "FIFTEEN_MINUTE", days=days_15m)
+                d1 = fetch_angel_underlying_candles(
+                    broker, sym, "ONE_MINUTE", days=days_1m)
+                if d15 is not None and not d15.empty:
+                    d15 = _normalize_cols(d15)
+                    data_map[sym] = d15
+                    if d1 is not None and not d1.empty:
+                        d1 = _normalize_cols(d1)
+                        data_map_1m[sym] = d1
+                    angel_used.append(sym)
+                    print(f"  {tag:30s}: 15m={len(d15):5d}  1m={len(data_map_1m.get(sym, [])):5d}  [ANGEL]")
+                    continue
+            except Exception as exc:
+                logger.warning(f"{tag}: Angel fetch fail — yfinance fallback: {exc}")
+
+        # FALLBACK: yfinance (sirf agar Angel One fail hua)
         try:
             d15, d1 = fetch_yfinance_fallback(sym, ticker, days_15m, days_1m)
             if d15 is not None and not d15.empty:
@@ -1511,8 +1532,10 @@ def fetch_angel_data(broker, days_15m=365, days_1m=90, use_scan_universe=False):
             logger.error(f"{tag}: yfinance error: {exc}")
             failed.append(sym)
             continue
+    if angel_used:
+        print(f"\n  Angel One data used for: {len(angel_used)} symbols")
     if yf_used:
-        print(f"\n  yfinance fallback used for: {yf_used}")
+        print(f"  yfinance fallback used for: {yf_used}")
     print(f"\nFailed: {failed}")
     print(f"Universe: 15m={len(data_map)}  1m={len(data_map_1m)}")
     return data_map, data_map_1m, failed

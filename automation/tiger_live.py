@@ -146,7 +146,7 @@ class TigerLiveRunner:
         try:
             from backtest.run_tiger_brain_backtest import fetch_angel_data
             self.data_map, self.data_map_1m, failed = fetch_angel_data(
-                self.broker, use_scan_universe=True)
+                self.broker, days_15m=30, days_1m=7, use_scan_universe=True)
             logger.info("✅ Data fetched: %d symbols (15m), %d symbols (1m). Failed: %d",
                         len(self.data_map), len(self.data_map_1m), len(failed))
         except Exception as exc:
@@ -198,11 +198,17 @@ class TigerLiveRunner:
             # === LIVE EXECUTION BRIDGE ===
             # Backtest ne signals generate kiye. Ab unhe REAL orders mein
             # convert karo — sirf aaj ke + abhi tak place na hue trades.
-            placed = self._place_live_orders(trades)
+            # Exits (PREMIUM EXIT / stop-loss / square-off) → SELL orders.
+            exits = [t for t in trades if t.get("exit_ts") is not None]
+            entries = [t for t in trades if t.get("exit_ts") is None]
+            placed = self._place_live_orders(entries)
+            closed = self._place_exit_orders(exits)
 
-            logger.info("Scan done: %d signals, %d real orders placed, "
+            logger.info("Scan done: %d signals (%d entries, %d exits), "
+                        "%d buy orders placed, %d sell orders placed, "
                         "equity ₹%.0f, return %.2f%%",
-                        len(trades), placed,
+                        len(trades), len(entries), len(exits),
+                        placed, closed,
                         totals.get("final_equity", 0),
                         totals.get("total_return_pct", 0))
         except Exception as exc:
@@ -483,6 +489,112 @@ class TigerLiveRunner:
                     self.capital_start, available_balance, placed_count)
         logger.info("=" * 60)
         return placed_count
+
+    def _place_exit_orders(self, exit_trades: list[dict]) -> int:
+        """Backtest exit signals → REAL SELL orders (close positions).
+
+        Backtest ne PREMIUM EXIT / stop-loss / square-off signal diya.
+        Ab real broker se open position dhundh ke SELL order place karo.
+
+        Returns:
+            int: kitne positions successfully closed
+        """
+        if not exit_trades or self.broker is None:
+            return 0
+
+        # Real broker positions fetch (kya actually hold kar rahe hain)
+        try:
+            open_positions = self.broker.get_positions()
+        except Exception as exc:
+            logger.error("❌ Exit orders: position fetch fail: %s", exc)
+            return 0
+
+        # Build map: tradingsymbol → net quantity (from real broker)
+        broker_positions = {}
+        for p in open_positions:
+            tsym = p.get("tradingsymbol", "")
+            qty = int(p.get("netqty", 0) or 0)
+            if qty > 0 and tsym:
+                broker_positions[tsym] = p
+
+        if not broker_positions:
+            logger.info("📤 No open positions to exit — skip sell orders.")
+            return 0
+
+        closed_count = 0
+        today = datetime.now().date()
+
+        for t in exit_trades:
+            entry_ts = t.get("entry_ts")
+            if entry_ts is None:
+                continue
+            try:
+                trade_date = entry_ts.date() if hasattr(entry_ts, 'date') else \
+                    pd.Timestamp(entry_ts).date()
+            except Exception:
+                continue
+            if trade_date != today:
+                continue
+
+            symbol = t.get("symbol", "")
+            strike = t.get("strike", 0)
+            option_type = t.get("option_type", "")
+            exit_reason = t.get("exit_reason", "unknown")
+
+            # Resolve contract to get tradingsymbol
+            contract = resolve_option_contract(symbol, strike, option_type)
+            if contract is None:
+                logger.warning(
+                    f"   ⚠️ Exit skip: {symbol} {strike}{option_type} "
+                    f"contract nahi mila")
+                continue
+
+            tsym = contract["tradingsymbol"]
+            pos = broker_positions.get(tsym)
+            if pos is None:
+                logger.info(
+                    f"   ⏭️ Exit skip: {tsym} not in open positions "
+                    f"(already closed or not held)")
+                continue
+
+            qty = int(pos.get("netqty", 0) or 0)
+            if qty <= 0:
+                continue
+
+            # Place SELL order to close
+            result = self.broker.place_option_order(
+                tradingsymbol=tsym,
+                symboltoken=contract["symboltoken"],
+                exchange=contract["exchange"],
+                transaction_type="SELL",
+                quantity=qty,
+                product_type="INTRADAY",
+                order_type="MARKET",
+            )
+
+            if result.get("success"):
+                import time as _time
+                _time.sleep(2)
+                status = self.broker.get_order_status(result["order_id"])
+                order_status = status.get("status", "").lower()
+                reject_reason = status.get("reject_reason")
+                if "reject" in order_status or reject_reason:
+                    logger.error(
+                        f"   ❌ SELL REJECTED: {tsym} qty={qty} "
+                        f"reason={reject_reason}")
+                else:
+                    closed_count += 1
+                    logger.info(
+                        f"   🔥 SELL ORDER: {qty} {tsym} "
+                        f"reason={exit_reason} → order_id={result['order_id']}")
+            else:
+                logger.error(
+                    f"   ❌ SELL fail: {qty} {tsym} — "
+                    f"{result.get('error', '?')}")
+
+        if closed_count > 0:
+            self._log_capital_after_exit(f"Exit orders ({closed_count} closed)")
+        return closed_count
 
     def delivery_snapshot(self):
         """3:00 PM — Tiger next-day direction decide karke delivery orders.

@@ -154,16 +154,17 @@ SESSION_SCHEDULE: list[SessionConfig] = [
         time_start=time(17, 0),
         time_end=time(20, 0),
         segment_focus="mcx",
-        score_threshold=78.0,
-        max_trades_this_session=3,
-        capital_allocation_pct=25.0,
+        score_threshold=76.0,
+        max_trades_this_session=5,
+        capital_allocation_pct=80.0,
         preferred_strike="ATM",
-        aggressiveness="MEDIUM",
-        description="MCX evening session — crude/gold/silver hunting begins",
+        aggressiveness="HIGH",
+        description="MCX evening session — crude/gold/silver full throttle",
         notes=[
             "NSE closed, MCX takes over",
             "Crude oil big moves on US data",
             "ATM strikes — commodity premiums fair",
+            "80% capital when confident (fully sure)",
         ],
     ),
     SessionConfig(
@@ -172,9 +173,9 @@ SESSION_SCHEDULE: list[SessionConfig] = [
         time_start=time(20, 0),
         time_end=time(23, 0),
         segment_focus="mcx",
-        score_threshold=76.0,        # slightly lower — night = big moves
+        score_threshold=75.0,        # slightly lower — night = big moves
         max_trades_this_session=5,   # aggressive — biggest commodity moves
-        capital_allocation_pct=30.0,
+        capital_allocation_pct=80.0,
         preferred_strike="ATM",
         aggressiveness="HIGH",
         description="International session — gold/silver/crude biggest moves",
@@ -182,7 +183,7 @@ SESSION_SCHEDULE: list[SessionConfig] = [
             "US/Europe markets active = max commodity volatility",
             "Gold/Silver 50-200% moves possible",
             "Tiger's night hunting mode — full throttle",
-            "Bina shikar liye ghar nahi — if no trades yet, HUNT HARD",
+            "80% capital when confident (fully sure)",
         ],
     ),
     SessionConfig(
