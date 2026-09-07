@@ -205,6 +205,12 @@ class TigerLiveRunner:
         logger.info("")
         logger.info("🐅 Tiger live hai. Ctrl+C pe shutdown hoga.")
 
+        # Mid-market startup: agar market pehle se open hai, turant login karo
+        if get_day_mode() == "TRADING" and is_market_hours():
+            logger.info("🐅 Market pehle se open hai — turant broker login + scan start.")
+            self.pre_market_wake()
+            self.market_open()
+
         # Graceful shutdown
         def _shutdown(signum, frame):
             logger.info("🛑 Shutdown signal received — Tiger stopping...")
