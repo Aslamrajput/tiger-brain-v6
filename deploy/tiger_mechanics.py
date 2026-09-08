@@ -37,11 +37,12 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import time
 import traceback
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 # ============================================================
@@ -133,6 +134,49 @@ class RajuHealthWatcher:
     role = "Health Watcher"
     experience = "10 saal"
 
+    # Error patterns (case-insensitive) — real errors only.
+    _ERROR_RE = re.compile(
+        r"error|exception|traceback|crash|critical", re.IGNORECASE)
+    # Warning patterns to EXCLUDE (pandas/numpy deprecation noise).
+    _WARN_RE = re.compile(
+        r"futurewarning|deprecationwarning|userwarning|"
+        r"runtimewarning|pdwarnings|warning:", re.IGNORECASE)
+    # Tiger log timestamp: "2026-09-08 19:38:58 [module] LEVEL: msg"
+    _TS_RE = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})")
+
+    def _count_recent_errors(self, minutes: int = 15) -> int:
+        """Count real errors in last N minutes of Tiger log.
+
+        Parses each line's timestamp (YYYY-MM-DD HH:MM:SS), compares
+        against cutoff (now - N min). Lines without timestamps (e.g.,
+        continuation of multiline tracebacks, FutureWarning code lines)
+        are NOT counted — only timestamped lines that match error
+        patterns and don't match warning exclusions.
+
+        Reads at most last 2000 lines (performance guard for huge logs).
+        """
+        out, _ = run_local(f"tail -2000 {LOG_FILE}")
+        if not out:
+            return 0
+        cutoff = datetime.now() - timedelta(minutes=minutes)
+        count = 0
+        for line in out.splitlines():
+            m = self._TS_RE.match(line)
+            if not m:
+                continue  # no timestamp = continuation line, skip
+            try:
+                ts = datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S")
+            except ValueError:
+                continue
+            if ts < cutoff:
+                continue  # older than cutoff — not recent
+            if not self._ERROR_RE.search(line):
+                continue  # not an error line
+            if self._WARN_RE.search(line):
+                continue  # harmless warning, skip
+            count += 1
+        return count
+
     def inspect(self) -> dict:
         """Tiger ki health check karo. Issues return karo."""
         log(f"🔧 {self.name} ({self.role}, {self.experience}) — inspection start")
@@ -167,21 +211,13 @@ class RajuHealthWatcher:
             })
         log(f"   📊 {self.name}: Restarts today: {restarts}")
 
-        # 3. Errors in log (last 15 min) — only RECENT errors, exclude
-        # harmless pandas/numpy warnings. Check last 300 lines of log
-        # (not whole log — historical errors don't count).
+        # 3. Errors in log (last 15 min) — REAL timestamp filter, not
+        # line-count hack. Parse log timestamps (YYYY-MM-DD HH:MM:SS),
+        # count only errors newer than 15-min cutoff. Excludes harmless
+        # pandas/numpy warnings (FutureWarning, DeprecationWarning, etc).
         # Real errors: ERROR, Exception, Traceback, CRITICAL, FAIL.
-        # Exclude: FutureWarning, DeprecationWarning, etc (noise).
-        out, _ = run_local(
-            f"tail -300 {LOG_FILE} | "
-            f"grep -iE 'error|exception|traceback|crash|critical' | "
-            f"grep -ivE 'futurewarning|deprecationwarning|userwarning|"
-            f"runtimewarning|pdwarnings|warning:' | "
-            f"wc -l")
-        try:
-            error_count = int(out)
-        except (ValueError, TypeError):
-            error_count = 0
+        # Multiline tracebacks: only count the FIRST line (has timestamp).
+        error_count = self._count_recent_errors(15)
         if error_count > 5:
             issues.append({
                 "mechanic": self.name,
