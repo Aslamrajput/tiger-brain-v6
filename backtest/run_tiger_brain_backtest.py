@@ -749,7 +749,14 @@ def get_vix_for_date(date) -> float:
         if len(numeric_cols) == 0:
             return VIX_FALLBACK
         close_col = numeric_cols[-1]
-    target_date = date if not hasattr(date, 'date') else date.date() if date.tz is None else date.tz_convert("Asia/Kolkata").date()
+    target_date = date
+    if hasattr(date, "date"):
+        target_date = date.date()
+    if hasattr(date, "tz_convert"):
+        try:
+            target_date = date.tz_convert("Asia/Kolkata").date()
+        except (TypeError, AttributeError):
+            pass
     try:
         mask = _vix_cache.index.date == target_date
         if mask.any():
