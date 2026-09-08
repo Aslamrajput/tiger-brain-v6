@@ -1,0 +1,22 @@
+[Unit]
+Description=Tiger V19 — Personal Service Centre (2 Mechanics: Raju + Suresh)
+After=network-online.target tiger-brain.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ec2-user
+WorkingDirectory=/home/ec2-user/tiger-brain-v6
+Environment=TZ=Asia/Kolkata
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 -m deploy.tiger_mechanics
+Restart=always
+RestartSec=30
+StandardOutput=append:/home/ec2-user/tiger_mechanics.log
+StandardError=append:/home/ec2-user/tiger_mechanics.log
+
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target
