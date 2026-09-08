@@ -579,6 +579,78 @@ def cmd_fix(client: paramiko.SSHClient) -> dict:
 # COMMAND: full-service — SAB KUCH
 # ============================================================
 
+# ============================================================
+# COMMAND: mechanics — Raju + Suresh ka status (autonomous watchdog)
+# ============================================================
+
+def cmd_mechanics(client: paramiko.SSHClient) -> dict:
+    """Mechanics daemon status — kya Raju + Suresh nazar rakh rahe hain?"""
+    print(SEP)
+    print(f"  {BANNER} — MECHANICS STATUS")
+    print(SEP)
+
+    # 1. Mechanics service running?
+    section("1. MECHANICS DAEMON")
+    out, _, _ = run(client, "sudo systemctl is-active tiger-mechanics",
+                    quiet=True)
+    icon = "✅" if out == "active" else "❌"
+    print(f"   {icon} tiger-mechanics service: {out}")
+
+    out, _, _ = run(client,
+        "systemctl show tiger-mechanics --property=ActiveEnterTimestamp --value",
+        quiet=True)
+    print(f"   🕐 Running since: {out}")
+
+    out, _, _ = run(client,
+        "systemctl show tiger-mechanics --property=NRestarts --value",
+        quiet=True)
+    print(f"   🔄 Restarts: {out}")
+
+    # 2. Mechanics recent activity (last 30 lines)
+    section("2. MECHANICS ACTIVITY (last 30 lines)")
+    out, _, _ = run(client,
+        "tail -30 /home/ec2-user/tiger_mechanics.log 2>/dev/null",
+        quiet=True)
+    print(out if out else "(no mechanics log yet — service may not be installed)")
+
+    # 3. Service report (JSON)
+    section("3. LAST SERVICE REPORT")
+    out, _, _ = run(client,
+        "python3 -c \""
+        "import json; "
+        "d = json.load(open('/home/ec2-user/tiger_service_log.json')); "
+        "r = d[-1] if d else {}; "
+        "print('Timestamp:', r.get('timestamp','?')); "
+        "print('Tiger healthy:', r.get('tiger_healthy','?')); "
+        "print('Total issues:', r.get('total_issues','?')); "
+        "print('Fixes applied:', len(r.get('fixes_applied',[]))); "
+        "raju = r.get('raju',{}); "
+        "print('Raju stats:', raju.get('stats',{})); "
+        "suresh = r.get('suresh',{}); "
+        "print('Suresh stats:', suresh.get('stats',{}))\" 2>/dev/null",
+        quiet=True)
+    print(out if out else "(no service report yet)")
+
+    # 4. Alerts (if any)
+    section("4. RECENT ALERTS (last 10)")
+    out, _, _ = run(client,
+        "tail -10 /home/ec2-user/tiger_alerts.log 2>/dev/null",
+        quiet=True)
+    print(out if out else "✅ No alerts — all quiet")
+
+    # 5. Install mechanics (if not running)
+    if out != "active":
+        section("5. INSTALL MECHANICS")
+        print("   Mechanics service not installed. Install with:")
+        print(f"     sudo cp {REPO}/deploy/tiger-mechanics.service "
+              "/etc/systemd/system/")
+        print("     sudo systemctl daemon-reload")
+        print("     sudo systemctl enable --now tiger-mechanics")
+
+    print(f"\n{SEP}")
+    return {}
+
+
 def cmd_full_service(client: paramiko.SSHClient) -> dict:
     """Full service: diagnose → fix → deploy → verify → tests → report."""
     print(SEP)
@@ -683,6 +755,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("deploy", help="Pull latest main + restart + verify")
     sub.add_parser("verify", help="Config + session + balance verification")
     sub.add_parser("tests", help="Run pytest suite on AWS")
+    sub.add_parser("mechanics", help="Raju + Suresh ka status (autonomous watchdog)")
 
     logs_p = sub.add_parser("logs", help="Filtered log tail")
     logs_p.add_argument("--filter", "-f", default="",
@@ -714,6 +787,8 @@ def main(argv: list[str] | None = None) -> int:
             cmd_logs(client, args)
         elif args.command == "tests":
             cmd_tests(client)
+        elif args.command == "mechanics":
+            cmd_mechanics(client)
         elif args.command == "fix":
             cmd_fix(client)
         elif args.command == "full-service":
