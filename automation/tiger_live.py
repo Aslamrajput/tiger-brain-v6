@@ -36,19 +36,29 @@ from automation.scheduler import (
     TigerBrainScheduler, get_day_mode, is_market_hours, is_opening_range_period,
     is_mcx_hours,
 )
-from data.loader import resolve_option_contract
+from data.loader import resolve_option_contract, OPTION_INSTRUMENT_TYPE
 from config.thresholds import AUTOMATION, MARKET_CATEGORIES
 
 
 def resolve_exchange_for_symbol(symbol: str) -> str:
-    """Symbol se exchange guess karo (MCX commodity vs NFO equity/index)."""
+    """Symbol se exchange resolve karo (MCX commodity vs NFO equity/index).
+
+    OPTION_INSTRUMENT_TYPE (data/loader.py) se authoritative lookup —
+    hardcoded set nahi, taaki naye MCX commodities (ALUMINIUM, MENTHAOIL,
+    etc) automatically detect ho jayein.
+    """
     if not symbol:
         return "NFO"
     upper = symbol.upper()
-    mcx_commodities = {"CRUDEOIL", "CRUDEOILM", "NATURALGAS", "NATGASMINI",
-                       "GOLD", "GOLDM", "SILVER", "SILVERM", "COPPER", "ZINC"}
-    if upper in mcx_commodities:
-        return "MCX"
+    # Authoritative: OPTION_INSTRUMENT_TYPE has exchange for every symbol
+    if upper in OPTION_INSTRUMENT_TYPE:
+        return OPTION_INSTRUMENT_TYPE[upper][1]
+    # MINI variants strip suffix pe parent symbol check
+    for suffix in ("M", "MINI"):
+        if upper.endswith(suffix):
+            parent = upper[:-len(suffix)]
+            if parent in OPTION_INSTRUMENT_TYPE:
+                return OPTION_INSTRUMENT_TYPE[parent][1]
     return "NFO"
 
 
@@ -304,11 +314,18 @@ class TigerLiveRunner:
                 exit_qty = qty
 
             # === EXIT ORDER PLACE ===
+            # Product type MUST match the entry order's product type.
+            # Agar position CARRYFORWARD (delivery) pe khuli thi, to exit
+            # bhi CARRYFORWARD hona chahiye — INTRADAY exit Angel reject
+            # karega (product type mismatch).
             if exit_reason:
+                pos_product = p.get("producttype", "INTRADAY")
+                if pos_product not in ("INTRADAY", "CARRYFORWARD"):
+                    pos_product = "INTRADAY"
                 result = self.broker.place_option_order(
                     tradingsymbol=tsym, symboltoken=token, exchange=exch,
                     transaction_type="SELL", quantity=exit_qty,
-                    product_type="INTRADAY", order_type="MARKET")
+                    product_type=pos_product, order_type="MARKET")
                 if result.get("success"):
                     closed += 1
                     logger.info(
@@ -741,18 +758,10 @@ class TigerLiveRunner:
             return 0
 
         closed_count = 0
-        today = datetime.now().date()
 
         for t in exit_trades:
             entry_ts = t.get("entry_ts")
             if entry_ts is None:
-                continue
-            try:
-                trade_date = entry_ts.date() if hasattr(entry_ts, 'date') else \
-                    pd.Timestamp(entry_ts).date()
-            except Exception:
-                continue
-            if trade_date != today:
                 continue
 
             symbol = t.get("symbol", "")
@@ -780,6 +789,13 @@ class TigerLiveRunner:
             if qty <= 0:
                 continue
 
+            # Product type MUST match the entry order's product type.
+            # Delivery (CARRYFORWARD) positions can be from a previous day —
+            # exit bhi CARRYFORWARD hona chahiye, INTRADAY se Angel reject karega.
+            pos_product = pos.get("producttype", "INTRADAY")
+            if pos_product not in ("INTRADAY", "CARRYFORWARD"):
+                pos_product = "INTRADAY"
+
             # Place SELL order to close
             result = self.broker.place_option_order(
                 tradingsymbol=tsym,
@@ -787,7 +803,7 @@ class TigerLiveRunner:
                 exchange=contract["exchange"],
                 transaction_type="SELL",
                 quantity=qty,
-                product_type="INTRADAY",
+                product_type=pos_product,
                 order_type="MARKET",
             )
 

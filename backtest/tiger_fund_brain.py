@@ -89,6 +89,10 @@ class FundPlan:
 TIER_CONFIG = {
     TIER_MICRO: {
         "risk_per_trade_pct": 3.0,       # aggressive — ₹10k me ₹300 risk
+        # 80% per trade when fully sure (user rule: 100% capital deployable).
+        # ⚠️ Micro tier: single option can lose 100% premium → 80% account
+        # wipeout on one trade. Risk accepted per user mandate — high-conviction
+        # sniper trades only. Stop-loss (60% of entry) caps actual loss.
         "max_capital_per_trade_pct": 80.0, # 80% per trade when fully sure
         "max_total_exposure_pct": 100.0,   # full capital deployable
         "max_trades_today": 2,             # few trades, high conviction

@@ -366,7 +366,11 @@ class AngelBroker:
             return []
 
     def square_off_all(self, exchange: str = None) -> int:
-        """Sab open INTRADAY positions close karta hai.
+        """Sab open positions close karta hai (intraday + delivery).
+
+        Product type position data se aata hai — delivery (CARRYFORWARD)
+        positions ko CARRYFORWARD se close karta hai, INTRADAY ko INTRADAY se.
+        Wrong product type se Angel One order reject karta hai.
 
         Args:
             exchange: None = sab positions. 'MCX' = sirf MCX.
@@ -386,13 +390,17 @@ class AngelBroker:
             # Exchange filter — sirf specified exchange ke positions
             if exchange and exch != exchange:
                 continue
+            # Product type position se — INTRADAY ya CARRYFORWARD
+            pos_product = p.get("producttype", "INTRADAY")
+            if pos_product not in ("INTRADAY", "CARRYFORWARD"):
+                pos_product = "INTRADAY"
             # Net long → SELL to close, net short → BUY to close
             close_side = "SELL" if qty > 0 else "BUY"
             close_qty = abs(qty)
             res = self.place_option_order(
                 tradingsymbol=sym, symboltoken=token, exchange=exch,
                 transaction_type=close_side, quantity=close_qty,
-                product_type="INTRADAY", order_type="MARKET",
+                product_type=pos_product, order_type="MARKET",
             )
             if res["success"]:
                 closed += 1
