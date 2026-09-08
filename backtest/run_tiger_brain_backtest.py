@@ -963,7 +963,8 @@ def volume_confirmed(df_1m, i_1m, zone_type) -> tuple[bool, str]:
 # ============================================================
 # SCORING ENTRY ENGINE — ALL 5 BRAINS AS SCORERS
 # ============================================================
-def find_tiger_brain_entry_15m(df_15m, i_15m, seg, is_expiry, symbol, vix_val):
+def find_tiger_brain_entry_15m(df_15m, i_15m, seg, is_expiry, symbol, vix_val,
+                                min_score=75.0, force_hunt=False):
     """15m-only entry path for symbols without 1m data (indexes, illiquid).
 
     Uses 15m bar for zone touch + momentum confirmation instead of 1m sniper.
@@ -1060,9 +1061,9 @@ def find_tiger_brain_entry_15m(df_15m, i_15m, seg, is_expiry, symbol, vix_val):
 
         # Relaxed rocket gate for 15m-only path
         is_rocket = confluence_count >= 3
-        if not is_rocket:
+        if not is_rocket and not force_hunt:
             continue
-        if score < ROCKET_MIN_SCORE - 6:  # relaxed by 6 for 15m-only
+        if score < min_score - 6:  # relaxed by 6 for 15m-only
             continue
 
         # Strike selection
@@ -1092,7 +1093,8 @@ def find_tiger_brain_entry_15m(df_15m, i_15m, seg, is_expiry, symbol, vix_val):
 
 
 def find_tiger_brain_entry(df_15m, i_15m, df_1m, seg, is_expiry, symbol,
-                           broker, pcr_cache, vix_val):
+                           broker, pcr_cache, vix_val,
+                           min_score=75.0, force_hunt=False):
     """
     Tiger Brain unified entry — scoring system, not gating.
 
@@ -1261,13 +1263,13 @@ def find_tiger_brain_entry(df_15m, i_15m, df_1m, seg, is_expiry, symbol,
                 is_rocket = False
 
             # === ROCKET GATE: only true rockets pass (50/100 filter) ===
-            if not is_rocket:
+            if not is_rocket and not force_hunt:
                 continue
-            if score < ROCKET_MIN_SCORE:
+            if score < min_score:
                 continue
 
             # === MINIMUM SCORE CHECK (legacy floor, now superseded by rocket gate) ===
-            if score < MIN_SCORE_TO_ENTER:
+            if score < min_score:
                 continue
 
             # --- Strike selection ---
@@ -1706,6 +1708,9 @@ def run_tiger_brain_backtest(data_map, start_capital=150000.0,
             if daily_entries_taken[sim_date] >= MAX_ENTRIES_PER_DAY:
                 continue
 
+            ts_ist = ts.tz_convert("Asia/Kolkata") if hasattr(ts, 'tz_convert') and ts.tz is not None else ts
+            ts_time = ts_ist.time() if hasattr(ts_ist, 'time') else ts.time()
+
             day_candidates = []
             for sym, df_sym in data_map.items():
                 if ts not in df_sym.index:
@@ -1726,10 +1731,22 @@ def run_tiger_brain_backtest(data_map, start_capital=150000.0,
 
                 expiry = use_sniper and is_expiry_day(sym, ts)
 
+                # === BRAIN 7: Session threshold + force hunt (PER SEGMENT) ===
+                cand_force_hunt = False
+                cand_min_score = ROCKET_MIN_SCORE
+                if use_session_brain and daily_hunt is not None:
+                    session_thresh = get_session_score_threshold(ts_time, seg)
+                    if session_thresh < 999:
+                        cand_min_score = min(cand_min_score, session_thresh)
+                    cand_force_hunt, fh_thresh, _ = should_force_hunt(ts_time, daily_hunt, seg)
+                    if cand_force_hunt:
+                        cand_min_score = min(cand_min_score, fh_thresh)
+
                 if use_sniper and data_map_1m and sym in data_map_1m:
                     setup = find_tiger_brain_entry(
                         df_sym, idx, data_map_1m[sym], seg, expiry, sym,
-                        broker, pcr_cache, vix_val)
+                        broker, pcr_cache, vix_val,
+                        min_score=cand_min_score, force_hunt=cand_force_hunt)
                     if setup is None:
                         filter_stats["rejected_low_score_or_volume"] += 1
                         continue
@@ -1738,7 +1755,8 @@ def run_tiger_brain_backtest(data_map, start_capital=150000.0,
                     # No 1m data for this symbol — try 15m-only entry
                     # (indexes often lack 1m data from Angel One)
                     setup = find_tiger_brain_entry_15m(
-                        df_sym, idx, seg, expiry, sym, vix_val)
+                        df_sym, idx, seg, expiry, sym, vix_val,
+                        min_score=cand_min_score, force_hunt=cand_force_hunt)
                     if setup is None:
                         continue
                     brain_log["entry_scored"] += 1
@@ -1748,6 +1766,8 @@ def run_tiger_brain_backtest(data_map, start_capital=150000.0,
                 day_candidates.append({
                     "symbol": sym, "setup": setup, "df_sym": df_sym,
                     "idx": idx, "ts": ts, "seg": seg, "expiry": expiry,
+                    "force_hunt": cand_force_hunt,
+                    "min_score": cand_min_score,
                 })
 
             day_candidates.sort(key=lambda c: c["setup"]["setup_score"], reverse=True)
@@ -1770,18 +1790,13 @@ def run_tiger_brain_backtest(data_map, start_capital=150000.0,
                 df_so_far = df_sym.loc[:ts]
                 is_call = setup["direction"] == "BUY"
 
-                # === BRAIN 7: Session-based score threshold + force hunt ===
-                ts_ist = ts.tz_convert("Asia/Kolkata") if hasattr(ts, 'tz_convert') else ts
-                ts_time = ts_ist.time() if hasattr(ts_ist, 'time') else ts.time()
-                force_hunt = False
-                adjusted_score_threshold = ROCKET_MIN_SCORE
-                if use_session_brain and daily_hunt is not None:
-                    session_thresh = get_session_score_threshold(ts_time, seg)
-                    if session_thresh < 999:
-                        adjusted_score_threshold = min(adjusted_score_threshold, session_thresh)
-                    force_hunt, fh_thresh, _ = should_force_hunt(ts_time, daily_hunt, seg)
-                    if force_hunt:
-                        adjusted_score_threshold = min(adjusted_score_threshold, fh_thresh)
+                # === BRAIN 7: Session threshold + force hunt (from candidate) ===
+                force_hunt = cand.get("force_hunt", False)
+                adjusted_score_threshold = cand.get("min_score", ROCKET_MIN_SCORE)
+
+                # Final score check — ensures force hunt / session threshold applied
+                if setup["setup_score"] < adjusted_score_threshold:
+                    continue
 
                 # === Strike selection + IV computation (must be before Brain 6) ===
                 strike_kind = setup.get("strike_kind", "ATM")

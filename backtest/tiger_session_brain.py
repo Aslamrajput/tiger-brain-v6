@@ -6,14 +6,19 @@ Tiger ka mode change karta hai. 9:15 AM se 11:30 PM tak Tiger
 ek 24-hour shikari ban jaata hai.
 
 MARKET TIMELINE (Indian Standard Time):
+  9:00-17:00    → COMMODITY DAY     (MCX open all day alongside NSE!)
   9:15-10:30   → MORNING BURST    (index+stock, aggressive opening momentum)
   10:30-13:00  → TREND HUNT       (stock zones, steady quality picks)
   13:00-14:30  → DISCOUNT BUY     (cheap premium accumulation — KEY window!)
   14:30-15:15  → POWER HOUR       (max aggression, ride explosions)
-  15:15-17:00  → TRANSITION       (NSE closed, MCX warming up)
-  17:00-20:00  → COMMODITY OPEN   (MCX crude/gold/silver start)
+  15:15-17:00  → TRANSITION       (NSE closed, MCX continues)
+  17:00-20:00  → COMMODITY OPEN   (MCX crude/gold/silver evening)
   20:00-23:00  → NIGHT RUSH       (international session, biggest commodity moves)
   23:00-23:15  → SQUARE OFF       (close all MCX intraday)
+
+NSE: 9:15-15:30 (equity + index options)
+MCX: 9:00-23:30 (commodity options — GOLD, SILVER, CRUDEOIL, NATURALGAS)
+Both markets overlap 9:15-15:30 — Tiger hunts BOTH simultaneously!
 
 Each session has different parameters:
   - Aggressiveness (score threshold, trade quota)
@@ -44,6 +49,7 @@ SESSION_MORNING_BURST = "MORNING_BURST"
 SESSION_TREND_HUNT = "TREND_HUNT"
 SESSION_DISCOUNT_BUY = "DISCOUNT_BUY"
 SESSION_POWER_HOUR = "POWER_HOUR"
+SESSION_COMMODITY_DAY = "COMMODITY_DAY"
 SESSION_COMMODITY_OPEN = "COMMODITY_OPEN"
 SESSION_NIGHT_RUSH = "NIGHT_RUSH"
 SESSION_SQUARE_OFF = "SQUARE_OFF"
@@ -149,6 +155,25 @@ SESSION_SCHEDULE: list[SessionConfig] = [
         ],
     ),
     SessionConfig(
+        name=SESSION_COMMODITY_DAY,
+        label="🛢️ COMMODITY DAY",
+        time_start=time(9, 0),
+        time_end=time(17, 0),
+        segment_focus="mcx",
+        score_threshold=76.0,
+        max_trades_this_session=5,
+        capital_allocation_pct=40.0,
+        preferred_strike="ATM",
+        aggressiveness="MEDIUM",
+        description="MCX morning+afternoon — gold/silver/crude trade alongside NSE",
+        notes=[
+            "MCX open 09:00-23:30 — trade commodities ALL DAY",
+            "If NSE signals weak, hunt in MCX simultaneously",
+            "ATM strikes — commodity premiums fair",
+            "NSE flat day? Tiger hunts commodities instead!",
+        ],
+    ),
+    SessionConfig(
         name=SESSION_COMMODITY_OPEN,
         label="🛢️ COMMODITY OPEN",
         time_start=time(17, 0),
@@ -220,19 +245,12 @@ def get_current_session(t: time, segment: str = "nse") -> SessionConfig | None:
     for session in SESSION_SCHEDULE:
         if not session.is_active(t):
             continue
-        # Filter by segment
-        if segment == "mcx" and session.segment_focus == "nse":
-            # MCX trades in morning too (9:00-11:30), but our NSE sessions
-            # overlap. For MCX in morning, use COMMODITY_OPEN params.
-            if session.name in (SESSION_MORNING_BURST, SESSION_TREND_HUNT,
-                                SESSION_DISCOUNT_BUY, SESSION_POWER_HOUR):
-                # MCX morning = treat as commodity open
-                continue
+        # NSE only gets nse-focused sessions
         if segment == "nse" and session.segment_focus == "mcx":
-            # NSE is closed during MCX evening sessions
-            if session.name in (SESSION_COMMODITY_OPEN, SESSION_NIGHT_RUSH,
-                                SESSION_SQUARE_OFF):
-                continue
+            continue
+        # MCX only gets mcx-focused sessions
+        if segment == "mcx" and session.segment_focus == "nse":
+            continue
         return session
 
     # Off-hours
