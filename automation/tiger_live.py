@@ -153,12 +153,15 @@ class TigerLiveRunner:
             logger.error("❌ Instrument master fail: %s", exc)
 
         # 2b. REAL account balance — Angel One se fetch
+        # ❗ ₹10,000 fallback HATA DIYA. Balance nahi mila to account_capital=0,
+        # backtest simulation ₹10,000 se chalegi (scan ke liye) LEKIN real
+        # orders place nahi honge (_place_live_orders me get_balance() fail = return 0).
         try:
             self.account_capital = self.broker.get_balance()
             if self.account_capital <= 0:
                 logger.warning("⚠️ Balance ₹0 — rmsLimit() fail. "
-                               "Fallback ₹10,000.")
-                self.account_capital = 10000.0
+                               "Real orders BANDH. Scan simulation ₹10,000 se.")
+                self.account_capital = 0.0
             self.capital_start = self.account_capital
             self.capital_after_entry = self.account_capital
             self.capital_after_exit = self.account_capital
@@ -166,8 +169,8 @@ class TigerLiveRunner:
                         self.account_capital)
             logger.info("💰 Capital lifecycle START: ₹%.0f", self.capital_start)
         except Exception as exc:
-            logger.error("❌ Balance fetch fail: %s — fallback ₹10,000", exc)
-            self.account_capital = 10000.0
+            logger.error("❌ Balance fetch fail: %s — real orders BANDH.", exc)
+            self.account_capital = 0.0
 
         # 3. Fetch fresh data
         try:
@@ -361,7 +364,13 @@ class TigerLiveRunner:
 
         try:
             from backtest.run_tiger_brain_backtest import run_tiger_brain_backtest
+            # Real balance → backtest simulation capital. Agar balance 0
+            # (fetch fail) to simulation ₹10,000 se chalegi — LEKIN real
+            # orders _place_live_orders me get_balance() se check honge.
             capital = self.account_capital if self.account_capital > 0 else 10000.0
+            if self.account_capital <= 0:
+                logger.warning("⚠️ Simulation ₹10,000 se — real balance nahi mila. "
+                               "Real orders BANDH (capital check fail).")
             combined = run_tiger_brain_backtest(
                 self.data_map, start_capital=capital,
                 data_map_1m=self.data_map_1m if self.data_map_1m else None,
@@ -414,10 +423,13 @@ class TigerLiveRunner:
         now = datetime.now()
 
         # Step 1: Real balance fetch (har scan pe fresh)
+        # ❗ FAIL = NO orders. ₹10,000 fallback HATA DIYA — Tiger galat
+        # balance se order place na kare. Balance nahi mila to band.
         try:
             available_balance = self.broker.get_balance()
-        except Exception:
-            available_balance = self.account_capital
+        except Exception as exc:
+            logger.error("❌ Balance fetch FAIL — koi order nahi: %s", exc)
+            return 0
         if available_balance <= 0:
             logger.warning("⚠️ Balance ₹0 — koi order nahi place hoga.")
             return 0
@@ -426,20 +438,37 @@ class TigerLiveRunner:
         if self.capital_after_exit > 0:
             available_balance = max(available_balance, self.capital_after_exit)
 
-        # 3 PM cutoff check — 3:00 PM ke baad NO new NSE/equity intraday
-        # entries. MCX commodity entries EXEMPT (evening session 17:00-23:30).
+        # NSE hard cutoff — 15:30 (MARKET_CLOSE_TIME) ke baad NSE ka KOI
+        # order nahi (intraday ya delivery — kuch bhi nahi). Sirf MCX
+        # commodity allowed (MCX 09:00-23:30 chalta hai).
+        # 15:00-15:30 beech: NSE delivery allowed, intraday bandh (strategy).
+        nse_close_str = AUTOMATION.get("MARKET_CLOSE_TIME", "15:30")
+        nse_close_h, nse_close_m = map(int, nse_close_str.split(":"))
+        nse_hard_cutoff = now.replace(
+            hour=nse_close_h, minute=nse_close_m, second=0, microsecond=0)
+        is_nse_closed = now >= nse_hard_cutoff
+
+        # Intraday strategy cutoff — 15:00 ke baad naya intraday bandh,
+        # sirf delivery + MCX.
         cutoff_str = AUTOMATION.get("INTRADAY_ENTRY_CUTOFF_TIME", "15:00")
         cutoff_h, cutoff_m = map(int, cutoff_str.split(":"))
         intraday_cutoff = now.replace(hour=cutoff_h, minute=cutoff_m,
                                       second=0, microsecond=0)
-        is_after_cutoff = now >= intraday_cutoff
+        is_after_intraday_cutoff = now >= intraday_cutoff
 
-        if is_after_cutoff:
+        if is_nse_closed:
+            logger.info("=" * 60)
+            logger.info("🌙 NSE BANDH (15:30) — sirf MCX commodity allowed. "
+                        "NSE ka koi order nahi (intraday/delivery dono bandh).")
+            logger.info("💰 Available balance: ₹%.0f", available_balance)
+            logger.info("=" * 60)
+        elif is_after_intraday_cutoff:
             logger.info("=" * 60)
             logger.info("⏰ 3 PM CUTOFF — NSE intraday bandh. "
-                        "MCX commodity entries EXEMPT (evening session). "
-                        "Sirf profit booking (exits) for NSE.")
+                        "Sirf NSE delivery + MCX commodity allowed.")
             logger.info("💰 Available balance: ₹%.0f", available_balance)
+            logger.info("💰 Capital lifecycle: START ₹%.0f → now ₹%.0f",
+                        self.capital_start, available_balance)
             logger.info("=" * 60)
         else:
             logger.info("=" * 60)
@@ -468,14 +497,20 @@ class TigerLiveRunner:
             quantity = t.get("quantity", 0)
             is_delivery = t.get("is_delivery", False)
 
-            # 3 PM cutoff: NSE/equity intraday bandh after 3PM.
-            # MCX commodity EXEMPT — evening session (17:00-23:30) entries allowed.
+            # NSE hard cutoff: 15:30 ke baad NSE ka KOI order nahi
+            # (intraday ya delivery — dono bandh). Sirf MCX commodity.
+            # 15:00-15:30: NSE delivery allowed, intraday bandh.
             is_mcx_commodity = MARKET_CATEGORIES.get(
                 resolve_exchange_for_symbol(symbol), "") == "commodity"
-            if is_after_cutoff and not is_delivery and not is_mcx_commodity:
+            if is_nse_closed and not is_mcx_commodity:
+                logger.info(
+                    f"   🌙 SKIP {symbol} {strike}{option_type} — "
+                    f"NSE bandh (15:30), sirf MCX commodity allowed")
+                continue
+            if is_after_intraday_cutoff and not is_delivery and not is_mcx_commodity:
                 logger.info(
                     f"   ⏰ SKIP {symbol} {strike}{option_type} — "
-                    f"NSE intraday bandh after 3PM, sirf profit booking")
+                    f"NSE intraday bandh after 3PM, sirf delivery/MCX")
                 continue
 
             # Duplicate check
