@@ -68,20 +68,40 @@ def is_market_hours(check_time: datetime = None) -> bool:
     Market open/close time ke beech hai ya nahi (sirf trading days pe
     meaningful hai — caller ko pehle is_trading_day() check karna chahiye).
 
+    NSE (equity/index) 09:15-15:30, MCX (commodity) 09:00-23:30.
+    Agar NSE YA MCX koi bhi open hai → True (Tiger scan karega).
+
     ⚠️ NOTE: Market holidays (Diwali, Republic Day, etc.) is function mein
     check NAHI hote — sirf weekday logic hai. Holiday calendar ek alag
     concern hai jo Phase 2/3 mein NSE holiday list se add karna hoga.
     """
     check_time = check_time or datetime.now()
-
-    open_h, open_m = map(int, AUTOMATION["MARKET_OPEN_TIME"].split(":"))
-    close_h, close_m = map(int, AUTOMATION["MARKET_CLOSE_TIME"].split(":"))
-
-    market_open = time(open_h, open_m)
-    market_close = time(close_h, close_m)
     current = check_time.time()
 
-    return market_open <= current <= market_close
+    # NSE session
+    nse_open_h, nse_open_m = map(int, AUTOMATION["MARKET_OPEN_TIME"].split(":"))
+    nse_close_h, nse_close_m = map(int, AUTOMATION["MARKET_CLOSE_TIME"].split(":"))
+    nse_open = time(nse_open_h, nse_open_m)
+    nse_close = time(nse_close_h, nse_close_m)
+
+    # MCX session (09:00-23:30 — evening session included)
+    mcx_open_h, mcx_open_m = map(int, AUTOMATION["MCX_OPEN_TIME"].split(":"))
+    mcx_close_h, mcx_close_m = map(int, AUTOMATION["MCX_CLOSE_TIME"].split(":"))
+    mcx_open = time(mcx_open_h, mcx_open_m)
+    mcx_close = time(mcx_close_h, mcx_close_m)
+
+    nse_active = nse_open <= current <= nse_close
+    mcx_active = mcx_open <= current <= mcx_close
+    return nse_active or mcx_active
+
+
+def is_mcx_hours(check_time: datetime = None) -> bool:
+    """MCX commodity session active hai? (09:00-23:30)."""
+    check_time = check_time or datetime.now()
+    current = check_time.time()
+    open_h, open_m = map(int, AUTOMATION["MCX_OPEN_TIME"].split(":"))
+    close_h, close_m = map(int, AUTOMATION["MCX_CLOSE_TIME"].split(":"))
+    return time(open_h, open_m) <= current <= time(close_h, close_m)
 
 
 def is_opening_range_period(check_time: datetime = None) -> bool:

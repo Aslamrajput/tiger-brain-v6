@@ -151,7 +151,7 @@ META_BRAIN_WEIGHTS = {
     },
 }
 
-DECISION_SCORE_THRESHOLD = 65
+DECISION_SCORE_THRESHOLD = 72
 
 # Meta-Brain ka score sab weights ka weighted average hai. Agar koi
 # sub-brain data hi na hone ki wajah se chup hai (jaise Vol-Arb bina IV
@@ -168,12 +168,12 @@ PIPELINE = {
     "STAGE1_MIN_CONFIDENCE": 50,
     "STAGE2_MIN_CONFIDENCE": 50,
     "STAGE2_MAX_DIVERGENCE_FROM_STAGE1": 20,
-    "STAGE3_MIN_CONFIDENCE": 65,
+    "STAGE3_MIN_CONFIDENCE": 72,
     "STAGE4_TIE_BREAK_SCORE_DIFF": 5,
 }
 
 RISK = {
-    "MAX_RISK_PER_TRADE_PCT": 2.5,
+    "MAX_RISK_PER_TRADE_PCT": 2.0,
     "DAILY_MAX_LOSS_PCT": 5.5,
     "MAX_CONSECUTIVE_LOSSES": 3,
     "CONSECUTIVE_LOSS_PAUSE_MINUTES": 35,
@@ -218,9 +218,15 @@ AUTOMATION = {
     "MARKET_OPEN_TIME": "09:15",
     "OPENING_RANGE_WAIT_MINUTES": VOLUME["OPENING_RANGE_MINUTES"],
     "MARKET_CLOSE_TIME": "15:30",
+    # MCX (commodity) session — 09:00 to 23:30 (evening session till late night).
+    # Tiger scans MCX separately so the evening US/Europe volatility window
+    # (17:00-23:30) is not missed after NSE closes at 15:30.
+    "MCX_OPEN_TIME": "09:00",
+    "MCX_CLOSE_TIME": "23:30",
     "NIGHTLY_REPLAY_TIME": "00:00",
-    # Intraday entry cutoff — 3:00 PM ke baad NO new intraday orders,
-    # sirf profit booking (exits). Delivery orders 3:00 pe lagte hain.
+    # Intraday entry cutoff — 3:00 PM ke baad NO new NSE/equity intraday
+    # orders, sirf profit booking (exits). MCX commodity entries EXEMPT
+    # (MCX evening session 17:00-23:30 continues).
     "INTRADAY_ENTRY_CUTOFF_TIME": "15:00",
     # Delivery snapshot time — 3:00 PM pe Tiger next-day direction decide
     # karke delivery (overnight) orders lagata hai.
@@ -319,8 +325,9 @@ BRAIN4 = {
     # Full capital deployable across trades (Angel One balance = 100% trading money).
     "MAX_TOTAL_EXPOSURE_PCT": 100.0,
     # Confidence-based sizing — high score = more capital allocated.
+    # Tiger tbhi jab pura sure hai tab 80%+ capital use karta hai.
     "CONFIDENCE_TIER_ROCKET_MIN": 90,   # 90+ score → 100% allocatable
-    "CONFIDENCE_TIER_STRONG_MIN": 80,   # 80-89 score → 80% allocatable
+    "CONFIDENCE_TIER_STRONG_MIN": 80,   # 80-89 score → 80% allocatable (fully sure)
     "CONFIDENCE_TIER_DECENT_MIN": 75,   # 75-79 score → 60% allocatable
     "CONFIDENCE_ROCKET_PCT": 100.0,
     "CONFIDENCE_STRONG_PCT": 80.0,

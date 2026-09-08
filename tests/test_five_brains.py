@@ -412,6 +412,10 @@ class FakeSmartApi:
 class FakeBroker:
     def __init__(self, cash):
         self.smart_api = FakeSmartApi(cash)
+        self._cash = cash
+
+    def get_balance(self):
+        return self._cash
 
 
 class TestPositionSizer:
@@ -423,6 +427,8 @@ class TestPositionSizer:
     def test_broker_fail_no_fallback_blocks(self):
         class BadBroker:
             smart_api = None
+            def get_balance(self):
+                return 0.0
 
         info = get_available_capital(BadBroker())
         assert info["available_capital"] is None

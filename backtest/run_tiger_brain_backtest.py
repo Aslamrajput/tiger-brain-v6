@@ -63,6 +63,7 @@ sys.path.insert(0, ".")
 from broker.angel_connect import AngelBroker
 from data.loader import (
     fetch_angel_historical_candles,
+    fetch_angel_underlying_candles,
     fetch_india_vix_history,
     find_symbol_token,
     load_angel_instrument_master,
@@ -161,10 +162,10 @@ def compute_iv(df_so_far, vix_val, symbol, is_call, strike, underlying):
 # ============================================================
 # V19 EXIT ENGINE — tighter trail + fixed target booking
 # ============================================================
-V19_TRAIL_ACTIVATE_PCT = 20.0   # activate trail at +20% (was 30%)
-V19_TRAIL_LOCK_PCT = 65.0       # lock 65% of peak (was 55% — gives back less)
-V19_FIXED_TARGET_PCT = 100.0    # book 50% at +100% (2x), ride rest
-V19_FIXED_TARGET_BOOK = 0.5     # book 50% of position at target
+V19_TRAIL_ACTIVATE_PCT = 5.0    # activate trail at +5% (har trade — profit jaldi lock)
+V19_TRAIL_LOCK_PCT = 70.0       # lock 70% of peak (was 65% — gives back only 30%)
+V19_FIXED_TARGET_PCT = 50.0     # book 40% at +50% (was +100% — book profit sooner)
+V19_FIXED_TARGET_BOOK = 0.40    # book 40% of position at target (ride 60%)
 V19_RUNAWAY_EXIT_PCT = 250.0    # absolute safety exit
 
 # SMART SQUARE-OFF (V19+) — don't blindly close profitable trades.
@@ -194,9 +195,9 @@ def check_intraday_exit_v19(pos, cur_underlying, cur_premium, is_square_off_bar,
     """V19 exit engine — tighter trailing + fixed target booking.
 
     Improvements over V6.6:
-      1. Trail activates at +20% (not +30%) — locks profit sooner
-      2. Trail locks 65% of peak (not 55%) — gives back 15% less
-      3. Fixed target at +100%: books 50% of position, rides rest
+      1. Trail activates at +5% (har trade — profit jaldi lock)
+      2. Trail locks 70% of peak (not 55%) — gives back 15% less
+      3. Fixed target at +50%: books 40% of position, rides rest
       4. Runaway safety at +250% (unchanged)
       5. SMART SQUARE-OFF (V19+): in the 15-min pre-sqoff window, profitable
          trades with active trail get a TIGHTER trail (80% lock) so they
@@ -209,8 +210,8 @@ def check_intraday_exit_v19(pos, cur_underlying, cur_premium, is_square_off_bar,
     gain_pct = (cur_premium - pos["entry_premium"]) / pos["entry_premium"] * 100
 
     # 1. SMART PRE-SQUARE-OFF TRAIL — exit profitable trades before blind close.
-    # Only applies inside the pre-sqoff window, only to trail-active (>=+20%)
-    # trades. Tighter 80% lock vs normal 65% → locks profit faster.
+    # Only applies inside the pre-sqoff window, only to trail-active (>=+5%)
+    # trades. Tighter 80% lock vs normal 70% → locks profit faster.
     if ts is not None and _in_pre_square_off_window(ts, segment) \
             and gain_pct >= V19_TRAIL_ACTIVATE_PCT:
         peak = max(pos.get("peak_premium", cur_premium), cur_premium)
@@ -221,7 +222,7 @@ def check_intraday_exit_v19(pos, cur_underlying, cur_premium, is_square_off_bar,
                     "exit_premium": max(cur_premium, 0.5)}
 
     # 2. SQUARE-OFF — but NOT blind anymore.
-    #    Big winners (>=+20%) already exited above. Here we force-close
+    #    Big winners (>=+5%) already exited above. Here we force-close
     #    only LOSS / small-profit trades (trail not active = no protection).
     if is_square_off_bar:
         if gain_pct >= V19_TRAIL_ACTIVATE_PCT:
@@ -254,17 +255,17 @@ def check_intraday_exit_v19(pos, cur_underlying, cur_premium, is_square_off_bar,
         return {"exit": True, "reason": "fixed_target_100pct_book50",
                 "exit_premium": cur_premium}
 
-    # 6. Dynamic trail — activates at +20% (tighter than V6.6's +30%)
+    # 6. Dynamic trail — activates at +5% (har trade — profit jaldi lock)
     if gain_pct >= V19_TRAIL_ACTIVATE_PCT:
         peak = max(pos.get("peak_premium", cur_premium), cur_premium)
         peak_gain = (peak - pos["entry_premium"]) / pos["entry_premium"]
         trail_floor = pos["entry_premium"] * (1 + peak_gain * V19_TRAIL_LOCK_PCT / 100)
         if cur_premium <= trail_floor:
-            return {"exit": True, "reason": "v19_trail_lock_65pct",
+            return {"exit": True, "reason": "v19_trail_lock_70pct",
                     "exit_premium": max(cur_premium, 0.5)}
 
-    # 7. 1m exhaustion (only after +15% gain, same as V6.6)
-    if df_1m is not None and i_1m is not None and gain_pct >= 15.0:
+    # 7. 1m exhaustion (only after +5% gain — micro exhaustion pattern)
+    if df_1m is not None and i_1m is not None and gain_pct >= V19_TRAIL_ACTIVATE_PCT:
         exhausted, why = one_min_exhaustion(df_1m, i_1m, pos["direction"])
         if exhausted:
             return {"exit": True, "reason": f"1m_exhaustion:{why}",
@@ -337,7 +338,7 @@ PDH_PDL_TOLERANCE_PCT = 0.5
 # Identifies setups with explosive 2-3 day rocket potential.
 # Only the top 50/100 setups pass — sniper quality, bumper P&L.
 # ============================================================
-ROCKET_MIN_SCORE = 72        # relaxed from 78 — more entries while keeping quality
+ROCKET_MIN_SCORE = 75        # tightened — sirf high-confidence blast trades (was 72)
 ROCKET_MIN_CONFLUENCES = 3   # relaxed from 4 — one less confirmation needed
 ROCKET_MIN_FUEL = 1          # need 1+ rocket-fuel signal (sweep/compression/2.5x spike/momentum)
 ROCKET_MOMENTUM_MIN = 2.0    # delta spike must be 2x+ for rocket fuel
@@ -962,7 +963,8 @@ def volume_confirmed(df_1m, i_1m, zone_type) -> tuple[bool, str]:
 # ============================================================
 # SCORING ENTRY ENGINE — ALL 5 BRAINS AS SCORERS
 # ============================================================
-def find_tiger_brain_entry_15m(df_15m, i_15m, seg, is_expiry, symbol, vix_val):
+def find_tiger_brain_entry_15m(df_15m, i_15m, seg, is_expiry, symbol, vix_val,
+                                min_score=75.0, force_hunt=False):
     """15m-only entry path for symbols without 1m data (indexes, illiquid).
 
     Uses 15m bar for zone touch + momentum confirmation instead of 1m sniper.
@@ -1059,9 +1061,9 @@ def find_tiger_brain_entry_15m(df_15m, i_15m, seg, is_expiry, symbol, vix_val):
 
         # Relaxed rocket gate for 15m-only path
         is_rocket = confluence_count >= 3
-        if not is_rocket:
+        if not is_rocket and not force_hunt:
             continue
-        if score < ROCKET_MIN_SCORE - 6:  # relaxed by 6 for 15m-only
+        if score < min_score - 6:  # relaxed by 6 for 15m-only
             continue
 
         # Strike selection
@@ -1091,7 +1093,8 @@ def find_tiger_brain_entry_15m(df_15m, i_15m, seg, is_expiry, symbol, vix_val):
 
 
 def find_tiger_brain_entry(df_15m, i_15m, df_1m, seg, is_expiry, symbol,
-                           broker, pcr_cache, vix_val):
+                           broker, pcr_cache, vix_val,
+                           min_score=75.0, force_hunt=False):
     """
     Tiger Brain unified entry — scoring system, not gating.
 
@@ -1260,13 +1263,13 @@ def find_tiger_brain_entry(df_15m, i_15m, df_1m, seg, is_expiry, symbol,
                 is_rocket = False
 
             # === ROCKET GATE: only true rockets pass (50/100 filter) ===
-            if not is_rocket:
+            if not is_rocket and not force_hunt:
                 continue
-            if score < ROCKET_MIN_SCORE:
+            if score < min_score:
                 continue
 
             # === MINIMUM SCORE CHECK (legacy floor, now superseded by rocket gate) ===
-            if score < MIN_SCORE_TO_ENTER:
+            if score < min_score:
                 continue
 
             # --- Strike selection ---
@@ -1474,27 +1477,49 @@ def fetch_yfinance_fallback(symbol, ticker, days_15m=365, days_1m=90):
 def fetch_angel_data(broker, days_15m=365, days_1m=90, use_scan_universe=False):
     """Fetch 15m (1 year) + 1m (max available) historical candles.
 
-    NSE symbols use Angel One (broker data, accurate).
-    MCX commodities use yfinance fallback (US futures proxy, IST-converted)
-    when Angel One token resolution fails.
+    PRIMARY: Angel One real historical candles (accurate market data).
+    FALLBACK: yfinance (US futures proxy, IST-converted) — sirf tab jab
+    Angel One fail ho (rate limit, token resolve fail, etc).
 
     Args:
         use_scan_universe: if True, scan full 150+ F&O universe (Tiger V16).
             if False, use default 40-symbol trading universe.
     """
-    from universe.fno_universe import COMMODITY_SYMBOLS, scan_universe
+    from universe.fno_universe import scan_universe
     to_date = datetime.now().replace(hour=15, minute=30, second=0, microsecond=0)
     from_15m = to_date - timedelta(days=days_15m)
     from_1m = to_date - timedelta(days=days_1m)
     data_map, data_map_1m = {}, {}
     failed = []
     yf_used = []
+    angel_used = []
     syms = scan_universe() if use_scan_universe else all_symbols()
     total = len(syms)
     for idx, (sym, ticker) in enumerate(syms.items(), 1):
         tag = f"[{idx}/{total}] {sym}"
-        # Rate-limit-safe: yfinance se historical data lo (free, fast, no limit)
-        # Angel One sirf login + live order placement ke liye
+
+        # PRIMARY: Angel One se real historical candles
+        if broker is not None and broker.smart_api is not None:
+            try:
+                time.sleep(0.4)  # rate-limit guard: 15m call se pehle
+                d15 = fetch_angel_underlying_candles(
+                    broker, sym, "FIFTEEN_MINUTE", days=days_15m)
+                time.sleep(0.4)  # rate-limit guard: 1m call se pehle (15m+1m burst roko)
+                d1 = fetch_angel_underlying_candles(
+                    broker, sym, "ONE_MINUTE", days=days_1m)
+                if d15 is not None and not d15.empty:
+                    d15 = _normalize_cols(d15)
+                    data_map[sym] = d15
+                    if d1 is not None and not d1.empty:
+                        d1 = _normalize_cols(d1)
+                        data_map_1m[sym] = d1
+                    angel_used.append(sym)
+                    print(f"  {tag:30s}: 15m={len(d15):5d}  1m={len(data_map_1m.get(sym, [])):5d}  [ANGEL]")
+                    continue
+            except Exception as exc:
+                logger.warning(f"{tag}: Angel fetch fail — yfinance fallback: {exc}")
+
+        # FALLBACK: yfinance (sirf agar Angel One fail hua)
         try:
             d15, d1 = fetch_yfinance_fallback(sym, ticker, days_15m, days_1m)
             if d15 is not None and not d15.empty:
@@ -1511,8 +1536,10 @@ def fetch_angel_data(broker, days_15m=365, days_1m=90, use_scan_universe=False):
             logger.error(f"{tag}: yfinance error: {exc}")
             failed.append(sym)
             continue
+    if angel_used:
+        print(f"\n  Angel One data used for: {len(angel_used)} symbols")
     if yf_used:
-        print(f"\n  yfinance fallback used for: {yf_used}")
+        print(f"  yfinance fallback used for: {yf_used}")
     print(f"\nFailed: {failed}")
     print(f"Universe: 15m={len(data_map)}  1m={len(data_map_1m)}")
     return data_map, data_map_1m, failed
@@ -1681,6 +1708,9 @@ def run_tiger_brain_backtest(data_map, start_capital=150000.0,
             if daily_entries_taken[sim_date] >= MAX_ENTRIES_PER_DAY:
                 continue
 
+            ts_ist = ts.tz_convert("Asia/Kolkata") if hasattr(ts, 'tz_convert') and ts.tz is not None else ts
+            ts_time = ts_ist.time() if hasattr(ts_ist, 'time') else ts.time()
+
             day_candidates = []
             for sym, df_sym in data_map.items():
                 if ts not in df_sym.index:
@@ -1701,10 +1731,22 @@ def run_tiger_brain_backtest(data_map, start_capital=150000.0,
 
                 expiry = use_sniper and is_expiry_day(sym, ts)
 
+                # === BRAIN 7: Session threshold + force hunt (PER SEGMENT) ===
+                cand_force_hunt = False
+                cand_min_score = ROCKET_MIN_SCORE
+                if use_session_brain and daily_hunt is not None:
+                    session_thresh = get_session_score_threshold(ts_time, seg)
+                    if session_thresh < 999:
+                        cand_min_score = min(cand_min_score, session_thresh)
+                    cand_force_hunt, fh_thresh, _ = should_force_hunt(ts_time, daily_hunt, seg)
+                    if cand_force_hunt:
+                        cand_min_score = min(cand_min_score, fh_thresh)
+
                 if use_sniper and data_map_1m and sym in data_map_1m:
                     setup = find_tiger_brain_entry(
                         df_sym, idx, data_map_1m[sym], seg, expiry, sym,
-                        broker, pcr_cache, vix_val)
+                        broker, pcr_cache, vix_val,
+                        min_score=cand_min_score, force_hunt=cand_force_hunt)
                     if setup is None:
                         filter_stats["rejected_low_score_or_volume"] += 1
                         continue
@@ -1713,7 +1755,8 @@ def run_tiger_brain_backtest(data_map, start_capital=150000.0,
                     # No 1m data for this symbol — try 15m-only entry
                     # (indexes often lack 1m data from Angel One)
                     setup = find_tiger_brain_entry_15m(
-                        df_sym, idx, seg, expiry, sym, vix_val)
+                        df_sym, idx, seg, expiry, sym, vix_val,
+                        min_score=cand_min_score, force_hunt=cand_force_hunt)
                     if setup is None:
                         continue
                     brain_log["entry_scored"] += 1
@@ -1723,6 +1766,8 @@ def run_tiger_brain_backtest(data_map, start_capital=150000.0,
                 day_candidates.append({
                     "symbol": sym, "setup": setup, "df_sym": df_sym,
                     "idx": idx, "ts": ts, "seg": seg, "expiry": expiry,
+                    "force_hunt": cand_force_hunt,
+                    "min_score": cand_min_score,
                 })
 
             day_candidates.sort(key=lambda c: c["setup"]["setup_score"], reverse=True)
@@ -1745,18 +1790,13 @@ def run_tiger_brain_backtest(data_map, start_capital=150000.0,
                 df_so_far = df_sym.loc[:ts]
                 is_call = setup["direction"] == "BUY"
 
-                # === BRAIN 7: Session-based score threshold + force hunt ===
-                ts_ist = ts.tz_convert("Asia/Kolkata") if hasattr(ts, 'tz_convert') else ts
-                ts_time = ts_ist.time() if hasattr(ts_ist, 'time') else ts.time()
-                force_hunt = False
-                adjusted_score_threshold = ROCKET_MIN_SCORE
-                if use_session_brain and daily_hunt is not None:
-                    session_thresh = get_session_score_threshold(ts_time, seg)
-                    if session_thresh < 999:
-                        adjusted_score_threshold = min(adjusted_score_threshold, session_thresh)
-                    force_hunt, fh_thresh, _ = should_force_hunt(ts_time, daily_hunt, seg)
-                    if force_hunt:
-                        adjusted_score_threshold = min(adjusted_score_threshold, fh_thresh)
+                # === BRAIN 7: Session threshold + force hunt (from candidate) ===
+                force_hunt = cand.get("force_hunt", False)
+                adjusted_score_threshold = cand.get("min_score", ROCKET_MIN_SCORE)
+
+                # Final score check — ensures force hunt / session threshold applied
+                if setup["setup_score"] < adjusted_score_threshold:
+                    continue
 
                 # === Strike selection + IV computation (must be before Brain 6) ===
                 strike_kind = setup.get("strike_kind", "ATM")

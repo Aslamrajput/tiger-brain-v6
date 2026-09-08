@@ -350,12 +350,16 @@ ANGEL_INTERVAL_MAX_DAYS = {
 # "Access denied because of exceeding access rate" bhejta hai). Chunked
 # download mein ye error aana normal hai, isliye har chunk ke beech ruko
 # aur rate-limit wale error pe badhte hue intezaar ke saath retry karo.
-ANGEL_CHUNK_PAUSE_SEC = 3.0
-ANGEL_MAX_RETRIES = 5
-ANGEL_RETRY_BACKOFF_SEC = 5.0
+# NOTE: retries kam (2) aur backoff chhota (2s) rakha gaya hai taaki
+# rate-limit hit hone par symbol jaldi yfinance fallback pe chale —
+# 75s retry backoff ke bajaye 6s me fail ho jaaye.
+ANGEL_CHUNK_PAUSE_SEC = 1.0
+ANGEL_MAX_RETRIES = 2
+ANGEL_RETRY_BACKOFF_SEC = 2.0
 
 _RATE_LIMIT_MARKERS = (
     "access rate", "rate limit", "exceeding access", "too many request",
+    "too many requests", "ab1021",
 )
 
 
@@ -532,6 +536,8 @@ def fetch_angel_ltp(broker, exchange: str, tradingsymbol: str, symboltoken: str)
 INDEX_UNDERLYING_TOKENS = {
     # Spot index token (LTP/candles ke liye — Section 4 mein already use ho raha)
     "NIFTY": "99926000",
+    "BANKNIFTY": "99926009",
+    "FINNIFTY": "99926037",
 }
 
 
@@ -543,10 +549,105 @@ OPTION_INSTRUMENT_TYPE = {
     "BANKNIFTY": ("OPTIDX", "NFO"),
     "FINNIFTY": ("OPTIDX", "NFO"),
     "CRUDEOIL": ("OPTFUT", "MCX"),
+    "CRUDEOILM": ("OPTFUT", "MCX"),
     "NATURALGAS": ("OPTFUT", "MCX"),
+    "NATGASMINI": ("OPTFUT", "MCX"),
     "GOLD": ("OPTFUT", "MCX"),
+    "GOLDM": ("OPTFUT", "MCX"),
     "SILVER": ("OPTFUT", "MCX"),
+    "SILVERM": ("OPTFUT", "MCX"),
 }
+
+# MCX MINI fallback — jab full-size contract afford nahi hota (small capital),
+# to Tiger MINI variant try karta hai (chhota lot size = kam capital).
+# Example: ₹10k account pe CRUDEOIL (lot 100) afford nahi → CRUDEOILM (lot 10).
+MCX_MINI_FALLBACK = {
+    "CRUDEOIL": "CRUDEOILM",      # lot 100 → 10
+    "NATURALGAS": "NATGASMINI",   # lot 1250 → 250
+    "GOLD": "GOLDM",              # lot 1 → 100 (premium-based, GOLDM cheaper)
+    "SILVER": "SILVERM",          # lot 30 → 1 (mini)
+}
+
+
+def resolve_underlying_token(symbol: str) -> tuple[str, str] | None:
+    """Symbol → (exchange, symboltoken) for historical candle fetch.
+
+    NSE index (NIFTY/BANKNIFTY/FINNIFTY) → spot index token (AMXIDX).
+    NSE stock (RELIANCE/TCS/etc) → '-EQ' suffix token on NSE.
+    MCX commodity (GOLD/CRUDEOIL/etc) → nearest FUTCOM expiry token on MCX.
+
+    Returns:
+        (exchange, symboltoken) ya None agar resolve nahi hua.
+    """
+    try:
+        df = load_angel_instrument_master()
+    except Exception as exc:
+        logger.error(f"Instrument master load fail: {exc}")
+        return None
+
+    # Index → spot index token (99926000 etc)
+    if symbol in INDEX_UNDERLYING_TOKENS:
+        return ("NSE", INDEX_UNDERLYING_TOKENS[symbol])
+
+    # MCX commodity → nearest FUTCOM expiry
+    if symbol in OPTION_INSTRUMENT_TYPE and \
+            OPTION_INSTRUMENT_TYPE[symbol][1] == "MCX":
+        mask = (
+            (df["name"] == symbol)
+            & (df["instrumenttype"] == "FUTCOM")
+            & (df["exch_seg"] == "MCX")
+        )
+        mcx_fut = df[mask].copy()
+        if mcx_fut.empty:
+            logger.warning(f"MCX FUTCOM nahi mila: {symbol}")
+            return None
+        mcx_fut["expiry_parsed"] = pd.to_datetime(
+            mcx_fut["expiry"], format="%d%b%Y", errors="coerce")
+        today = pd.Timestamp.now().normalize()
+        mcx_fut = mcx_fut[mcx_fut["expiry_parsed"] >= today].sort_values(
+            "expiry_parsed")
+        if mcx_fut.empty:
+            logger.warning(f"MCX future expiry khatam: {symbol}")
+            return None
+        row = mcx_fut.iloc[0]
+        return ("MCX", str(row["token"]))
+
+    # NSE stock → -EQ spot token
+    eq_symbol = symbol + "-EQ"
+    mask = (df["exch_seg"] == "NSE") & (df["symbol"] == eq_symbol)
+    matches = df[mask]
+    if not matches.empty:
+        return ("NSE", str(matches.iloc[0]["token"]))
+
+    logger.warning(f"Symbol resolve nahi hua: {symbol}")
+    return None
+
+
+def fetch_angel_underlying_candles(
+    broker, symbol: str, interval: str = "FIFTEEN_MINUTE",
+    days: int = 30,
+) -> pd.DataFrame:
+    """Angel One se real historical candles fetch karo (NOT yfinance!).
+
+    NSE/MCX underlying ke liye — spot index, stock, ya MCX futures.
+    yfinance fallback sirf tab jab Angel One fail ho (rate limit etc).
+
+    Returns:
+        DataFrame (timestamp index, open/high/low/close/volume columns)
+        ya empty DataFrame agar fetch fail.
+    """
+    resolved = resolve_underlying_token(symbol)
+    if resolved is None:
+        return pd.DataFrame()
+    exchange, symboltoken = resolved
+    to_date = datetime.now().replace(hour=23, minute=59, second=0, microsecond=0)
+    from_date = to_date - timedelta(days=days)
+    try:
+        return fetch_angel_historical_candles(
+            broker, exchange, symboltoken, interval, from_date, to_date)
+    except Exception as exc:
+        logger.error(f"Angel candle fetch fail {symbol}: {exc}")
+        return pd.DataFrame()
 
 
 def get_option_chain_instruments(

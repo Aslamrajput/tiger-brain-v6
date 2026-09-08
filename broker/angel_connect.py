@@ -232,25 +232,37 @@ class AngelBroker:
         """Angel One account ka real available balance laata hai.
 
         SmartApi rmsLimit() se available margin nikalta hai.
+        RESILIENT: fail hone pe fresh login + retry karta hai.
         Tiger isse capital ke hisaab se position sizing karta hai.
 
         Returns:
-            float: available cash/margin for trading. 0 agar API fail.
+            float: available cash/margin for trading. 0 agar API fail
+                   (2 retries ke baad bhi — caller 0 pe orders nahi dega).
         """
-        self.ensure_logged_in()
-        try:
-            rms = self.smart_api.rmsLimit()
-            if not rms or not rms.get("data"):
-                logger.warning("rmsLimit() ne koi data nahi diya.")
-                return 0.0
-            data = rms["data"]
-            # availablecash = cash available for trading
-            avail = float(data.get("availablecash", 0) or 0)
-            logger.info(f"💰 Angel One balance: ₹{avail:,.2f}")
-            return avail
-        except Exception as exc:
-            logger.error(f"Balance fetch fail: {exc}")
-            return 0.0
+        for attempt in range(1, 3):  # 2 attempts: direct + after re-login
+            self.ensure_logged_in()
+            try:
+                rms = self.smart_api.rmsLimit()
+                if not rms or not rms.get("data"):
+                    logger.warning("rmsLimit() ne koi data nahi diya (attempt %d/2).", attempt)
+                else:
+                    data = rms["data"]
+                    avail = float(data.get("availablecash", 0) or 0)
+                    logger.info(f"💰 Angel One balance: ₹{avail:,.2f}")
+                    return avail
+            except Exception as exc:
+                logger.error(f"Balance fetch fail (attempt %d/2): %s", attempt, exc)
+
+            # Attempt 1 fail — fresh login karke retry
+            if attempt < 2:
+                logger.warning("Balance fetch fail — fresh login + retry...")
+                try:
+                    self.login()
+                except Exception as exc:
+                    logger.error(f"Re-login fail: {exc}")
+
+        logger.error("Balance fetch 2 attempts mein fail — 0 return.")
+        return 0.0
 
     def place_option_order(
         self,
