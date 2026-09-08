@@ -162,7 +162,7 @@ def compute_iv(df_so_far, vix_val, symbol, is_call, strike, underlying):
 # ============================================================
 # V19 EXIT ENGINE — tighter trail + fixed target booking
 # ============================================================
-V19_TRAIL_ACTIVATE_PCT = 15.0   # activate trail at +15% (sooner — catch momentum fast)
+V19_TRAIL_ACTIVATE_PCT = 5.0    # activate trail at +5% (har trade — profit jaldi lock)
 V19_TRAIL_LOCK_PCT = 70.0       # lock 70% of peak (was 65% — gives back only 30%)
 V19_FIXED_TARGET_PCT = 50.0     # book 40% at +50% (was +100% — book profit sooner)
 V19_FIXED_TARGET_BOOK = 0.40    # book 40% of position at target (ride 60%)
@@ -195,9 +195,9 @@ def check_intraday_exit_v19(pos, cur_underlying, cur_premium, is_square_off_bar,
     """V19 exit engine — tighter trailing + fixed target booking.
 
     Improvements over V6.6:
-      1. Trail activates at +20% (not +30%) — locks profit sooner
-      2. Trail locks 65% of peak (not 55%) — gives back 15% less
-      3. Fixed target at +100%: books 50% of position, rides rest
+      1. Trail activates at +5% (har trade — profit jaldi lock)
+      2. Trail locks 70% of peak (not 55%) — gives back 15% less
+      3. Fixed target at +50%: books 40% of position, rides rest
       4. Runaway safety at +250% (unchanged)
       5. SMART SQUARE-OFF (V19+): in the 15-min pre-sqoff window, profitable
          trades with active trail get a TIGHTER trail (80% lock) so they
@@ -210,8 +210,8 @@ def check_intraday_exit_v19(pos, cur_underlying, cur_premium, is_square_off_bar,
     gain_pct = (cur_premium - pos["entry_premium"]) / pos["entry_premium"] * 100
 
     # 1. SMART PRE-SQUARE-OFF TRAIL — exit profitable trades before blind close.
-    # Only applies inside the pre-sqoff window, only to trail-active (>=+20%)
-    # trades. Tighter 80% lock vs normal 65% → locks profit faster.
+    # Only applies inside the pre-sqoff window, only to trail-active (>=+5%)
+    # trades. Tighter 80% lock vs normal 70% → locks profit faster.
     if ts is not None and _in_pre_square_off_window(ts, segment) \
             and gain_pct >= V19_TRAIL_ACTIVATE_PCT:
         peak = max(pos.get("peak_premium", cur_premium), cur_premium)
@@ -222,7 +222,7 @@ def check_intraday_exit_v19(pos, cur_underlying, cur_premium, is_square_off_bar,
                     "exit_premium": max(cur_premium, 0.5)}
 
     # 2. SQUARE-OFF — but NOT blind anymore.
-    #    Big winners (>=+20%) already exited above. Here we force-close
+    #    Big winners (>=+5%) already exited above. Here we force-close
     #    only LOSS / small-profit trades (trail not active = no protection).
     if is_square_off_bar:
         if gain_pct >= V19_TRAIL_ACTIVATE_PCT:
@@ -255,17 +255,17 @@ def check_intraday_exit_v19(pos, cur_underlying, cur_premium, is_square_off_bar,
         return {"exit": True, "reason": "fixed_target_100pct_book50",
                 "exit_premium": cur_premium}
 
-    # 6. Dynamic trail — activates at +20% (tighter than V6.6's +30%)
+    # 6. Dynamic trail — activates at +5% (har trade — profit jaldi lock)
     if gain_pct >= V19_TRAIL_ACTIVATE_PCT:
         peak = max(pos.get("peak_premium", cur_premium), cur_premium)
         peak_gain = (peak - pos["entry_premium"]) / pos["entry_premium"]
         trail_floor = pos["entry_premium"] * (1 + peak_gain * V19_TRAIL_LOCK_PCT / 100)
         if cur_premium <= trail_floor:
-            return {"exit": True, "reason": "v19_trail_lock_65pct",
+            return {"exit": True, "reason": "v19_trail_lock_70pct",
                     "exit_premium": max(cur_premium, 0.5)}
 
-    # 7. 1m exhaustion (only after +15% gain, same as V6.6)
-    if df_1m is not None and i_1m is not None and gain_pct >= 15.0:
+    # 7. 1m exhaustion (only after +5% gain — micro exhaustion pattern)
+    if df_1m is not None and i_1m is not None and gain_pct >= V19_TRAIL_ACTIVATE_PCT:
         exhausted, why = one_min_exhaustion(df_1m, i_1m, pos["direction"])
         if exhausted:
             return {"exit": True, "reason": f"1m_exhaustion:{why}",

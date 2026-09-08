@@ -57,6 +57,8 @@ class TigerLiveRunner:
 
     # Persist placed order keys to disk — restart pe duplicates nahi honge
     _ORDER_KEYS_FILE = "/tmp/tiger_placed_orders.json"
+    # Persist per-position peak + target_booked — Tiger ki eyes restart pe bhi open
+    _POSITION_TRACK_FILE = "/tmp/tiger_position_peaks.json"
 
     def __init__(self):
         self.broker: AngelBroker | None = None
@@ -74,6 +76,9 @@ class TigerLiveRunner:
         self.capital_start: float = 0.0
         self.capital_after_entry: float = 0.0
         self.capital_after_exit: float = 0.0
+        # Open position tracker — Tiger ki eyes hamesha broker positions pe
+        # {tsym: {"peak": float, "target_booked": bool, "entry": float}}
+        self._position_peaks: dict = self._load_position_peaks()
 
     def _load_order_keys(self) -> set[str]:
         """Disk se placed order keys load karo (restart-safe)."""
@@ -92,6 +97,28 @@ class TigerLiveRunner:
                 json.dump(sorted(self._placed_order_keys), f)
         except OSError as exc:
             logger.warning(f"Order keys save fail: {exc}")
+
+    def _load_position_peaks(self) -> dict:
+        """Disk se per-position peak + target_booked load karo (restart-safe).
+
+        Tiger restart hone pe bhi open positions ka peak yaad rahe —
+        trail locking break nahi hogi.
+        """
+        import json
+        try:
+            with open(self._POSITION_TRACK_FILE) as f:
+                return json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            return {}
+
+    def _save_position_peaks(self):
+        """Per-position peak + target_booked disk pe save karo."""
+        import json
+        try:
+            with open(self._POSITION_TRACK_FILE, "w") as f:
+                json.dump(self._position_peaks, f)
+        except OSError as exc:
+            logger.warning(f"Position peaks save fail: {exc}")
 
     # ============================================================
     # PRE-MARKET (09:00) — login + data load
@@ -162,6 +189,143 @@ class TigerLiveRunner:
         if self.broker is None or not self.broker.is_session_valid():
             logger.warning("⚠️ Broker session invalid — pre-market login nahi hua tha.")
             self.pre_market_wake()
+        # Tiger ki eyes turant open positions pe — kal ka trade bhool naye
+        self.monitor_open_positions()
+
+    # ============================================================
+    # POSITION MONITOR — Tiger ki eyes hamesha open positions pe
+    # ============================================================
+    def monitor_open_positions(self) -> int:
+        """Real broker positions + LTP se V19 exit logic seedha apply karo.
+
+        Tiger restart hone pe bhi broker se open positions fetch karke
+        unka profit/loss track karta hai. Backtest engine se INDEPENDENT —
+        agar backtest position track nahi kar raha (restart bhoola), tab bhi
+        Tiger real broker data se exit decision leta hai.
+
+        Har open position pe:
+          1. Real LTP fetch (Angel One ltpData)
+          2. gain_pct = (ltp - entry) / entry * 100
+          3. Stop-loss: ltp ≤ entry × 0.60 → EXIT
+          4. Trail (active at +5%): ltp ≤ peak_lock → EXIT
+          5. Fixed target (+50%): book 40% quantity
+          6. Runaway safety (+250%): full exit
+          7. Peak update + disk save (restart-safe)
+
+        Returns:
+            int: kitne exit orders place kiye
+        """
+        if self.broker is None:
+            return 0
+        try:
+            positions = self.broker.get_positions()
+        except Exception as exc:
+            logger.error("👁️ Position monitor: fetch fail: %s", exc)
+            return 0
+        if not positions:
+            logger.info("👁️ No open broker positions.")
+            return 0
+
+        from backtest.run_tiger_brain_backtest import (
+            V19_TRAIL_ACTIVATE_PCT, V19_TRAIL_LOCK_PCT,
+            V19_FIXED_TARGET_PCT, V19_FIXED_TARGET_BOOK,
+            V19_RUNAWAY_EXIT_PCT,
+        )
+
+        closed = 0
+        active_tsyms = set()
+        for p in positions:
+            tsym = p.get("tradingsymbol", "")
+            token = p.get("symboltoken", "")
+            exch = p.get("exchange", "")
+            qty = int(p.get("netqty", 0) or 0)
+            if qty <= 0 or not tsym:
+                continue
+            active_tsyms.add(tsym)
+
+            entry_price = float(p.get("buyavgprice", 0)
+                                or p.get("avgnetprice", 0) or 0)
+            if entry_price <= 0:
+                continue
+
+            # Real LTP — broker se fresh
+            ltp = self.broker.get_ltp(tsym, token, exch)
+            if ltp <= 0:
+                ltp = float(p.get("ltp", 0) or 0)
+            if ltp <= 0:
+                logger.warning(f"👁️ {tsym}: LTP nahi mila — skip.")
+                continue
+
+            gain_pct = (ltp - entry_price) / entry_price * 100
+
+            # Position tracker load (peak + target_booked)
+            tracker = self._position_peaks.get(tsym, {})
+            peak = max(float(tracker.get("peak", 0) or 0), ltp, entry_price)
+            target_booked = bool(tracker.get("target_booked", False))
+            self._position_peaks[tsym] = {
+                "peak": peak, "target_booked": target_booked,
+                "entry": entry_price,
+            }
+
+            logger.info(
+                f"👁️ {tsym}: entry=₹{entry_price:.2f} ltp=₹{ltp:.2f} "
+                f"gain={gain_pct:+.1f}% peak=₹{peak:.2f} "
+                f"{'[target_booked]' if target_booked else ''}")
+
+            # === V19 EXIT LOGIC (real broker data pe) ===
+            exit_reason = None
+            exit_qty = qty
+
+            # 1. Stop-loss (60% of entry)
+            stop_premium = entry_price * 0.60
+            if ltp <= stop_premium:
+                exit_reason = "stop_loss_60pct"
+
+            # 2. Trail (active at +5%) — peak se 30% give back pe exit
+            elif gain_pct >= V19_TRAIL_ACTIVATE_PCT:
+                peak_gain = (peak - entry_price) / entry_price
+                trail_floor = entry_price * (1 + peak_gain * V19_TRAIL_LOCK_PCT / 100)
+                if ltp <= trail_floor:
+                    exit_reason = "trail_lock_70pct"
+
+            # 3. Fixed target — +50% pe 40% quantity book (first time only)
+            if exit_reason is None and gain_pct >= V19_FIXED_TARGET_PCT \
+                    and not target_booked:
+                exit_qty = max(1, int(qty * V19_FIXED_TARGET_BOOK))
+                exit_reason = "fixed_target_50pct_book40"
+                self._position_peaks[tsym]["target_booked"] = True
+
+            # 4. Runaway safety
+            if gain_pct >= V19_RUNAWAY_EXIT_PCT:
+                exit_reason = "runaway_safety_250pct"
+                exit_qty = qty
+
+            # === EXIT ORDER PLACE ===
+            if exit_reason:
+                result = self.broker.place_option_order(
+                    tradingsymbol=tsym, symboltoken=token, exchange=exch,
+                    transaction_type="SELL", quantity=exit_qty,
+                    product_type="INTRADAY", order_type="MARKET")
+                if result.get("success"):
+                    closed += 1
+                    logger.info(
+                        f"📤 EXIT {tsym}: {exit_reason} — "
+                        f"SELL {exit_qty}/{qty} @ LTP ₹{ltp:.2f} "
+                        f"(gain {gain_pct:+.1f}%)")
+                else:
+                    logger.error(
+                        f"❌ EXIT FAIL {tsym}: {exit_reason} — {result.get('error')}")
+
+        # Cleanup: broker pe closed positions tracker se hatao
+        for tsym in list(self._position_peaks.keys()):
+            if tsym not in active_tsyms:
+                del self._position_peaks[tsym]
+                logger.info(f"👁️ {tsym}: position closed — tracker cleanup.")
+
+        self._save_position_peaks()
+        if closed:
+            logger.info(f"👁️ Position monitor: {closed} exit orders placed.")
+        return closed
 
     # ============================================================
     # INTRADAY SCAN (every 20 min) — entry signals + exits
@@ -185,6 +349,16 @@ class TigerLiveRunner:
             return
 
         logger.info("🐅 INTRADAY SCAN — %s", datetime.now().strftime("%H:%M"))
+
+        # === TIGER KI EYES — pehle open positions monitor karo ===
+        # Broker se real LTP fetch + V19 exit logic. Backtest se INDEPENDENT.
+        # Kal ka trade bhool na jaye — har scan pe positions check.
+        try:
+            monitored = self.monitor_open_positions()
+        except Exception as exc:
+            logger.error("👁️ Position monitor error: %s", exc)
+            monitored = 0
+
         try:
             from backtest.run_tiger_brain_backtest import run_tiger_brain_backtest
             capital = self.account_capital if self.account_capital > 0 else 10000.0
@@ -206,9 +380,10 @@ class TigerLiveRunner:
 
             logger.info("Scan done: %d signals (%d entries, %d exits), "
                         "%d buy orders placed, %d sell orders placed, "
+                        "%d monitored exits, "
                         "equity ₹%.0f, return %.2f%%",
                         len(trades), len(entries), len(exits),
-                        placed, closed,
+                        placed, closed, monitored,
                         totals.get("final_equity", 0),
                         totals.get("total_return_pct", 0))
         except Exception as exc:
