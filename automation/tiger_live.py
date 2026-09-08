@@ -425,13 +425,22 @@ class TigerLiveRunner:
         # Step 1: Real balance fetch (har scan pe fresh)
         # ❗ FAIL = NO orders. ₹10,000 fallback HATA DIYA — Tiger galat
         # balance se order place na kare. Balance nahi mila to band.
-        try:
-            available_balance = self.broker.get_balance()
-        except Exception as exc:
-            logger.error("❌ Balance fetch FAIL — koi order nahi: %s", exc)
-            return 0
+        # 2 retries (get_balance internal + yahan se): transient fail
+        # (rate limit, session expire) handle, genuine fail = no orders.
+        available_balance = 0.0
+        for bal_attempt in range(1, 3):
+            try:
+                available_balance = self.broker.get_balance()
+            except Exception as exc:
+                logger.error("❌ Balance fetch FAIL (attempt %d/2): %s", bal_attempt, exc)
+                available_balance = 0.0
+            if available_balance > 0:
+                break
+            if bal_attempt < 2:
+                logger.warning("⚠️ Balance 0 — 2s ruko, retry...")
+                time.sleep(2)
         if available_balance <= 0:
-            logger.warning("⚠️ Balance ₹0 — koi order nahi place hoga.")
+            logger.error("❌ Balance fetch 2 retries mein FAIL — koi order nahi.")
             return 0
 
         # Capital lifecycle
