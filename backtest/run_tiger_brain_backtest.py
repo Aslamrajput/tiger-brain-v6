@@ -162,10 +162,10 @@ def compute_iv(df_so_far, vix_val, symbol, is_call, strike, underlying):
 # ============================================================
 # V19 EXIT ENGINE — tighter trail + fixed target booking
 # ============================================================
-V19_TRAIL_ACTIVATE_PCT = 20.0   # activate trail at +20% (was 30%)
-V19_TRAIL_LOCK_PCT = 65.0       # lock 65% of peak (was 55% — gives back less)
-V19_FIXED_TARGET_PCT = 100.0    # book 50% at +100% (2x), ride rest
-V19_FIXED_TARGET_BOOK = 0.5     # book 50% of position at target
+V19_TRAIL_ACTIVATE_PCT = 15.0   # activate trail at +15% (sooner — catch momentum fast)
+V19_TRAIL_LOCK_PCT = 70.0       # lock 70% of peak (was 65% — gives back only 30%)
+V19_FIXED_TARGET_PCT = 50.0     # book 40% at +50% (was +100% — book profit sooner)
+V19_FIXED_TARGET_BOOK = 0.40    # book 40% of position at target (ride 60%)
 V19_RUNAWAY_EXIT_PCT = 250.0    # absolute safety exit
 
 # SMART SQUARE-OFF (V19+) — don't blindly close profitable trades.
@@ -338,7 +338,7 @@ PDH_PDL_TOLERANCE_PCT = 0.5
 # Identifies setups with explosive 2-3 day rocket potential.
 # Only the top 50/100 setups pass — sniper quality, bumper P&L.
 # ============================================================
-ROCKET_MIN_SCORE = 72        # relaxed from 78 — more entries while keeping quality
+ROCKET_MIN_SCORE = 75        # tightened — sirf high-confidence blast trades (was 72)
 ROCKET_MIN_CONFLUENCES = 3   # relaxed from 4 — one less confirmation needed
 ROCKET_MIN_FUEL = 1          # need 1+ rocket-fuel signal (sweep/compression/2.5x spike/momentum)
 ROCKET_MOMENTUM_MIN = 2.0    # delta spike must be 2x+ for rocket fuel

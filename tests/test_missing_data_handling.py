@@ -119,9 +119,11 @@ def test_score_normalised_by_participating_weight():
     result = decide(votes, "STRONG_TREND")
     assert result["contributing_factors"]["vol_arb"]["participates"] is False
     assert result["participating_weight"] < 1.0
-    # 90 confidence wala trend_follow ab 65 threshold cross kar sakta hai
+    # 90 confidence wala trend_follow normalised score deta hai (68-69)
+    # jo purane 65 threshold pe BUY tha. Naya 72 threshold stricter hai.
     assert result["final_score"] > 65
-    assert result["final_decision"] == "BUY"
+    # Score 68.82 < 72 threshold → NO_TRADE (stricter gate for blast trades)
+    assert result["final_decision"] == "NO_TRADE"
 
 
 def test_hard_veto_still_blocks_everything():

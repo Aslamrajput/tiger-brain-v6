@@ -151,7 +151,7 @@ META_BRAIN_WEIGHTS = {
     },
 }
 
-DECISION_SCORE_THRESHOLD = 65
+DECISION_SCORE_THRESHOLD = 72
 
 # Meta-Brain ka score sab weights ka weighted average hai. Agar koi
 # sub-brain data hi na hone ki wajah se chup hai (jaise Vol-Arb bina IV
@@ -168,12 +168,12 @@ PIPELINE = {
     "STAGE1_MIN_CONFIDENCE": 50,
     "STAGE2_MIN_CONFIDENCE": 50,
     "STAGE2_MAX_DIVERGENCE_FROM_STAGE1": 20,
-    "STAGE3_MIN_CONFIDENCE": 65,
+    "STAGE3_MIN_CONFIDENCE": 72,
     "STAGE4_TIE_BREAK_SCORE_DIFF": 5,
 }
 
 RISK = {
-    "MAX_RISK_PER_TRADE_PCT": 2.5,
+    "MAX_RISK_PER_TRADE_PCT": 2.0,
     "DAILY_MAX_LOSS_PCT": 5.5,
     "MAX_CONSECUTIVE_LOSSES": 3,
     "CONSECUTIVE_LOSS_PAUSE_MINUTES": 35,
