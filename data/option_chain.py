@@ -157,10 +157,15 @@ def refresh_registry(
     exchange: str = DEFAULT_EXCHANGE,
     cache_dir: str = DEFAULT_CACHE_DIR,
     master: list | None = None,
+    today: str | None = None,
 ) -> dict:
     """
     Aaj ke live contracts registry mein jodta hai (purane kabhi hataye
     nahi jaate — wahi to expire hone ke baad kaam aate hain).
+
+    Args:
+        today: ISO date string for first_seen/last_seen (tests ke liye
+            fixed date inject karne ko; default = real aaj).
 
     Returns: poori registry {symbol: contract}
     """
@@ -171,7 +176,7 @@ def refresh_registry(
         underlying, exchange,
     )
 
-    today = now_ist().date().isoformat()
+    today = today or now_ist().date().isoformat()
     added = 0
     for symbol, contract in live.items():
         if symbol not in registry:

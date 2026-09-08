@@ -15,6 +15,10 @@ import pytest
 from backtest import options_sim
 from data import option_chain
 
+# Tests mein registry ka first_seen real "today" se pehle ki fixed date
+# honi chahiye — warna coverage_start check data ke din ko block kar deta hai.
+REGISTRY_SEED_DATE = "2026-09-01"
+
 
 def master_row(symbol, token, expiry, strike, lotsize=75):
     return {
@@ -60,11 +64,13 @@ def test_registry_keeps_contracts_that_have_left_the_master(tmp_path):
     nahi mil sakta — yahi is layer ka poora point hai.
     """
     cache = str(tmp_path)
-    option_chain.refresh_registry(cache_dir=cache, master=SAMPLE_MASTER)
+    option_chain.refresh_registry(cache_dir=cache, master=SAMPLE_MASTER,
+                                  today=REGISTRY_SEED_DATE)
 
     # agle din 08SEP wala expire ho gaya, master se gayab
     later = [r for r in SAMPLE_MASTER if not r["symbol"].startswith("NIFTY08SEP")]
-    registry = option_chain.refresh_registry(cache_dir=cache, master=later)
+    registry = option_chain.refresh_registry(cache_dir=cache, master=later,
+                                             today=REGISTRY_SEED_DATE)
 
     assert "NIFTY08SEP2620000CE" in registry
     assert registry["NIFTY08SEP2620000CE"]["token"] == "111"
@@ -81,7 +87,7 @@ def test_a_far_away_expiry_is_not_used_as_that_days_weekly(tmp_path):
     expiry uthana ek ALAG contract (zyada DTE) pe P&L banata hai.
     """
     registry = option_chain.refresh_registry(
-        cache_dir=str(tmp_path), master=SAMPLE_MASTER
+        cache_dir=str(tmp_path), master=SAMPLE_MASTER, today=REGISTRY_SEED_DATE
     )
     provider = option_chain.AngelOptionChain(
         cache_dir=str(tmp_path), registry=registry, offline=True
@@ -98,7 +104,7 @@ def test_a_far_away_expiry_is_not_used_as_that_days_weekly(tmp_path):
 
 def test_nearest_expiry_and_contract_lookup(tmp_path):
     registry = option_chain.refresh_registry(
-        cache_dir=str(tmp_path), master=SAMPLE_MASTER
+        cache_dir=str(tmp_path), master=SAMPLE_MASTER, today=REGISTRY_SEED_DATE
     )
 
     expiry = option_chain.nearest_expiry_on_or_after(
@@ -115,7 +121,7 @@ def test_nearest_expiry_and_contract_lookup(tmp_path):
 
 def build_provider(monkeypatch, candles: dict, tmp_path):
     registry = option_chain.refresh_registry(
-        cache_dir=str(tmp_path), master=SAMPLE_MASTER
+        cache_dir=str(tmp_path), master=SAMPLE_MASTER, today=REGISTRY_SEED_DATE
     )
     provider = option_chain.AngelOptionChain(
         cache_dir=str(tmp_path), registry=registry, offline=True
@@ -250,7 +256,7 @@ def test_registry_start_se_pehle_ka_din_real_nahi_maana_jaata(tmp_path):
     par wo ek ALAG contract hai, uska bhaav "real" batana jhooth hoga.
     """
     registry = option_chain.refresh_registry(
-        cache_dir=str(tmp_path), master=SAMPLE_MASTER
+        cache_dir=str(tmp_path), master=SAMPLE_MASTER, today=REGISTRY_SEED_DATE
     )
     coverage_start = date(2026, 9, 3)  # 01SEP wali weekly kabhi dekhi hi nahi
     provider = option_chain.AngelOptionChain(
@@ -286,7 +292,7 @@ def test_expired_contract_ka_fetch_window_expiry_pe_rukta_hai(monkeypatch, tmp_p
         return pd.DataFrame()
 
     registry = option_chain.refresh_registry(
-        cache_dir=str(tmp_path), master=SAMPLE_MASTER
+        cache_dir=str(tmp_path), master=SAMPLE_MASTER, today=REGISTRY_SEED_DATE
     )
     provider = option_chain.AngelOptionChain(
         cache_dir=str(tmp_path), registry=registry, offline=True
