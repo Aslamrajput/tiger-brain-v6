@@ -167,11 +167,15 @@ class RajuHealthWatcher:
             })
         log(f"   📊 {self.name}: Restarts today: {restarts}")
 
-        # 3. Errors in log (last 15 min)
+        # 3. Errors in log (last 15 min) — exclude harmless warnings
+        # (FutureWarning, DeprecationWarning, UserWarning = pandas/numpy
+        # noise, NOT real errors). Real errors: ERROR, Exception,
+        # Traceback, CRITICAL, FAIL.
         out, _ = run_local(
-            f"grep -iE 'error|exception|traceback|crash' {LOG_FILE} | "
-            f"awk -v d=\"$(date -d '15 min ago' '+%Y-%m-%d %H:%M')\" "
-            f"'$0 ~ d || NR > 0' | tail -20 | wc -l")
+            f"grep -iE 'error|exception|traceback|crash|critical' {LOG_FILE} | "
+            f"grep -ivE 'futurewarning|deprecationwarning|userwarning|"
+            f"runtimewarning|pdwarnings|warning:' | "
+            f"tail -20 | wc -l")
         try:
             error_count = int(out)
         except (ValueError, TypeError):
