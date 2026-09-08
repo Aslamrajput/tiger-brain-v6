@@ -350,9 +350,12 @@ ANGEL_INTERVAL_MAX_DAYS = {
 # "Access denied because of exceeding access rate" bhejta hai). Chunked
 # download mein ye error aana normal hai, isliye har chunk ke beech ruko
 # aur rate-limit wale error pe badhte hue intezaar ke saath retry karo.
-ANGEL_CHUNK_PAUSE_SEC = 3.0
-ANGEL_MAX_RETRIES = 5
-ANGEL_RETRY_BACKOFF_SEC = 5.0
+# NOTE: retries kam (2) aur backoff chhota (2s) rakha gaya hai taaki
+# rate-limit hit hone par symbol jaldi yfinance fallback pe chale —
+# 75s retry backoff ke bajaye 6s me fail ho jaaye.
+ANGEL_CHUNK_PAUSE_SEC = 1.0
+ANGEL_MAX_RETRIES = 2
+ANGEL_RETRY_BACKOFF_SEC = 2.0
 
 _RATE_LIMIT_MARKERS = (
     "access rate", "rate limit", "exceeding access", "too many request",

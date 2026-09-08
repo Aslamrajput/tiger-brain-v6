@@ -86,7 +86,8 @@ def test_backoff_grows_exponentially(no_real_sleep):
             broker, {"fromdate": "a", "todate": "b"}, max_retries=4
         )
 
-    assert no_real_sleep == [5.0, 10.0, 20.0]
+    # backoff_sec * 2^attempt → 2.0, 4.0, 8.0 (ANGEL_RETRY_BACKOFF_SEC=2.0)
+    assert no_real_sleep == [2.0, 4.0, 8.0]
 
 
 def test_non_rate_limit_error_is_not_retried(no_real_sleep):
