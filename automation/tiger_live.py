@@ -81,6 +81,7 @@ class TigerLiveRunner:
         # Track placed order keys — disk se load, restart pe safe
         self._placed_order_keys: set[str] = self._load_order_keys()
         self._order_log: list[dict] = []
+        self._daily_entries_taken: dict = {}  # date → count (Brain 4 quota)
         # Real account capital — Angel One se fetch hota hai pre-market
         self.account_capital: float = 0.0
         # Capital lifecycle: start → after_entry → after_exit
@@ -448,38 +449,35 @@ class TigerLiveRunner:
             monitored = 0
 
         try:
-            from backtest.run_tiger_brain_backtest import run_tiger_brain_backtest
-            # Real balance → backtest simulation capital. Agar balance 0
-            # (fetch fail) to simulation ₹10,000 se chalegi — LEKIN real
-            # orders _place_live_orders me get_balance() se check honge.
-            capital = self.account_capital if self.account_capital > 0 else 10000.0
-            if self.account_capital <= 0:
-                logger.warning("⚠️ Simulation ₹10,000 se — real balance nahi mila. "
-                               "Real orders BANDH (capital check fail).")
-            combined = run_tiger_brain_backtest(
-                self.data_map, start_capital=capital,
-                data_map_1m=self.data_map_1m if self.data_map_1m else None,
-                broker=self.broker)
-            trades = combined.get("trades", [])
-            totals = combined.get("totals", {})
+            # === असली रियल-टाइम लाइव स्कैनर (बैकटेस्ट से इन्डिपेंडेंट) ===
+            # Pehle run_tiger_brain_backtest() पूरा दिन सिमुलेशन चलाता था
+            # → "0 entries" आती थी → कोई buy order नहीं।
+            # अब scan_live_signals() अभी के latest closed bar पर 7 ब्रेन
+            # चलाकर रियल-टाइम सिग्नल दे। बैकटेस्ट से बिल्कुल इन्डिपेंडेंट।
+            from automation.live_scanner import scan_live_signals
 
-            # === LIVE EXECUTION BRIDGE ===
-            # Backtest ne signals generate kiye. Ab unhe REAL orders mein
-            # convert karo — sirf aaj ke + abhi tak place na hue trades.
-            # Exits (PREMIUM EXIT / stop-loss / square-off) → SELL orders.
-            exits = [t for t in trades if t.get("exit_ts") is not None]
-            entries = [t for t in trades if t.get("exit_ts") is None]
-            placed = self._place_live_orders(entries)
-            closed = self._place_exit_orders(exits)
+            today = datetime.now().date()
+            daily_entries = self._daily_entries_taken.get(today, 0)
 
-            logger.info("Scan done: %d signals (%d entries, %d exits), "
-                        "%d buy orders placed, %d sell orders placed, "
-                        "%d monitored exits, "
-                        "equity ₹%.0f, return %.2f%%",
-                        len(trades), len(entries), len(exits),
-                        placed, closed, monitored,
-                        totals.get("final_equity", 0),
-                        totals.get("total_return_pct", 0))
+            signals = scan_live_signals(
+                self.data_map,
+                self.data_map_1m if self.data_map_1m else None,
+                self.broker,
+                now=datetime.now(),
+                daily_entries_taken=daily_entries,
+            )
+
+            # सिग्नल अभी के bar के हैं — सब entries हैं (exit_ts = None)।
+            # Exits monitor_open_positions() से आ चुके हैं (ऊपर)।
+            placed = self._place_live_orders(signals)
+
+            # दैनिक एंट्री काउंटर अपडेट करें
+            self._daily_entries_taken[today] = daily_entries + placed
+
+            logger.info("Scan done: %d live signals, %d buy orders placed, "
+                        "%d monitored exits, balance ₹%.0f",
+                        len(signals), placed, monitored,
+                        self.account_capital)
         except Exception as exc:
             logger.error("Intraday scan error: %s", exc)
 
@@ -931,22 +929,34 @@ class TigerLiveRunner:
             logger.info("Broker nahi hai — delivery skip.")
             return
         try:
-            from backtest.run_tiger_brain_backtest import run_tiger_brain_backtest
-            combined = run_tiger_brain_backtest(
-                self.data_map, start_capital=self.account_capital,
-                data_map_1m=self.data_map_1m if self.data_map_1m else None,
-                broker=self.broker)
-            trades = combined.get("trades", [])
-            # Filter sirf delivery trades
-            delivery_trades = [t for t in trades
-                               if t.get("is_delivery", False)]
-            today_str = datetime.now().strftime("%Y-%m-%d")
-            delivery_trades = [t for t in delivery_trades
-                               if str(t.get("entry_ts", ""))[:10] == today_str]
-            logger.info("Delivery signals: %d / %d total trades",
-                        len(delivery_trades), len(trades))
+            # === रियल-टाइम लाइव स्कैनर (डिलीवरी के लिए भी) ===
+            # पहले बैकटेस्ट सिमुलेशन चलता था — अब रियल-टाइम स्कैन।
+            # डिलीवरी के लिए उच्च-स्कोर वाले सिग्नल चाहिए (90+ score),
+            # इसलिए min_score को DELIVERY_ROCKET_MIN_SCORE तक बढ़ाते हैं।
+            from automation.live_scanner import scan_live_signals
+            from backtest.run_tiger_brain_backtest import DELIVERY_ROCKET_MIN_SCORE
+
+            today = datetime.now().date()
+            daily_entries = self._daily_entries_taken.get(today, 0)
+
+            signals = scan_live_signals(
+                self.data_map,
+                self.data_map_1m if self.data_map_1m else None,
+                self.broker,
+                now=datetime.now(),
+                daily_entries_taken=daily_entries,
+            )
+            # सिर्फ़ ultra-high-conviction सिग्नल डिलीवरी के लिए
+            delivery_trades = [s for s in signals
+                               if s.get("setup_score", 0) >= DELIVERY_ROCKET_MIN_SCORE]
+            for s in delivery_trades:
+                s["is_delivery"] = True
+
+            logger.info("Delivery signals: %d (score ≥ %d)",
+                        len(delivery_trades), DELIVERY_ROCKET_MIN_SCORE)
             if delivery_trades:
                 placed = self._place_live_orders(delivery_trades)
+                self._daily_entries_taken[today] = daily_entries + placed
                 logger.info("Delivery orders placed: %d", placed)
             else:
                 logger.info("Koi delivery signal nahi — aaj overnight nahi.")
