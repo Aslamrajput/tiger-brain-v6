@@ -160,7 +160,7 @@ SESSION_SCHEDULE: list[SessionConfig] = [
         time_start=time(9, 0),
         time_end=time(17, 0),
         segment_focus="mcx",
-        score_threshold=76.0,
+        score_threshold=70.0,
         max_trades_this_session=5,
         capital_allocation_pct=40.0,
         preferred_strike="ATM",
@@ -179,7 +179,7 @@ SESSION_SCHEDULE: list[SessionConfig] = [
         time_start=time(17, 0),
         time_end=time(20, 0),
         segment_focus="mcx",
-        score_threshold=76.0,
+        score_threshold=72.0,
         max_trades_this_session=5,
         capital_allocation_pct=80.0,
         preferred_strike="ATM",
@@ -198,7 +198,7 @@ SESSION_SCHEDULE: list[SessionConfig] = [
         time_start=time(20, 0),
         time_end=time(23, 0),
         segment_focus="mcx",
-        score_threshold=75.0,        # slightly lower — night = big moves
+        score_threshold=70.0,        # lower — night = big commodity moves
         max_trades_this_session=5,   # aggressive — biggest commodity moves
         capital_allocation_pct=80.0,
         preferred_strike="ATM",

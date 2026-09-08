@@ -38,6 +38,7 @@ from automation.scheduler import (
 )
 from data.loader import resolve_option_contract, OPTION_INSTRUMENT_TYPE
 from config.thresholds import AUTOMATION, MARKET_CATEGORIES
+from backtest.tiger_fund_brain import announce_fund_plan, size_trade_with_fund_brain
 
 
 def resolve_exchange_for_symbol(symbol: str) -> str:
@@ -89,6 +90,73 @@ class TigerLiveRunner:
         # Open position tracker — Tiger ki eyes hamesha broker positions pe
         # {tsym: {"peak": float, "target_booked": bool, "entry": float}}
         self._position_peaks: dict = self._load_position_peaks()
+
+    def _live_re_size(
+        self, real_balance: float, real_ltp: float, real_lot_size: int,
+        is_delivery: bool, current_exposure: float = 0.0,
+    ) -> dict:
+        """REAL balance + REAL LTP + REAL lot size se quantity nikaalo.
+
+        Backtest simulated premium se quantity nikaalta tha — woh GALAT
+        ho sakta hai. Live order pe FUND BRAIN se actual capital ke
+        hisaab se re-size karte hain. Quantity hamesha lot size ke
+        multiple mein hoti hai (Angel One reject nahi karega).
+
+        Returns:
+            dict: {quantity, lots, allocated_capital, reason}
+            quantity=0 means SKIP (afford nahi hota ya fund plan fail)
+        """
+        if real_balance <= 0 or real_ltp <= 0 or real_lot_size <= 0:
+            return {"quantity": 0, "lots": 0, "allocated_capital": 0,
+                    "reason": "invalid balance/ltp/lotsize"}
+
+        lot = int(real_lot_size)
+        try:
+            plan = announce_fund_plan(real_balance)
+        except ValueError as exc:
+            logger.warning(f"Fund plan fail: {exc} — skip order")
+            return {"quantity": 0, "lots": 0, "allocated_capital": 0,
+                    "reason": f"fund_plan_fail: {exc}"}
+
+        # Stop distance: entry × 40% (60% stop-loss = 40% risk per unit)
+        entry = real_ltp
+        stop = entry * 0.60
+        sizing = size_trade_with_fund_brain(
+            plan, entry, stop, lot,
+            current_exposure=current_exposure,
+            is_delivery=is_delivery)
+
+        qty = sizing.get("quantity", 0)
+        lots = sizing.get("lots", 0)
+
+        # Safety: enforce lot multiple (fund brain already does this,
+        # but double-check against REAL lot size)
+        if qty > 0 and lot > 0:
+            lots = qty // lot
+            qty = lots * lot
+
+        # Final affordability: qty × real_ltp MUST fit in balance
+        cost = qty * real_ltp
+        if cost > real_balance:
+            affordable_lots = int(real_balance // (real_ltp * lot))
+            if affordable_lots < 1:
+                logger.info(
+                    f"   💰 SKIP — 1 lot ₹{lot * real_ltp:,.0f} > "
+                    f"balance ₹{real_balance:,.0f}")
+                return {"quantity": 0, "lots": 0, "allocated_capital": 0,
+                        "reason": "not_affordable"}
+            qty = affordable_lots * lot
+            cost = qty * real_ltp
+            logger.info(
+                f"   💰 Re-sized to {affordable_lots} lots = {qty} qty "
+                f"= ₹{cost:,.0f} (fit balance ₹{real_balance:,.0f})")
+
+        return {
+            "quantity": qty,
+            "lots": lots,
+            "allocated_capital": round(cost, 2),
+            "reason": sizing.get("reason", "sized_by_fund_brain"),
+        }
 
     def _load_order_keys(self) -> set[str]:
         """Disk se placed order keys load karo (restart-safe)."""
@@ -520,7 +588,8 @@ class TigerLiveRunner:
             strike = t.get("strike", 0)
             option_type = t.get("option_type", "")
             direction = t.get("direction", "")
-            quantity = t.get("quantity", 0)
+            # NOTE: backtest ki quantity IGNORE — Fund Brain se REAL
+            # balance + REAL LTP + REAL lot size se re-size hota hai
             is_delivery = t.get("is_delivery", False)
 
             # NSE hard cutoff: 15:30 ke baad NSE ka KOI order nahi
@@ -555,7 +624,11 @@ class TigerLiveRunner:
             if real_lot_size <= 0:
                 real_lot_size = 1
 
-            # Step 3: REAL LTP fetch (NOT simulated premium!)
+            # Step 4: REAL re-size with FUND BRAIN — not backtest's qty!
+            # Backtest ne simulated premium se qty nikaali thi — woh GALAT
+            # ho sakti hai. Ab REAL balance + REAL LTP + REAL lot size se
+            # Fund Brain se proper sizing karte hain. Quantity hamesha
+            # lot size ke multiple mein hoti hai (P2 fix).
             sim_premium = t.get("entry_premium", 0.0)
             real_ltp = self.broker.get_ltp(
                 contract["tradingsymbol"],
@@ -568,9 +641,13 @@ class TigerLiveRunner:
                     f"   ⚠️ LTP fetch fail — simulated premium ₹{sim_premium:.2f} use")
                 real_ltp = sim_premium if sim_premium > 0 else 0.5
 
-            # Step 4: Real trade cost with REAL market price
-            trade_cost = quantity * real_ltp
             one_lot_cost = real_lot_size * real_ltp
+
+            # Current exposure: total deployed capital in open positions
+            current_exposure = sum(
+                float(o.get("trade_cost", 0)) for o in self._order_log
+                if o.get("success")
+            )
 
             # MCX MINI fallback — agar full-size MCX contract afford nahi
             # hota, to MINI variant try karo (chhota lot = kam capital).
@@ -598,24 +675,35 @@ class TigerLiveRunner:
                         contract = mini_contract
                         real_lot_size = mini_lot
                         real_ltp = mini_ltp
-                        trade_cost = quantity * real_ltp
                         one_lot_cost = mini_one_lot
+
+            # 🔥 FUND BRAIN LIVE SIZING — real balance + real LTP + real lot
+            re_size = self._live_re_size(
+                real_balance=available_balance,
+                real_ltp=real_ltp,
+                real_lot_size=real_lot_size,
+                is_delivery=is_delivery,
+                current_exposure=current_exposure,
+            )
+            quantity = re_size["quantity"]
+            trade_cost = re_size["allocated_capital"]
+            sizing_reason = re_size["reason"]
 
             logger.info("-" * 60)
             logger.info(f"📊 {symbol} {strike}{option_type} ({direction})")
             logger.info(f"   Lot Size:      {real_lot_size}")
             logger.info(f"   Sim Premium:   ₹{sim_premium:.2f} (backtest)")
             logger.info(f"   REAL LTP:      ₹{real_ltp:.2f} (market)")
-            logger.info(f"   Quantity:      {quantity} ({quantity // real_lot_size} lots)")
+            logger.info(f"   Fund Brain:    {quantity} qty ({quantity // real_lot_size if real_lot_size else 0} lots) [{sizing_reason}]")
             logger.info(f"   Real Cost:     ₹{trade_cost:,.0f} ({quantity} × ₹{real_ltp:.2f})")
             logger.info(f"   1 Lot Cost:    ₹{one_lot_cost:,.0f}")
             logger.info(f"   Balance:       ₹{available_balance:,.0f}")
 
-            # Step 5: Affordability check against REAL cost + REAL balance
-            if one_lot_cost > available_balance:
+            # Step 5: Affordability gate — quantity 0 means SKIP
+            if quantity <= 0:
                 logger.info(
-                    f"   ❌ SKIP — 1 lot (₹{one_lot_cost:,.0f}) > balance "
-                    f"(₹{available_balance:,.0f}) — afford nahi hota")
+                    f"   ❌ SKIP {symbol} {strike}{option_type} — "
+                    f"{sizing_reason} (balance ₹{available_balance:,.0f})")
                 self._order_log.append({
                     "time": datetime.now().isoformat(),
                     "symbol": symbol, "strike": strike,
@@ -623,22 +711,16 @@ class TigerLiveRunner:
                     "tradingsymbol": contract["tradingsymbol"],
                     "real_ltp": real_ltp, "one_lot_cost": one_lot_cost,
                     "balance": available_balance,
-                    "success": False, "error": "not affordable — 1 lot > balance",
+                    "success": False, "error": sizing_reason,
                 })
                 continue
 
+            # Final safety: trade_cost must fit balance
             if trade_cost > available_balance:
-                # Reduce lots to fit
-                affordable_lots = int(available_balance // one_lot_cost)
-                if affordable_lots >= 1:
-                    quantity = affordable_lots * real_lot_size
-                    trade_cost = quantity * real_ltp
-                    logger.info(
-                        f"   ⚠️ Reduced to {affordable_lots} lots = {quantity} qty "
-                        f"= ₹{trade_cost:,.0f} (fit balance)")
-                else:
-                    logger.info(f"   ❌ SKIP — can't fit any lot in balance")
-                    continue
+                logger.info(
+                    f"   ❌ SKIP — cost ₹{trade_cost:,.0f} > balance "
+                    f"₹{available_balance:,.0f} (safety gate)")
+                continue
 
             # Step 6: Place REAL BUY order (Tiger always buys options)
             # Delivery = CARRYFORWARD (overnight), Intraday = INTRADAY
