@@ -80,6 +80,7 @@ INDEX_SYMBOLS = {
     "NIFTY": "^NSEI",
     "BANKNIFTY": "^NSEBANK",
     "FINNIFTY": "^CNXFIN",  # FinNifty (financial sector index)
+    "SENSEX": "^BSESN",     # BSE Sensex (BSE index)
 }
 
 STOCK_SYMBOLS = {
@@ -176,10 +177,13 @@ def scan_universe() -> dict:
 # Two markets NEVER overlap — Tiger fetches only the active market per scan.
 
 def nse_scan_symbols() -> dict:
-    """NSE session symbols — 20 F&O stocks + 3 indices (23 total)."""
-    out = dict(SCAN_STOCK_SYMBOLS)
-    out.update(INDEX_SYMBOLS)
-    return out
+    """NSE session symbols — INDEX only (NIFTY, BANKNIFTY, FINNIFTY, SENSEX).
+
+    STOCK options BLOCKED — ALLOWED_SYMBOLS filter in entry function
+    bhi block karta hai, par yahan se hi sirf 4 index scan hote hain
+    (27 → 4 symbols = 7x kam API calls, fast scan).
+    """
+    return dict(INDEX_SYMBOLS)
 
 
 def mcx_scan_symbols() -> dict:

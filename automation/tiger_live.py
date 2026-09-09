@@ -277,11 +277,10 @@ class TigerLiveRunner:
         """Har intraday scan pe FRESH 15m data fetch karo — ACTIVE market only.
 
         Two-market session:
-          NSE (09:15-15:15): fetch 23 NSE symbols (20 stocks + 3 indices)
+          NSE (09:15-15:15): fetch 4 NSE INDEX symbols (NIFTY, BANKNIFTY, FINNIFTY, SENSEX)
           MCX (15:30-23:15): fetch 4 MCX symbols (GOLDM, SILVERM, CRUDEOIL, NATURALGAS)
 
-        Pehle Tiger ALL 27 symbols fetch karta tha (NSE+MCX mixed) — rate limit
-        pressure double thi. Ab sirf active market ke symbols fetch hote hain.
+        STOCK options BLOCKED — sirf INDEX + COMMODITY trade hote hain.
         """
         if self.broker is None:
             return
@@ -1171,7 +1170,7 @@ class TigerLiveRunner:
         self._running = True
         logger.info("✅ Tiger scheduler STARTED. 24x7 cycle active.")
         logger.info("   Pre-market:     09:00 (login + NSE data fetch)")
-        logger.info("   NSE open:       09:15 (scan 23 NSE symbols)")
+        logger.info("   NSE open:       09:15 (scan 4 NSE INDEX symbols)")
         logger.info("   Intraday:       every 20 min (active market only)")
         logger.info("   Delivery:       15:00 (overnight direction)")
         logger.info("   NSE square-off: 15:15 (close NSE positions)")

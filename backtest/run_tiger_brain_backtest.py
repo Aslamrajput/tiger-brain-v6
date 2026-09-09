@@ -173,9 +173,9 @@ V19_RUNAWAY_EXIT_PCT = 250.0    # absolute safety exit
 # ============================================================
 ALLOWED_SYMBOLS = [
     # INDEX — Din me 9:15 se 3:30
-    "NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX",
+    "NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX",
     # COMMODITY — Raat me 5pm se 11:30
-    "GOLD", "SILVER", "CRUDEOIL", "NATURALGAS", "COPPER", "GOLDM", "SILVERM",
+    "GOLDM", "SILVERM", "CRUDEOIL", "NATURALGAS",
 ]
 
 # SMART SQUARE-OFF (V19+) — don't blindly close profitable trades.

@@ -283,6 +283,21 @@ def fetch_bhavcopy_range(start_date: datetime, end_date: datetime) -> pd.DataFra
 # (broker/angel_connect.py se) maangte hain — pehle broker.login()
 # call karna zaroori hai.
 
+# ============================================================
+# V19 INSTRUMENT MASTER FILTER — sirf ALLOWED symbols rakho
+# 1.45 lakh → ~12K (12x kam memory, faster token lookup)
+# ============================================================
+ALLOWED_INDEX = ["NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX"]
+ALLOWED_MCX = ["GOLDM", "SILVERM", "CRUDEOIL", "NATURALGAS"]
+ALLOWED_INSTRUMENT_NAMES = set(ALLOWED_INDEX + ALLOWED_MCX)
+
+# Sirf in exchanges pe Tiger trade karta hai
+ALLOWED_EXCH_SEGS = {"NSE", "NFO", "BSE", "BFO", "MCX"}
+
+# Sirf in instrument types chahiye (options, futures, spot index)
+USEFUL_INSTRUMENT_TYPES = {"AMXIDX", "OPTIDX", "FUTIDX", "OPTFUT", "FUTCOM", "INDEX"}
+
+
 # Angel One ka public instrument-master file — isme har symbol
 # (NIFTY, BANKNIFTY, options strikes, etc.) ka unique "token" hota
 # hai jo API calls ke liye zaroori hai.
@@ -294,25 +309,67 @@ ANGEL_INSTRUMENT_MASTER_URL = (
 _instrument_master_cache = None  # ek baar download hone ke baad memory mein rakhte hain
 
 
+def _filter_instruments(df: pd.DataFrame) -> pd.DataFrame:
+    """1.45 lakh instruments → sirf ALLOWED symbols (Index + MCX).
+
+    STE STOCK options (RELIANCE, TCS, etc) hata do. Sirf:
+    - Index: NIFTY/BANKNIFTY/FINNIFTY/SENSEX (spot + options + futures)
+    - MCX:   GOLDM/SILVERM/CRUDEOIL/NATURALGAS (futures + options)
+    """
+    mask = (
+        df["name"].isin(ALLOWED_INSTRUMENT_NAMES)
+        & df["exch_seg"].isin(ALLOWED_EXCH_SEGS)
+        & df["instrumenttype"].isin(USEFUL_INSTRUMENT_TYPES)
+    )
+    return df[mask].reset_index(drop=True)
+
+
 def load_angel_instrument_master(force_refresh: bool = False) -> pd.DataFrame:
     """
-    Angel One ka poora instrument list download karta hai (hazaaron
-    symbols, saare tokens ke saath). Ye file rozana thodi badalti hai
-    (naye expiries add hote hain), isliye din mein ek baar refresh
-    karna sahi practice hai.
+    Angel One ka instrument list download + filter karta hai.
+    Sirf ALLOWED_INDEX + ALLOWED_MCX symbols rakhta hai (1.45L → ~12K).
+    JSON cache me save hota hai — roz ek baar fresh download, baaki
+    time cache se load (fast startup).
     """
     global _instrument_master_cache
 
     if _instrument_master_cache is not None and not force_refresh:
         return _instrument_master_cache
 
+    import os, json
+    from datetime import datetime as _dt
+    cache_path = os.path.join(os.path.dirname(__file__), "instruments_filtered.json")
+
+    # Aaj ki cache fresh hai? → JSON se load karo (fast)
+    today_str = _dt.now().strftime("%Y-%m-%d")
+    if os.path.exists(cache_path) and not force_refresh:
+        try:
+            with open(cache_path, "r") as f:
+                cached = json.load(f)
+            if cached.get("_cache_date") == today_str:
+                df = pd.DataFrame(cached["instruments"])
+                _instrument_master_cache = df
+                logger.info(f"Angel instrument master (cached): {len(df)} instruments.")
+                return df
+        except Exception as exc:
+            logger.warning(f"Instrument cache read fail — fresh download: {exc}")
+
+    # Fresh download from Angel One
     try:
         response = requests.get(ANGEL_INSTRUMENT_MASTER_URL, timeout=30)
         response.raise_for_status()
         data = response.json()
-        df = pd.DataFrame(data)
+        full_df = pd.DataFrame(data)
+        # FILTER — sirf allowed symbols rakho
+        df = _filter_instruments(full_df)
         _instrument_master_cache = df
-        logger.info(f"Angel instrument master load hua: {len(df)} instruments.")
+        logger.info(f"Angel instrument master load hua: {len(full_df)} → filtered {len(df)} instruments.")
+        # JSON cache save
+        try:
+            with open(cache_path, "w") as f:
+                json.dump({"_cache_date": today_str, "instruments": df.to_dict("records")}, f)
+        except Exception as exc:
+            logger.warning(f"Instrument cache save fail: {exc}")
         return df
     except Exception as exc:
         logger.error(f"Instrument master fetch mein error: {exc}")
@@ -536,20 +593,22 @@ def fetch_angel_ltp(broker, exchange: str, tradingsymbol: str, symboltoken: str)
 # strike = "2440000.000000"), isliye humesha /100 karna hai.
 
 INDEX_UNDERLYING_TOKENS = {
-    # Spot index token (LTP/candles ke liye — Section 4 mein already use ho raha)
-    "NIFTY": "99926000",
-    "BANKNIFTY": "99926009",
-    "FINNIFTY": "99926037",
+    # (exchange, spot index token) — LTP/candles ke liye
+    "NIFTY": ("NSE", "99926000"),
+    "BANKNIFTY": ("NSE", "99926009"),
+    "FINNIFTY": ("NSE", "99926037"),
+    "SENSEX": ("BSE", "99919000"),
 }
 
 
-# Index options → OPTIDX on NFO, Stock options → OPTSTK on NFO,
+# Index options → OPTIDX on NFO/BFO, Stock options → OPTSTK on NFO,
 # Commodity options → OPTFUT on MCX. Ye mapping resolve_option_contract
 # ke liye chahiye taaki har segment ke options token mil sake.
 OPTION_INSTRUMENT_TYPE = {
     "NIFTY": ("OPTIDX", "NFO"),
     "BANKNIFTY": ("OPTIDX", "NFO"),
     "FINNIFTY": ("OPTIDX", "NFO"),
+    "SENSEX": ("OPTIDX", "BFO"),
     "CRUDEOIL": ("OPTFUT", "MCX"),
     "CRUDEOILM": ("OPTFUT", "MCX"),
     "NATURALGAS": ("OPTFUT", "MCX"),
@@ -589,7 +648,8 @@ def resolve_underlying_token(symbol: str) -> tuple[str, str] | None:
 
     # Index → spot index token (99926000 etc)
     if symbol in INDEX_UNDERLYING_TOKENS:
-        return ("NSE", INDEX_UNDERLYING_TOKENS[symbol])
+        exch, token = INDEX_UNDERLYING_TOKENS[symbol]
+        return (exch, token)
 
     # MCX commodity → nearest FUTCOM expiry
     if symbol in OPTION_INSTRUMENT_TYPE and \

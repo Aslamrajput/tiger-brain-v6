@@ -221,3 +221,4 @@ __marimo__/
 
 # Tiger Brain: intraday candle cache (downloaded data, code nahi)
 data_cache/
+data/instruments_filtered.json
