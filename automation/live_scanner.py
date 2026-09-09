@@ -144,9 +144,28 @@ def scan_live_signals(
             continue
 
         # सिग्नल मिला — लाइव ऑर्डर के लिए तैयार
+        # _place_live_orders expects entry_ts, strike, option_type,
+        # entry_premium, is_delivery — backtest path adds these when
+        # creating positions. Live path must add them here or the signal
+        # is silently skipped (entry_ts is None → continue).
+        direction = setup.get("direction", "BUY")
+        is_call = direction == "BUY"
+        cur_underlying = setup.get("entry_price", 0.0)
+        strike_kind = setup.get("strike_kind", "ATM")
+        if strike_kind == "ITM":
+            strike = round(cur_underlying * 0.99) if is_call else round(cur_underlying * 1.01)
+        elif strike_kind == "OTM":
+            strike = round(cur_underlying * 1.01) if is_call else round(cur_underlying * 0.99)
+        else:
+            strike = round(cur_underlying)
         setup["symbol"] = sym
         setup["segment"] = seg
         setup["scan_time"] = now.isoformat()
+        setup["entry_ts"] = now
+        setup["strike"] = strike
+        setup["option_type"] = "CE" if is_call else "PE"
+        setup["entry_premium"] = 0.0  # real LTP fetched in _place_live_orders
+        setup["is_delivery"] = False  # intraday by default
         setup["exit_ts"] = None  # एंट्री सिग्नल — अभी exit नहीं
         logger.info("🐅 LIVE SIGNAL: %s %s score=%.1f (thresh %.1f) %s",
                     sym, setup.get("direction", ""),
