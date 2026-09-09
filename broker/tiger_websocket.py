@@ -34,6 +34,7 @@ import threading
 import time
 from collections import defaultdict
 from datetime import datetime
+from typing import Optional
 
 import pandas as pd
 
@@ -180,7 +181,7 @@ class TigerWebSocket:
         self._sws = None
 
         # Thread management
-        self._thread: threading.Thread | None = None
+        self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
         self._connected = threading.Event()
         self._lock = threading.Lock()
@@ -188,7 +189,7 @@ class TigerWebSocket:
         # Data caches (protected by _lock)
         self._ltp_cache: dict[str, float] = {}
         self._tick_count = 0
-        self._last_tick_time: datetime | None = None
+        self._last_tick_time: Optional[datetime] = None
         self._subscribed_tokens: set[str] = set()
 
         # Candle builder for 1m aggregation
@@ -196,7 +197,7 @@ class TigerWebSocket:
 
         # Stats
         self.connect_attempts = 0
-        self.last_error: str | None = None
+        self.last_error: Optional[str] = None
 
     def _extract_tokens(self) -> bool:
         """Extract JWT auth token + feed token from broker session."""
@@ -354,7 +355,7 @@ class TigerWebSocket:
     # ============================================================
     # SYMBOL → TOKEN RESOLUTION
     # ============================================================
-    def _resolve_symbol_token(self, symbol: str) -> str | None:
+    def _resolve_symbol_token(self, symbol: str) -> Optional[str]:
         """Resolve a scan symbol to its Angel One numeric token.
 
         Uses the same logic as data/loader.py resolve_underlying_token
