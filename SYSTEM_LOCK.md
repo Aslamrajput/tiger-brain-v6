@@ -306,6 +306,45 @@ V19_PRE_SQOFF_TRAIL_LOCK_PCT = 80.0   ← tighter lock in pre-sqoff window
 Pre-sqoff   → trail lock tightens to 80% (15-min window before square-off)
 ```
 
+### Trail floor math (CORRECT — matches code lines 240-241, 283-284)
+
+Code:
+```python
+peak_gain = (peak - entry) / entry
+trail_floor = entry * (1 + peak_gain * LOCK_PCT / 100)
+```
+
+Expanded formula:
+```
+trail_floor = entry + (peak - entry) * (LOCK_PCT / 100)
+
+Normal:    trail_floor = entry + (peak - entry) * 0.70
+Pre-sqoff: trail_floor = entry + (peak - entry) * 0.80
+```
+
+Exit trigger: `cur_premium <= trail_floor`
+
+### Worked examples (entry = ₹120)
+
+```
+Normal trail (70% lock):
+  peak ₹126 (+5%)  → floor = 120 + (126-120)*0.70 = 120 + 4.2  = ₹124.2
+                     LTP ₹126 > ₹124.2 → HOLD (trail just activated)
+
+  peak ₹200 (+67%) → floor = 120 + (200-120)*0.70 = 120 + 56   = ₹176.0
+                     LTP ₹195 > ₹176   → HOLD (riding the trend)
+
+  peak ₹210 (+75%) → floor = 120 + (210-120)*0.70 = 120 + 63   = ₹183.0
+                     LTP ₹195 > ₹183   → HOLD (still above floor)
+
+  peak ₹210, LTP ₹180 → ₹180 < ₹183 → EXIT (trail lock triggered)
+
+Pre-sqoff trail (80% lock, last 15 min before square-off):
+  peak ₹210 (+75%) → floor = 120 + (210-120)*0.80 = 120 + 72   = ₹192.0
+                     LTP ₹195 > ₹192  → HOLD
+                     LTP ₹190 < ₹192  → EXIT (tighter lock triggers sooner)
+```
+
 ---
 
 ## 9. DAILY QUOTA & SCAN CONFIG (FINAL)
