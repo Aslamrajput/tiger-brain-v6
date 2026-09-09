@@ -1481,7 +1481,7 @@ def fetch_yfinance_fallback(symbol, ticker, days_15m=365, days_1m=90):
     return data_15m, data_1m
 
 
-def fetch_angel_data(broker, days_15m=365, days_1m=90, use_scan_universe=False):
+def fetch_angel_data(broker, days_15m=365, days_1m=90, use_scan_universe=False, fetch_1m=True):
     """Fetch 15m (1 year) + 1m (max available) historical candles.
 
     PRIMARY: Angel One real historical candles (accurate market data).
@@ -1511,9 +1511,11 @@ def fetch_angel_data(broker, days_15m=365, days_1m=90, use_scan_universe=False):
                 time.sleep(3.0)  # rate-limit guard: 15m call se pehle (AB1021 fix)
                 d15 = fetch_angel_underlying_candles(
                     broker, sym, "FIFTEEN_MINUTE", days=days_15m)
-                time.sleep(3.0)  # rate-limit guard: 1m call se pehle (AB1021 fix)
-                d1 = fetch_angel_underlying_candles(
-                    broker, sym, "ONE_MINUTE", days=days_1m)
+                d1 = None
+                if fetch_1m:
+                    time.sleep(3.0)  # rate-limit guard: 1m call se pehle (AB1021 fix)
+                    d1 = fetch_angel_underlying_candles(
+                        broker, sym, "ONE_MINUTE", days=days_1m)
                 if d15 is not None and not d15.empty:
                     d15 = _normalize_cols(d15)
                     data_map[sym] = d15
@@ -1531,7 +1533,7 @@ def fetch_angel_data(broker, days_15m=365, days_1m=90, use_scan_universe=False):
             d15, d1 = fetch_yfinance_fallback(sym, ticker, days_15m, days_1m)
             if d15 is not None and not d15.empty:
                 data_map[sym] = d15
-                if d1 is not None and not d1.empty:
+                if fetch_1m and d1 is not None and not d1.empty:
                     data_map_1m[sym] = d1
                 yf_used.append(sym)
                 print(f"  {tag:30s}: 15m={len(d15):5d}  1m={len(data_map_1m.get(sym, [])):5d}  [yfinance]")

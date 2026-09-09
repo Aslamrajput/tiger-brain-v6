@@ -255,7 +255,8 @@ class TigerLiveRunner:
         try:
             from backtest.run_tiger_brain_backtest import fetch_angel_data
             self.data_map, self.data_map_1m, failed = fetch_angel_data(
-                self.broker, days_15m=30, days_1m=7, use_scan_universe=True)
+                self.broker, days_15m=30, days_1m=7, use_scan_universe=True,
+                fetch_1m=False)
             logger.info("✅ Data fetched: %d symbols (15m), %d symbols (1m). Failed: %d",
                         len(self.data_map), len(self.data_map_1m), len(failed))
         except Exception as exc:
@@ -277,7 +278,8 @@ class TigerLiveRunner:
         try:
             from backtest.run_tiger_brain_backtest import fetch_angel_data
             fresh_15m, fresh_1m, failed = fetch_angel_data(
-                self.broker, days_15m=10, days_1m=3, use_scan_universe=True)
+                self.broker, days_15m=10, days_1m=3, use_scan_universe=True,
+                fetch_1m=False)
             if fresh_15m:
                 self.data_map = fresh_15m
             if fresh_1m:
