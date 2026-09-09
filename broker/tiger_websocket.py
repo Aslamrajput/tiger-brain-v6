@@ -585,17 +585,23 @@ class TigerWebSocket:
     # ============================================================
     def status(self) -> dict:
         """Return a status dict for logging/monitoring."""
+        # Copy primitive values under lock, then build dict outside lock
         with self._lock:
-            return {
-                "connected": self.is_connected(),
-                "healthy": self.is_healthy(),
-                "tick_count": self._tick_count,
-                "subscribed_tokens": len(self._subscribed_tokens),
-                "last_tick_age_s": round(self.last_tick_age_seconds(), 1),
-                "connect_attempts": self.connect_attempts,
-                "last_error": self.last_error,
-                "candles_built": {
-                    token: self.candles.get_bar_count(token)
-                    for token in list(self._subscribed_tokens)[:5]
-                },
-            }
+            tick_count = self._tick_count
+            sub_count = len(self._subscribed_tokens)
+            last_age = self.last_tick_age_seconds()
+            sample_tokens = list(self._subscribed_tokens)[:5]
+
+        return {
+            "connected": self.is_connected(),
+            "healthy": self.is_healthy(),
+            "tick_count": tick_count,
+            "subscribed_tokens": sub_count,
+            "last_tick_age_s": round(last_age, 1),
+            "connect_attempts": self.connect_attempts,
+            "last_error": self.last_error,
+            "candles_built": {
+                token: self.candles.get_bar_count(token)
+                for token in sample_tokens
+            },
+        }
