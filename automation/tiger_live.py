@@ -262,7 +262,7 @@ class TigerLiveRunner:
                 syms = nse_scan_symbols()
                 market = "NSE (pre-market)"
             self.data_map, self.data_map_1m, failed = fetch_angel_data(
-                self.broker, days_15m=30, days_1m=7, fetch_1m=False,
+                self.broker, days_15m=30, days_1m=7, fetch_1m=True,
                 symbols=syms)
             logger.info("✅ Data fetched [%s]: %d symbols (15m), %d (1m). Failed: %d",
                         market, len(self.data_map), len(self.data_map_1m), len(failed))
@@ -294,7 +294,7 @@ class TigerLiveRunner:
                 return
 
             fresh_15m, fresh_1m, failed = fetch_angel_data(
-                self.broker, days_15m=10, days_1m=3, fetch_1m=False,
+                self.broker, days_15m=10, days_1m=3, fetch_1m=True,
                 symbols=symbols)
             if fresh_15m:
                 self.data_map = fresh_15m
