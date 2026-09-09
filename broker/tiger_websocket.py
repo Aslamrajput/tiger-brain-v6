@@ -117,7 +117,7 @@ class TickCandleBuilder:
             # latest cumulative (caller can diff if needed).
             cur["volume"] = max(cur["volume"], volume)
 
-    def get_1m_dataframe(self, token: str, min_bars: int = 5) -> pd.DataFrame | None:
+    def get_1m_dataframe(self, token: str, min_bars: int = 5) -> Optional[pd.DataFrame]:
         """Return 1m candles as a DataFrame for a token.
 
         Args:
@@ -325,7 +325,7 @@ class TigerWebSocket:
             return 0.0
         return self.get_ltp(token)
 
-    def get_1m_candles(self, token: str, min_bars: int = 5) -> pd.DataFrame | None:
+    def get_1m_candles(self, token: str, min_bars: int = 5) -> Optional[pd.DataFrame]:
         """Get live 1m candles built from real-time ticks.
 
         Returns DataFrame or None if insufficient tick data.
