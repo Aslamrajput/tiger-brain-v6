@@ -78,8 +78,8 @@ FUTURES_ROLL_DAYS = 1
 # Angel ek request mein itne din se zyada OI nahi deta (candles jaisa hi)
 OI_MAX_DAYS_PER_REQUEST = 30
 OI_MAX_RETRIES = 4
-OI_RETRY_BACKOFF_SEC = 5.0
-OI_CHUNK_PAUSE_SEC = 1.0
+OI_RETRY_BACKOFF_SEC = 10.0
+OI_CHUNK_PAUSE_SEC = 12.0
 
 # OI buildup ka matlab: naye positions ban rahe hain. Horizon BARS mein
 # nahi, MINUTES mein define hota hai — warna 1-min run pe "12 bars" 12

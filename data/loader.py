@@ -353,9 +353,9 @@ ANGEL_INTERVAL_MAX_DAYS = {
 # NOTE: retries kam (2) aur backoff chhota (2s) rakha gaya hai taaki
 # rate-limit hit hone par symbol jaldi yfinance fallback pe chale —
 # 75s retry backoff ke bajaye 6s me fail ho jaaye.
-ANGEL_CHUNK_PAUSE_SEC = 1.0
-ANGEL_MAX_RETRIES = 2
-ANGEL_RETRY_BACKOFF_SEC = 2.0
+ANGEL_CHUNK_PAUSE_SEC = 12.0
+ANGEL_MAX_RETRIES = 4
+ANGEL_RETRY_BACKOFF_SEC = 10.0
 
 _RATE_LIMIT_MARKERS = (
     "access rate", "rate limit", "exceeding access", "too many request",
@@ -511,6 +511,8 @@ def fetch_angel_ltp(broker, exchange: str, tradingsymbol: str, symboltoken: str)
     if broker.smart_api is None:
         raise RuntimeError("Broker login nahi hua hai — pehle broker.login() call karo.")
 
+    # Rate-limit guard: ltpData se pehle 3s ruko (monitoring fast, candle se alag endpoint)
+    time.sleep(3.0)
     try:
         response = broker.smart_api.ltpData(exchange, tradingsymbol, symboltoken)
         if response.get("status"):

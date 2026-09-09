@@ -263,6 +263,31 @@ class TigerLiveRunner:
             self.data_map, self.data_map_1m = {}, {}
 
     # ============================================================
+    # LIVE DATA REFRESH — har 20 min pe FRESH data fetch karo
+    # ============================================================
+    def _refresh_live_data(self):
+        """Har intraday scan pe FRESH 15m+1m data fetch karo.
+
+        Pehle Tiger 09:00 pe ek baar data laata tha, fir poora din
+        wahi purana data use karta tha — 0 signals, koi trade nahi.
+        Ab har 20 min pe fresh data aayega -> real live signals.
+        """
+        if self.broker is None:
+            return
+        try:
+            from backtest.run_tiger_brain_backtest import fetch_angel_data
+            fresh_15m, fresh_1m, failed = fetch_angel_data(
+                self.broker, days_15m=10, days_1m=3, use_scan_universe=True)
+            if fresh_15m:
+                self.data_map = fresh_15m
+            if fresh_1m:
+                self.data_map_1m = fresh_1m
+            logger.info("Live data refresh: %d symbols (15m), %d (1m). Failed: %d",
+                        len(fresh_15m), len(fresh_1m), len(failed))
+        except Exception as exc:
+            logger.warning("Live data refresh fail — stale data pe continue: %s", exc)
+
+    # ============================================================
     # MARKET OPEN (09:15) — ready signal
     # ============================================================
     def market_open(self):
@@ -438,6 +463,9 @@ class TigerLiveRunner:
             return
 
         logger.info("🐅 INTRADAY SCAN — %s", datetime.now().strftime("%H:%M"))
+
+        # === FRESH DATA — har scan pe latest candles fetch karo ===
+        self._refresh_live_data()
 
         # === TIGER KI EYES — pehle open positions monitor karo ===
         # Broker se real LTP fetch + V19 exit logic. Backtest se INDEPENDENT.
