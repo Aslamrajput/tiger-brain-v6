@@ -1481,7 +1481,7 @@ def fetch_yfinance_fallback(symbol, ticker, days_15m=365, days_1m=90):
     return data_15m, data_1m
 
 
-def fetch_angel_data(broker, days_15m=365, days_1m=90, use_scan_universe=False, fetch_1m=True):
+def fetch_angel_data(broker, days_15m=365, days_1m=90, use_scan_universe=False, fetch_1m=True, symbols=None):
     """Fetch 15m (1 year) + 1m (max available) historical candles.
 
     PRIMARY: Angel One real historical candles (accurate market data).
@@ -1491,6 +1491,9 @@ def fetch_angel_data(broker, days_15m=365, days_1m=90, use_scan_universe=False, 
     Args:
         use_scan_universe: if True, scan full 150+ F&O universe (Tiger V16).
             if False, use default 40-symbol trading universe.
+        symbols: if provided, use this {symbol: ticker} dict directly
+            (overrides use_scan_universe). Used by live path to fetch only
+            the active market's symbols (NSE or MCX).
     """
     from universe.fno_universe import scan_universe
     to_date = datetime.now().replace(hour=15, minute=30, second=0, microsecond=0)
@@ -1500,7 +1503,12 @@ def fetch_angel_data(broker, days_15m=365, days_1m=90, use_scan_universe=False, 
     failed = []
     yf_used = []
     angel_used = []
-    syms = scan_universe() if use_scan_universe else all_symbols()
+    if symbols is not None:
+        syms = symbols
+    elif use_scan_universe:
+        syms = scan_universe()
+    else:
+        syms = all_symbols()
     total = len(syms)
     for idx, (sym, ticker) in enumerate(syms.items(), 1):
         tag = f"[{idx}/{total}] {sym}"

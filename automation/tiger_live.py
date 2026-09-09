@@ -33,7 +33,7 @@ logging.basicConfig(
 
 from broker.angel_connect import AngelBroker, AngelConnectionError
 from automation.scheduler import (
-    TigerBrainScheduler, get_day_mode, is_market_hours, is_opening_range_period,
+    TigerBrainScheduler, get_day_mode, get_active_market, is_market_hours, is_opening_range_period,
     is_mcx_hours,
 )
 from data.loader import resolve_option_contract, OPTION_INSTRUMENT_TYPE
@@ -251,14 +251,21 @@ class TigerLiveRunner:
             logger.error("❌ Balance fetch fail: %s — real orders BANDH.", exc)
             self.account_capital = 0.0
 
-        # 3. Fetch fresh data
+        # 3. Fetch fresh data — ACTIVE market symbols (NSE or MCX).
+        # At 09:00 pre-market, no market is active yet -> default to NSE (next to open).
+        # Mid-market restart: fetch whichever market is currently active.
         try:
             from backtest.run_tiger_brain_backtest import fetch_angel_data
+            from universe.fno_universe import get_active_scan_symbols, nse_scan_symbols
+            syms, market = get_active_scan_symbols()
+            if not syms:
+                syms = nse_scan_symbols()
+                market = "NSE (pre-market)"
             self.data_map, self.data_map_1m, failed = fetch_angel_data(
-                self.broker, days_15m=30, days_1m=7, use_scan_universe=True,
-                fetch_1m=False)
-            logger.info("✅ Data fetched: %d symbols (15m), %d symbols (1m). Failed: %d",
-                        len(self.data_map), len(self.data_map_1m), len(failed))
+                self.broker, days_15m=30, days_1m=7, fetch_1m=False,
+                symbols=syms)
+            logger.info("✅ Data fetched [%s]: %d symbols (15m), %d (1m). Failed: %d",
+                        market, len(self.data_map), len(self.data_map_1m), len(failed))
         except Exception as exc:
             logger.error("❌ Data fetch fail: %s", exc)
             self.data_map, self.data_map_1m = {}, {}
@@ -267,25 +274,35 @@ class TigerLiveRunner:
     # LIVE DATA REFRESH — har 20 min pe FRESH data fetch karo
     # ============================================================
     def _refresh_live_data(self):
-        """Har intraday scan pe FRESH 15m+1m data fetch karo.
+        """Har intraday scan pe FRESH 15m data fetch karo — ACTIVE market only.
 
-        Pehle Tiger 09:00 pe ek baar data laata tha, fir poora din
-        wahi purana data use karta tha — 0 signals, koi trade nahi.
-        Ab har 20 min pe fresh data aayega -> real live signals.
+        Two-market session:
+          NSE (09:15-15:15): fetch 23 NSE symbols (20 stocks + 3 indices)
+          MCX (15:30-23:15): fetch 4 MCX symbols (GOLDM, SILVERM, CRUDEOIL, NATURALGAS)
+
+        Pehle Tiger ALL 27 symbols fetch karta tha (NSE+MCX mixed) — rate limit
+        pressure double thi. Ab sirf active market ke symbols fetch hote hain.
         """
         if self.broker is None:
             return
         try:
             from backtest.run_tiger_brain_backtest import fetch_angel_data
+            from universe.fno_universe import get_active_scan_symbols
+
+            symbols, market = get_active_scan_symbols()
+            if not symbols:
+                logger.info("Live data refresh: market CLOSED, skip fetch.")
+                return
+
             fresh_15m, fresh_1m, failed = fetch_angel_data(
-                self.broker, days_15m=10, days_1m=3, use_scan_universe=True,
-                fetch_1m=False)
+                self.broker, days_15m=10, days_1m=3, fetch_1m=False,
+                symbols=symbols)
             if fresh_15m:
                 self.data_map = fresh_15m
             if fresh_1m:
                 self.data_map_1m = fresh_1m
-            logger.info("Live data refresh: %d symbols (15m), %d (1m). Failed: %d",
-                        len(fresh_15m), len(fresh_1m), len(failed))
+            logger.info("Live data refresh [%s]: %d symbols (15m), %d (1m). Failed: %d",
+                        market, len(fresh_15m), len(fresh_1m), len(failed))
         except Exception as exc:
             logger.warning("Live data refresh fail — stale data pe continue: %s", exc)
 
@@ -293,12 +310,35 @@ class TigerLiveRunner:
     # MARKET OPEN (09:15) — ready signal
     # ============================================================
     def market_open(self):
-        """Market open — Tiger ready for intraday scanning."""
-        logger.info("🐅 MARKET OPEN — Tiger ready for intraday scanning.")
+        """NSE market open (09:15) — Tiger ready for NSE scanning."""
+        logger.info("🐅 NSE MARKET OPEN (09:15) — Tiger ready for NSE scanning.")
         if self.broker is None or not self.broker.is_session_valid():
             logger.warning("⚠️ Broker session invalid — pre-market login nahi hua tha.")
             self.pre_market_wake()
         # Tiger ki eyes turant open positions pe — kal ka trade bhool naye
+        self.monitor_open_positions()
+
+    def mcx_market_open(self):
+        """MCX market open (15:30) — Tiger switches to MCX scanning.
+
+        NSE closed at 15:15 (square-off done). Tiger now hunts MCX
+        commodities (GOLDM, SILVERM, CRUDEOIL, NATURALGAS) till 23:15.
+        Does NOT call pre_market_wake() (which fetches NSE symbols).
+        Instead: ensure broker login, then fetch MCX data only.
+        """
+        logger.info("🐅 MCX MARKET OPEN (15:30) — Tiger switches to MCX scanning.")
+        # Ensure broker session (login if needed, but skip NSE data fetch)
+        if self.broker is None or not self.broker.is_session_valid():
+            try:
+                self.broker = AngelBroker()
+                self.broker.ensure_logged_in()
+                logger.info("✅ Angel One broker logged in for MCX session.")
+            except AngelConnectionError as exc:
+                logger.error("❌ MCX broker login fail: %s", exc)
+                self.broker = None
+                return
+        # Fetch MCX data only (4 symbols, not all 27)
+        self._refresh_live_data()
         self.monitor_open_positions()
 
     # ============================================================
@@ -464,9 +504,11 @@ class TigerLiveRunner:
             logger.warning("Intraday scan: broker nahi hai, skip.")
             return
 
-        logger.info("🐅 INTRADAY SCAN — %s", datetime.now().strftime("%H:%M"))
+        from automation.scheduler import get_active_market
+        market = get_active_market()
+        logger.info("🐅 INTRADAY SCAN [%s] — %s", market, datetime.now().strftime("%H:%M"))
 
-        # === FRESH DATA — har scan pe latest candles fetch karo ===
+        # === FRESH DATA — har scan pe latest candles fetch karo (active market) ===
         self._refresh_live_data()
 
         # === TIGER KI EYES — pehle open positions monitor karo ===
@@ -1064,28 +1106,22 @@ class TigerLiveRunner:
         logger.info("=" * 60)
 
     def market_close(self):
-        """Legacy market close — NSE + MCX sab close + logout.
+        """NSE market close (15:30) — NSE session ended, MCX continues.
 
-        15:30 pe NSE positions close + MCX bhi close (fallback).
-        23:15 pe alag se MCX-only close bhi scheduled hai.
+        NSE square-off already happened at 15:15. This is just a log marker.
+        MCX positions are NOT closed here — MCX runs till 23:15.
+        NO logout — Tiger needs broker session for MCX scanning.
         """
         logger.info("=" * 60)
-        logger.info("🐅 MARKET CLOSE (15:30) — Square-off + cleanup")
+        logger.info("🐅 NSE MARKET CLOSE (15:30) — NSE session ended. MCX continues till 23:15.")
         logger.info("=" * 60)
         if self.broker is None:
-            logger.info("Broker nahi hai — kuch close nahi karna.")
+            logger.info("Broker nahi hai.")
             return
-        try:
-            closed = self.broker.square_off_all()
-            logger.info("✅ Square-off done: %d positions closed.", closed)
-        except Exception as exc:
-            logger.error("❌ Square-off error: %s", exc)
-        self._log_capital_after_exit("Market close 15:30")
-        try:
-            self.broker.logout()
-            logger.info("✅ Broker logged out.")
-        except Exception as exc:
-            logger.warning("Logout warning: %s", exc)
+        # Do NOT square_off_all() here — MCX positions must stay open.
+        # NSE square-off already ran at 15:15 (nse_square_off).
+        # MCX square-off will run at 23:15 (mcx_square_off).
+        self._log_capital_after_exit("NSE close 15:30 (MCX continues)")
 
     # ============================================================
     # NIGHTLY REPLAY (00:00) — audit + pattern tracking
@@ -1129,26 +1165,30 @@ class TigerLiveRunner:
             nse_square_off_fn=self.nse_square_off,
             mcx_square_off_fn=self.mcx_square_off,
             delivery_snapshot_fn=self.delivery_snapshot,
+            mcx_market_open_fn=self.mcx_market_open,
         )
         self.scheduler.start()
         self._running = True
         logger.info("✅ Tiger scheduler STARTED. 24x7 cycle active.")
-        logger.info("   Pre-market:  09:00")
-        logger.info("   Market open: 09:15")
-        logger.info("   Intraday:    every 20 min (entry bandh 3PM)")
-        logger.info("   Delivery:    15:00 (overnight direction)")
-        logger.info("   NSE close:   15:15 (NFO square-off)")
-        logger.info("   Market close:15:30 (fallback square-off)")
-        logger.info("   MCX close:   23:15 (MCX square-off + logout)")
-        logger.info("   Nightly:     00:00")
+        logger.info("   Pre-market:     09:00 (login + NSE data fetch)")
+        logger.info("   NSE open:       09:15 (scan 23 NSE symbols)")
+        logger.info("   Intraday:       every 20 min (active market only)")
+        logger.info("   Delivery:       15:00 (overnight direction)")
+        logger.info("   NSE square-off: 15:15 (close NSE positions)")
+        logger.info("   NSE close:      15:30 (NSE session end)")
+        logger.info("   MCX open:       15:30 (scan 4 MCX symbols)")
+        logger.info("   MCX square-off: 23:15 (close MCX positions + logout)")
+        logger.info("   Nightly:        00:00")
         logger.info("")
         logger.info("🐅 Tiger live hai. Ctrl+C pe shutdown hoga.")
 
         # Mid-market startup: agar market pehle se open hai, turant login karo
         if get_day_mode() == "TRADING" and is_market_hours():
-            logger.info("🐅 Market pehle se open hai — turant broker login + scan start.")
+            market = get_active_market()
+            logger.info("🐅 %s market pehle se open hai — turant broker login + scan start.", market)
+            # pre_market_wake fetches ACTIVE market data (NSE or MCX depending on time)
             self.pre_market_wake()
-            self.market_open()
+            self.monitor_open_positions()
 
         # Graceful shutdown
         def _shutdown(signum, frame):

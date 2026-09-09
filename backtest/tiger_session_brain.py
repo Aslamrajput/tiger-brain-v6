@@ -16,9 +16,9 @@ MARKET TIMELINE (Indian Standard Time):
   20:00-23:00  → NIGHT RUSH       (international session, biggest commodity moves)
   23:00-23:15  → SQUARE OFF       (close all MCX intraday)
 
-NSE: 9:15-15:30 (equity + index options)
-MCX: 9:00-23:30 (commodity options — GOLD, SILVER, CRUDEOIL, NATURALGAS)
-Both markets overlap 9:15-15:30 — Tiger hunts BOTH simultaneously!
+NSE: 9:15-15:15 (equity + index options) → square-off 15:15
+MCX: 15:30-23:15 (commodity options — GOLDM, SILVERM, CRUDEOIL, NATURALGAS)
+Two markets NEVER overlap — Tiger hunts NSE first, then MCX!
 
 Each session has different parameters:
   - Aggressiveness (score threshold, trade quota)
@@ -157,7 +157,7 @@ SESSION_SCHEDULE: list[SessionConfig] = [
     SessionConfig(
         name=SESSION_COMMODITY_DAY,
         label="🛢️ COMMODITY DAY",
-        time_start=time(9, 0),
+        time_start=time(15, 30),
         time_end=time(17, 0),
         segment_focus="mcx",
         score_threshold=70.0,
@@ -165,12 +165,11 @@ SESSION_SCHEDULE: list[SessionConfig] = [
         capital_allocation_pct=40.0,
         preferred_strike="ATM",
         aggressiveness="MEDIUM",
-        description="MCX morning+afternoon — gold/silver/crude trade alongside NSE",
+        description="MCX session opens 15:30 — gold/silver/crude (NSE closed)",
         notes=[
-            "MCX open 09:00-23:30 — trade commodities ALL DAY",
-            "If NSE signals weak, hunt in MCX simultaneously",
+            "MCX session 15:30-23:15 — AFTER NSE closes",
+            "Two markets NEVER overlap — NSE first, then MCX",
             "ATM strikes — commodity premiums fair",
-            "NSE flat day? Tiger hunts commodities instead!",
         ],
     ),
     SessionConfig(

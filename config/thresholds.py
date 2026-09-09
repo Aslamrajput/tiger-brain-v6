@@ -217,16 +217,15 @@ AUTOMATION = {
     "PRE_MARKET_WAKE_TIME": "09:00",
     "MARKET_OPEN_TIME": "09:15",
     "OPENING_RANGE_WAIT_MINUTES": VOLUME["OPENING_RANGE_MINUTES"],
-    "MARKET_CLOSE_TIME": "15:30",
-    # MCX (commodity) session — 09:00 to 23:30 (evening session till late night).
-    # Tiger scans MCX separately so the evening US/Europe volatility window
-    # (17:00-23:30) is not missed after NSE closes at 15:30.
-    "MCX_OPEN_TIME": "09:00",
-    "MCX_CLOSE_TIME": "23:30",
+    "MARKET_CLOSE_TIME": "15:30",   # NSE market close (NSE session ends)
+    # MCX (commodity) session — 15:30 to 23:15.
+    # Tiger trades MCX ONLY after NSE closes — two markets NEVER overlap.
+    # NSE: 09:15-15:15 (square-off 15:15), MCX: 15:30-23:15 (square-off 23:15).
+    "MCX_OPEN_TIME": "15:30",         # MCX trading starts AFTER NSE square-off
+    "MCX_CLOSE_TIME": "23:15",        # MCX trading ends (square-off at 23:15)
     "NIGHTLY_REPLAY_TIME": "00:00",
     # Intraday entry cutoff — 3:00 PM ke baad NO new NSE/equity intraday
-    # orders, sirf profit booking (exits). MCX commodity entries EXEMPT
-    # (MCX evening session 17:00-23:30 continues).
+    # orders, sirf profit booking (exits). MCX session starts at 15:30.
     "INTRADAY_ENTRY_CUTOFF_TIME": "15:00",
     # Delivery snapshot time — 3:00 PM pe Tiger next-day direction decide
     # karke delivery (overnight) orders lagata hai.

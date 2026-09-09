@@ -67,6 +67,11 @@ LOT_SIZES = {
     "NATURALGAS": 1250,
     "GOLD": 100,
     "SILVER": 30,
+    # MCX MINI contracts — smaller lot sizes for small capital accounts
+    "GOLDM": 100,           # Gold Mini (100g vs 1kg full)
+    "SILVERM": 1,           # Silver Mini (1kg vs 30kg full)
+    "CRUDEOILM": 10,        # Crude Oil Mini (10 bbl vs 100 full)
+    "NATGASMINI": 250,      # Natural Gas Mini (250 vs 1250 full)
 }
 
 # F&O universe — high-liquidity stocks + index + commodities
@@ -122,6 +127,9 @@ COMMODITY_SYMBOLS = {
     "NATURALGAS": "NG=F",
     "GOLD": "GC=F",
     "SILVER": "SI=F",  # MCX Silver (US futures proxy)
+    # MCX Mini contracts — used for live MCX session (small capital friendly)
+    "GOLDM": "GC=F",       # Gold Mini (yfinance proxy = Gold futures)
+    "SILVERM": "SI=F",     # Silver Mini (yfinance proxy = Silver futures)
 }
 
 # ============================================================
@@ -149,11 +157,71 @@ SCAN_COMMODITY_SYMBOLS = {
 
 
 def scan_universe() -> dict:
-    """Flat {symbol: ticker} map of the full 150+ scan universe (NSE + MCX)."""
+    """Flat {symbol: ticker} map of the full scan universe (NSE + MCX).
+
+    Used by backtest. Live path uses nse_scan_symbols() / mcx_scan_symbols()
+    to fetch only the active market's symbols (rate-limit optimization).
+    """
     out = dict(SCAN_STOCK_SYMBOLS)
     out.update(SCAN_COMMODITY_SYMBOLS)
     out.update(INDEX_SYMBOLS)
     return out
+
+
+# ============================================================
+# TWO-MARKET SESSION UNIVERSE (NSE + MCX split)
+# ============================================================
+# NSE:  09:15 - 15:15  →  20 stocks + 3 indices = 23 symbols
+# MCX:  15:30 - 23:15  →  4 commodities (GOLDM, SILVERM, CRUDEOIL, NATURALGAS)
+# Two markets NEVER overlap — Tiger fetches only the active market per scan.
+
+def nse_scan_symbols() -> dict:
+    """NSE session symbols — 20 F&O stocks + 3 indices (23 total)."""
+    out = dict(SCAN_STOCK_SYMBOLS)
+    out.update(INDEX_SYMBOLS)
+    return out
+
+
+def mcx_scan_symbols() -> dict:
+    """MCX session symbols — 4 commodities (mini contracts for small capital)."""
+    return {
+        "GOLDM": "GC=F",
+        "SILVERM": "SI=F",
+        "CRUDEOIL": "CL=F",
+        "NATURALGAS": "NG=F",
+    }
+
+
+def get_active_scan_symbols(now=None) -> tuple[dict, str]:
+    """Return (symbols_dict, market_label) for the currently active session.
+
+    Returns:
+        (dict, "NSE")   during 09:15-15:15
+        (dict, "MCX")   during 15:30-23:15
+        ({}, "CLOSED")  otherwise
+    """
+    from datetime import datetime, time
+    from config.thresholds import AUTOMATION
+
+    if now is None:
+        now = datetime.now()
+    current = now.time()
+
+    nse_open_h, nse_open_m = map(int, AUTOMATION["MARKET_OPEN_TIME"].split(":"))
+    nse_off_h, nse_off_m = map(int, AUTOMATION["NSE_SQUARE_OFF_TIME"].split(":"))
+    mcx_open_h, mcx_open_m = map(int, AUTOMATION["MCX_OPEN_TIME"].split(":"))
+    mcx_close_h, mcx_close_m = map(int, AUTOMATION["MCX_CLOSE_TIME"].split(":"))
+
+    nse_open = time(nse_open_h, nse_open_m)
+    nse_close = time(nse_off_h, nse_off_m)  # 15:15 square-off
+    mcx_open = time(mcx_open_h, mcx_open_m)  # 15:30
+    mcx_close = time(mcx_close_h, mcx_close_m)  # 23:15
+
+    if nse_open <= current <= nse_close:
+        return nse_scan_symbols(), "NSE"
+    if mcx_open <= current <= mcx_close:
+        return mcx_scan_symbols(), "MCX"
+    return {}, "CLOSED"
 
 
 # Combined universe grouped by segment

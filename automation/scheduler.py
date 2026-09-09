@@ -64,27 +64,24 @@ def is_trading_day(check_date: datetime = None) -> bool:
 
 
 def is_market_hours(check_time: datetime = None) -> bool:
-    """
-    Market open/close time ke beech hai ya nahi (sirf trading days pe
-    meaningful hai — caller ko pehle is_trading_day() check karna chahiye).
+    """Market open hai ya nahi — NSE (09:15-15:15) YA MCX (15:30-23:15).
 
-    NSE (equity/index) 09:15-15:30, MCX (commodity) 09:00-23:30.
-    Agar NSE YA MCX koi bhi open hai → True (Tiger scan karega).
+    Two markets NEVER overlap:
+      NSE: 09:15 - 15:15 (square-off at 15:15)
+      MCX: 15:30 - 23:15 (square-off at 23:15)
 
-    ⚠️ NOTE: Market holidays (Diwali, Republic Day, etc.) is function mein
-    check NAHI hote — sirf weekday logic hai. Holiday calendar ek alag
-    concern hai jo Phase 2/3 mein NSE holiday list se add karna hoga.
+    15:15-15:30 = transition gap (no scanning).
     """
     check_time = check_time or datetime.now()
     current = check_time.time()
 
-    # NSE session
+    # NSE session: 09:15 - 15:15 (square-off time = end of NSE scanning)
     nse_open_h, nse_open_m = map(int, AUTOMATION["MARKET_OPEN_TIME"].split(":"))
-    nse_close_h, nse_close_m = map(int, AUTOMATION["MARKET_CLOSE_TIME"].split(":"))
+    nse_off_h, nse_off_m = map(int, AUTOMATION["NSE_SQUARE_OFF_TIME"].split(":"))
     nse_open = time(nse_open_h, nse_open_m)
-    nse_close = time(nse_close_h, nse_close_m)
+    nse_close = time(nse_off_h, nse_off_m)
 
-    # MCX session (09:00-23:30 — evening session included)
+    # MCX session: 15:30 - 23:15
     mcx_open_h, mcx_open_m = map(int, AUTOMATION["MCX_OPEN_TIME"].split(":"))
     mcx_close_h, mcx_close_m = map(int, AUTOMATION["MCX_CLOSE_TIME"].split(":"))
     mcx_open = time(mcx_open_h, mcx_open_m)
@@ -95,27 +92,56 @@ def is_market_hours(check_time: datetime = None) -> bool:
     return nse_active or mcx_active
 
 
-def is_mcx_hours(check_time: datetime = None) -> bool:
-    """MCX commodity session active hai? (09:00-23:30)."""
+def get_active_market(check_time: datetime = None) -> str:
+    """Return 'NSE', 'MCX', or 'CLOSED' for the current time.
+
+    NSE:  09:15 - 15:15
+    MCX:  15:30 - 23:15
+    Else: CLOSED (transition gap 15:15-15:30, or night/morning)
+    """
     check_time = check_time or datetime.now()
     current = check_time.time()
-    open_h, open_m = map(int, AUTOMATION["MCX_OPEN_TIME"].split(":"))
-    close_h, close_m = map(int, AUTOMATION["MCX_CLOSE_TIME"].split(":"))
-    return time(open_h, open_m) <= current <= time(close_h, close_m)
+
+    nse_open_h, nse_open_m = map(int, AUTOMATION["MARKET_OPEN_TIME"].split(":"))
+    nse_off_h, nse_off_m = map(int, AUTOMATION["NSE_SQUARE_OFF_TIME"].split(":"))
+    mcx_open_h, mcx_open_m = map(int, AUTOMATION["MCX_OPEN_TIME"].split(":"))
+    mcx_close_h, mcx_close_m = map(int, AUTOMATION["MCX_CLOSE_TIME"].split(":"))
+
+    if time(nse_open_h, nse_open_m) <= current <= time(nse_off_h, nse_off_m):
+        return "NSE"
+    if time(mcx_open_h, mcx_open_m) <= current <= time(mcx_close_h, mcx_close_m):
+        return "MCX"
+    return "CLOSED"
+
+
+def is_nse_hours(check_time: datetime = None) -> bool:
+    """NSE session active? (09:15-15:15)."""
+    return get_active_market(check_time) == "NSE"
+
+
+def is_mcx_hours(check_time: datetime = None) -> bool:
+    """MCX commodity session active hai? (15:30-23:15)."""
+    return get_active_market(check_time) == "MCX"
 
 
 def is_opening_range_period(check_time: datetime = None) -> bool:
-    """
-    Section 32 ka "Opening Range Wait" — market open ke pehle N minutes
-    mein koi trade nahi lena, sirf observation.
+    """Opening Range Wait — market open ke pehle N minutes no trade.
+
+    Handles BOTH market opens:
+      NSE opens at 09:15 → wait N minutes (09:15-09:30)
+      MCX opens at 15:30 → wait N minutes (15:30-15:45)
     """
     check_time = check_time or datetime.now()
-    open_h, open_m = map(int, AUTOMATION["MARKET_OPEN_TIME"].split(":"))
+    wait = AUTOMATION["OPENING_RANGE_WAIT_MINUTES"]
 
-    open_dt = check_time.replace(hour=open_h, minute=open_m, second=0, microsecond=0)
-    minutes_since_open = (check_time - open_dt).total_seconds() / 60
-
-    return 0 <= minutes_since_open < AUTOMATION["OPENING_RANGE_WAIT_MINUTES"]
+    for open_key in ("MARKET_OPEN_TIME", "MCX_OPEN_TIME"):
+        open_h, open_m = map(int, AUTOMATION[open_key].split(":"))
+        open_dt = check_time.replace(
+            hour=open_h, minute=open_m, second=0, microsecond=0)
+        minutes_since_open = (check_time - open_dt).total_seconds() / 60
+        if 0 <= minutes_since_open < wait:
+            return True
+    return False
 
 
 # ============================================================
@@ -174,6 +200,7 @@ class TigerBrainScheduler:
         nse_square_off_fn=None,
         mcx_square_off_fn=None,
         delivery_snapshot_fn=None,
+        mcx_market_open_fn=None,
     ):
         pre_h, pre_m = map(int, AUTOMATION["PRE_MARKET_WAKE_TIME"].split(":"))
         open_h, open_m = map(int, AUTOMATION["MARKET_OPEN_TIME"].split(":"))
@@ -182,6 +209,7 @@ class TigerBrainScheduler:
         nse_h, nse_m = map(int, AUTOMATION.get("NSE_SQUARE_OFF_TIME", "15:15").split(":"))
         mcx_h, mcx_m = map(int, AUTOMATION.get("MCX_SQUARE_OFF_TIME", "23:15").split(":"))
         deliv_h, deliv_m = map(int, AUTOMATION.get("DELIVERY_SNAPSHOT_TIME", "15:00").split(":"))
+        mcx_open_h, mcx_open_m = map(int, AUTOMATION.get("MCX_OPEN_TIME", "15:30").split(":"))
 
         if pre_market_fn:
             self.scheduler.add_job(
@@ -214,7 +242,14 @@ class TigerBrainScheduler:
                 hour=deliv_h, minute=deliv_m, id="delivery_snapshot",
             )
 
-        # NSE square-off at 15:15 (15 min before NSE close 15:30)
+        # MCX market open at 15:30 — Tiger switches to commodity scanning
+        if mcx_market_open_fn:
+            self.scheduler.add_job(
+                self._guarded(mcx_market_open_fn), "cron",
+                hour=mcx_open_h, minute=mcx_open_m, id="mcx_market_open",
+            )
+
+        # NSE square-off at 15:15 (NSE scanning ends)
         if nse_square_off_fn:
             self.scheduler.add_job(
                 self._guarded(nse_square_off_fn), "cron",
