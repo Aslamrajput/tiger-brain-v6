@@ -58,6 +58,11 @@ class AngelBroker:
         self.session_data = None
         self.login_time = None
 
+        # Tiger WebSocket V2 — real-time tick stream (zero rate limits)
+        # Initialized lazily on first use (after login)
+        self.websocket = None
+        self._ws_enabled = os.getenv("TIGER_WEBSOCKET", "true").lower() == "true"
+
     def _validate_credentials(self):
         """
         .env se saari zaroori credentials mil gayi ya nahi, ye check
@@ -140,6 +145,11 @@ class AngelBroker:
                 logger.info(
                     f"✅ Angel One login successful — {self.login_time.strftime('%Y-%m-%d %H:%M:%S')}"
                 )
+
+                # Auto-start WebSocket after successful login
+                if self._ws_enabled:
+                    self.start_websocket()
+
                 return True
 
             except Exception as exc:
@@ -152,6 +162,51 @@ class AngelBroker:
             f"Login {max_retries} attempts ke baad bhi fail hua. "
             f"Last error: {last_error}"
         )
+
+    # ============================================================
+    # WEBSOCKET V2 — real-time tick stream (zero rate limits)
+    # ============================================================
+    def start_websocket(self):
+        """Start SmartWebSocketV2 for real-time tick data.
+
+        After login, this creates a persistent WebSocket connection that
+        streams live ticks without hitting REST rate limits. The WS runs
+        in a background daemon thread.
+        """
+        if self.websocket is not None and self.websocket.is_connected():
+            logger.info("📡 WS already connected — skip start")
+            return
+        try:
+            from broker.tiger_websocket import TigerWebSocket
+            self.websocket = TigerWebSocket(self, mode=3)  # SNAP_QUOTE
+            self.websocket.start()
+            logger.info("🔥 TigerWebSocket V2 started — real-time ticks streaming")
+        except Exception as exc:
+            logger.warning(f"⚠️ WebSocket start fail (REST fallback active): {exc}")
+            self.websocket = None
+
+    def stop_websocket(self):
+        """Stop the WebSocket connection."""
+        if self.websocket is not None:
+            self.websocket.stop()
+            self.websocket = None
+
+    def ws_get_ltp(self, tradingsymbol: str, symboltoken: str,
+                   exchange: str) -> float:
+        """Get LTP from WebSocket cache (zero rate limits, zero REST calls).
+
+        Falls back to REST get_ltp() if:
+          - WebSocket not connected
+          - No tick received for this token yet
+          - WebSocket disabled in config
+        """
+        if self.websocket is not None and self.websocket.is_healthy():
+            ltp = self.websocket.get_ltp(symboltoken)
+            if ltp > 0:
+                return ltp
+            # WS healthy but no tick for this token yet — fall through to REST
+        # REST fallback
+        return self.get_ltp(tradingsymbol, symboltoken, exchange)
 
     def is_session_valid(self) -> bool:
         """
@@ -180,10 +235,11 @@ class AngelBroker:
             logger.info("Session already valid hai, fresh login ki zarurat nahi.")
 
     def logout(self):
-        """
-        Session close karta hai — market close hone ke baad call hona
+        """Session close karta hai — market close hone ke baad call hona
         chahiye (Section 34 ka "market close" step).
         """
+        # Stop WebSocket first
+        self.stop_websocket()
         if self.smart_api is not None:
             try:
                 self.smart_api.terminateSession(self.client_id)

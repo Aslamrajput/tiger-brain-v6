@@ -291,9 +291,27 @@ class TigerLiveRunner:
                 symbols=syms)
             logger.info("✅ Data fetched [%s]: %d symbols (15m), %d (1m). Failed: %d",
                         market, len(self.data_map), len(self.data_map_1m), len(failed))
+
+            # 3b. Subscribe scan symbols to WebSocket for live tick stream
+            self._subscribe_ws_symbols(list(syms.keys()))
         except Exception as exc:
             logger.error("❌ Data fetch fail: %s", exc)
             self.data_map, self.data_map_1m = {}, {}
+
+    def _subscribe_ws_symbols(self, symbols: list[str]):
+        """Subscribe scan symbols to WebSocket for real-time ticks.
+
+        This replaces per-scan REST LTP calls with a persistent stream.
+        Called after data fetch (pre-market + each market transition).
+        """
+        if self.broker is None or self.broker.websocket is None:
+            return
+        try:
+            self.broker.websocket.subscribe_symbols(symbols)
+            logger.info("📡 WS subscribed: %d scan symbols for live ticks",
+                        len(symbols))
+        except Exception as exc:
+            logger.warning(f"WS subscribe fail (REST fallback): {exc}")
 
     # ============================================================
     # LIVE DATA REFRESH — har 20 min pe FRESH data fetch karo
@@ -327,6 +345,9 @@ class TigerLiveRunner:
                 self.data_map_1m = fresh_1m
             logger.info("Live data refresh [%s]: %d symbols (15m), %d (1m). Failed: %d",
                         market, len(fresh_15m), len(fresh_1m), len(failed))
+
+            # Re-subscribe to WebSocket for new market symbols
+            self._subscribe_ws_symbols(list(symbols.keys()))
         except Exception as exc:
             logger.warning("Live data refresh fail — stale data pe continue: %s", exc)
 
@@ -422,7 +443,7 @@ class TigerLiveRunner:
                 continue
 
             # Real LTP — broker se fresh
-            ltp = self.broker.get_ltp(tsym, token, exch)
+            ltp = self.broker.ws_get_ltp(tsym, token, exch)
             if ltp <= 0:
                 ltp = float(p.get("ltp", 0) or 0)
             if ltp <= 0:
@@ -580,6 +601,17 @@ class TigerLiveRunner:
         from automation.scheduler import get_active_market
         market = get_active_market()
         logger.info("🐅 INTRADAY SCAN [%s] — %s", market, datetime.now().strftime("%H:%M"))
+
+        # WebSocket status — zero rate limits active?
+        if self.broker.websocket is not None:
+            ws_status = self.broker.websocket.status()
+            if ws_status["healthy"]:
+                logger.info("📡 WS: connected, %d ticks, %d tokens, last %ss ago",
+                            ws_status["tick_count"], ws_status["subscribed_tokens"],
+                            ws_status["last_tick_age_s"])
+            else:
+                logger.warning("📡 WS: unhealthy (%s) — REST fallback active",
+                               ws_status.get("last_error", "disconnected"))
 
         # === FRESH DATA — har scan pe latest candles fetch karo (active market) ===
         self._refresh_live_data()
@@ -783,7 +815,7 @@ class TigerLiveRunner:
             # Fund Brain se proper sizing karte hain. Quantity hamesha
             # lot size ke multiple mein hoti hai (P2 fix).
             sim_premium = t.get("entry_premium", 0.0)
-            real_ltp = self.broker.get_ltp(
+            real_ltp = self.broker.ws_get_ltp(
                 contract["tradingsymbol"],
                 contract["symboltoken"],
                 contract["exchange"],
@@ -812,7 +844,7 @@ class TigerLiveRunner:
                     mini_symbol, strike, option_type)
                 if mini_contract is not None:
                     mini_lot = mini_contract.get("lotsize", 1) or 1
-                    mini_ltp = self.broker.get_ltp(
+                    mini_ltp = self.broker.ws_get_ltp(
                         mini_contract["tradingsymbol"],
                         mini_contract["symboltoken"],
                         mini_contract["exchange"],
