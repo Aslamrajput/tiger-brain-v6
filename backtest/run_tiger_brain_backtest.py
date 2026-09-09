@@ -168,6 +168,16 @@ V19_FIXED_TARGET_PCT = 50.0     # book 40% at +50% (was +100% — book profit so
 V19_FIXED_TARGET_BOOK = 0.40    # book 40% of position at target (ride 60%)
 V19_RUNAWAY_EXIT_PCT = 250.0    # absolute safety exit
 
+# ============================================================
+# V19 SYMBOL FILTER — INDEX + COMMODITY only, NO STOCK options
+# ============================================================
+ALLOWED_SYMBOLS = [
+    # INDEX — Din me 9:15 se 3:30
+    "NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX",
+    # COMMODITY — Raat me 5pm se 11:30
+    "GOLD", "SILVER", "CRUDEOIL", "NATURALGAS", "COPPER", "GOLDM", "SILVERM",
+]
+
 # SMART SQUARE-OFF (V19+) — don't blindly close profitable trades.
 # In the 15-min window before square-off, apply a tighter trail so that
 # profitable trades (trail already active) exit SMARTLY on trail instead
@@ -980,6 +990,9 @@ def find_tiger_brain_entry_15m(df_15m, i_15m, seg, is_expiry, symbol, vix_val,
 
     HARD GATES: zone touch on 15m bar + body confirmation.
     """
+    if symbol not in ALLOWED_SYMBOLS:
+        return None  # STOCK options BLOCKED — INDEX + COMMODITY only
+
     if i_15m < 40:
         return None
 
@@ -1112,6 +1125,9 @@ def find_tiger_brain_entry(df_15m, i_15m, df_1m, seg, is_expiry, symbol,
     SCORE BOOSTERS (add to score, rank by score):
       All 5 brains contribute as scorers.
     """
+    if symbol not in ALLOWED_SYMBOLS:
+        return None  # STOCK options BLOCKED — INDEX + COMMODITY only
+
     if df_1m is None or len(df_1m) == 0:
         return None
 

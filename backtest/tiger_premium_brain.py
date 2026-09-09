@@ -49,8 +49,8 @@ logger = logging.getLogger("tiger_brain.premium_brain")
 # ============================================================
 IV_DEEP_DISCOUNT_MAX = 30.0   # <30% = cheapest premium (best entry)
 IV_DISCOUNT_MAX = 50.0        # 30-50% = discount (good entry)
-IV_FAIR_MAX = 65.0            # 50-65% = fair (only if rocket 90+)
-IV_EXPENSIVE_EXIT = 70.0      # >70% = exit signal (sell expensive!)
+IV_FAIR_MAX = 85.0            # 50-85% = fair (V18 loose entry — was 65, too strict)
+IV_EXPENSIVE_EXIT = 90.0      # >90% = exit signal (was 70 — only exit truly expensive)
 
 # Lookback window for IV percentile (number of historical IV readings)
 IV_PERCENTILE_LOOKBACK = 100  # ~4 trading days of 25 bars/day
@@ -184,15 +184,15 @@ class PremiumDiscountTracker:
             discount_bonus = 5.0
             notes.append(f"Discount premium — IV at {percentile:.0f}th percentile, good entry")
         elif status == "FAIR":
-            # Only enter if rocket score is very high (90+)
-            if setup_score >= 90.0:
-                should_enter = True
-                discount_bonus = 0.0
-                notes.append(f"Fair IV ({percentile:.0f}th pct) but rocket {setup_score:.0f} — high conviction override")
-            else:
-                notes.append(f"Fair IV, score {setup_score:.0f} < 90 — skip, wait for discount")
+            # V18 loose entry — allow FAIR IV entries (was: only if rocket 90+)
+            should_enter = True
+            discount_bonus = 0.0
+            notes.append(f"Fair IV ({percentile:.0f}th pct) — V18 loose entry allowed")
         else:  # EXPENSIVE
-            notes.append(f"EXPENSIVE premium! IV at {percentile:.0f}th percentile — DO NOT BUY")
+            # V18 loose entry — still allow EXPENSIVE entries (don't block)
+            should_enter = True
+            discount_bonus = 0.0
+            notes.append(f"EXPENSIVE IV at {percentile:.0f}th pct — entry allowed (V18 loose)")
 
         # --- Exit decision (if holding) ---
         should_exit = False
