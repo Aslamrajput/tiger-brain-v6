@@ -33,6 +33,7 @@ from backtest.tiger_session_brain import (
     should_force_hunt,
 )
 from universe.fno_universe import segment_of, is_expiry_day
+from config.thresholds import SCALPER
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +63,107 @@ def _latest_15m_index(df_15m: pd.DataFrame, now: datetime) -> int:
     return df_15m.index.get_loc(closed[-1])
 
 
+def _should_activate_scalper(
+    ts_time: time,
+    segment: str,
+    daily_trades: int,
+    last_trade_time: datetime | None,
+) -> bool:
+    """Should Tiger activate Fallback Scalper Mode?
+
+    Activates when:
+      - 0 trades AND past zero-trade activation time (NSE 14:00 / MCX 21:00)
+      - OR idle 2+ hours since last trade
+    """
+    idle_mins = SCALPER["ACTIVATION_IDLE_MINUTES"]
+    zero_time_str = SCALPER["ACTIVATION_ZERO_TRADE_TIME"].get(
+        segment, "21:00" if segment == "mcx" else "14:00")
+    zh, zm = map(int, zero_time_str.split(":"))
+    zero_activate = time(zh, zm) <= ts_time
+
+    if daily_trades == 0 and zero_activate:
+        return True
+
+    if last_trade_time is not None:
+        idle = (datetime.now() - last_trade_time).total_seconds() / 60
+        if idle >= idle_mins and daily_trades < 3:
+            return True
+
+    return False
+
+
+def find_scalper_entry(
+    df_15m: pd.DataFrame,
+    i_15m: int,
+    segment: str,
+    symbol: str,
+    broker,
+    pcr_cache: dict,
+    vix_val: float,
+) -> dict | None:
+    """🐅 TIGER FALLBACK SCALPER — micro-momentum entry, NO zone required.
+
+    Tiger ke bina shikar liye ghar nahi — jab koi setup nahi mil raha,
+    chota momentum pakad ke turant entry le leta hai.
+
+    Criteria (very relaxed — NO zone touch, NO rocket gate):
+      1. Latest 15m candle body >= 50% of range (momentum candle)
+      2. Volume >= 1.1x average (small surge — not 1.3x)
+      3. Direction = candle direction (green → BUY/CE, red → SELL/PE)
+      4. Score = 50 (minimum — just momentum confirmed)
+
+    Returns:
+        dict: entry setup with is_scalper=True, or None.
+    """
+    if df_15m is None or len(df_15m) < 20:
+        return None
+
+    row = df_15m.iloc[i_15m]
+    o, h, l, c = float(row["open"]), float(row["high"]), float(row["low"]), float(row["close"])
+    rng = h - l
+    if rng <= 0:
+        return None
+
+    body = abs(c - o)
+    body_pct = (body / rng) * 100
+    if body_pct < SCALPER["MIN_BODY_PCT"]:
+        return None
+
+    # Volume check — 1.1x average of last 10 bars
+    vol = float(row.get("volume", 0) or 0)
+    avg_vol = float(df_15m["volume"].iloc[max(0, i_15m - 10):i_15m].mean())
+    if avg_vol > 0 and vol < avg_vol * SCALPER["MIN_VOLUME_SURGE"]:
+        return None
+
+    # Direction
+    direction = "BUY" if c > o else "SELL"
+    is_call = direction == "BUY"
+
+    # Entry price = close of momentum candle
+    entry_price = c
+
+    # Strike kind = ATM for scalper (quick in, quick out)
+    strike_kind = "ATM"
+
+    # Score — just 50 (momentum confirmed, that's enough for scalper)
+    score = SCALPER["MIN_SCORE"]
+
+    logger.info(
+        f"🐅 SCALPER SIGNAL: {symbol} {direction} "
+        f"body={body_pct:.0f}% vol={vol / avg_vol if avg_vol > 0 else 0:.1f}x "
+        f"score={score:.0f} [FALLBACK SCALPER]"
+    )
+
+    return {
+        "direction": direction,
+        "entry_price": entry_price,
+        "setup_score": score,
+        "strike_kind": strike_kind,
+        "score_details": f"SCALPER: body={body_pct:.0f}% vol_surge={vol / avg_vol if avg_vol > 0 else 0:.1f}x",
+        "is_scalper": True,
+    }
+
+
 def scan_live_signals(
     data_map: dict[str, pd.DataFrame],
     data_map_1m: dict[str, pd.DataFrame] | None,
@@ -69,12 +171,17 @@ def scan_live_signals(
     now: datetime | None = None,
     daily_entries_taken: int = 0,
     max_entries_per_day: int = 5,
+    last_trade_time: datetime | None = None,
+    scalper_trades_today: int = 0,
 ) -> list[dict]:
     """अभी के timestamp पर हर symbol के लिए 7 ब्रेन चलाएँ → live signals।
 
     यह बैकटेस्ट सिमुलेशन नहीं है — सिर्फ़ latest closed 15m bar पर स्कैन।
     हर symbol के लिए find_tiger_brain_entry या find_tiger_brain_entry_15m
     कॉल होता है (1m data है या नहीं उसपर निर्भर)।
+
+    अगर कोई normal signal नहीं मिलता और Scalper Mode active है, तो
+    find_scalper_entry() fallback चलता है — बिना zone के momentum entry।
 
     Returns:
         list[dict]: सिग्नल जो setup_score >= session_threshold हैं।
@@ -174,6 +281,64 @@ def scan_live_signals(
 
     logger.info("Live scan done @ %s: %d signal(s) from %d symbols",
                 now.strftime("%H:%M"), len(signals), len(data_map))
+
+    # === TIGER FALLBACK SCALPER MODE ===
+    # If no normal signals found AND scalper should activate → try scalper
+    if len(signals) == 0:
+        # Determine segment from active market
+        from automation.scheduler import get_active_market
+        active_market = get_active_market(now)
+        seg = "mcx" if active_market == "MCX" else "nse"
+
+        if _should_activate_scalper(ts_time, seg, daily_entries_taken, last_trade_time):
+            if scalper_trades_today < SCALPER["MAX_TRADES_PER_DAY"]:
+                logger.info(
+                    "🐅 SCALPER MODE ACTIVE — Tiger hunting micro-momentum "
+                    "(0 signals, %d trades today, scalper %d/%d)",
+                    daily_entries_taken, scalper_trades_today,
+                    SCALPER["MAX_TRADES_PER_DAY"])
+
+                # Try scalper on each symbol — first hit wins
+                for sym, df_15m in data_map.items():
+                    if df_15m is None or len(df_15m) < 20:
+                        continue
+                    i_15m = _latest_15m_index(df_15m, now)
+                    if i_15m < 20:
+                        continue
+                    try:
+                        scalp = find_scalper_entry(
+                            df_15m, i_15m, seg, sym, broker, {}, 0.0)
+                    except Exception as exc:
+                        logger.debug("Scalper %s error: %s", sym, exc)
+                        continue
+                    if scalp is None:
+                        continue
+
+                    # Build full signal (same structure as normal)
+                    direction = scalp.get("direction", "BUY")
+                    is_call = direction == "BUY"
+                    cur_underlying = scalp.get("entry_price", 0.0)
+                    strike = round(cur_underlying)
+                    scalp["symbol"] = sym
+                    scalp["segment"] = seg
+                    scalp["scan_time"] = now.isoformat()
+                    scalp["entry_ts"] = now
+                    scalp["strike"] = strike
+                    scalp["option_type"] = "CE" if is_call else "PE"
+                    scalp["entry_premium"] = 0.0
+                    scalp["is_delivery"] = False
+                    scalp["exit_ts"] = None
+                    scalp["is_scalper"] = True
+                    signals.append(scalp)
+                    logger.info(
+                        "🐅 SCALPER SIGNAL ACCEPTED: %s %s %s%s ₹%.0f",
+                        sym, direction, strike,
+                        scalp["option_type"], cur_underlying)
+                    break  # one scalper at a time
+            else:
+                logger.info(
+                    "Scalper mode: max %d scalper trades today — skip.",
+                    SCALPER["MAX_TRADES_PER_DAY"])
 
     # INDEX signals FIRST, STOCK signals AFTER — user requirement:
     # "Tiger finds trade in indexes after that in stocks"

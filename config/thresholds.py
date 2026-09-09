@@ -367,3 +367,24 @@ MARKET_CATEGORIES = {
 
 import os
 DRY_RUN = os.getenv("TIGER_BRAIN_DRY_RUN", "false").lower() == "true"
+
+# ============================================================
+# TIGER FALLBACK SCALPER MODE
+# "Bina shikar liye ghar nahi" — Tiger's last-resort micro-momentum
+# ============================================================
+# Activates when Tiger has 0 trades near session close, or has been
+# idle 2+ hours. Relaxes ALL gates — no zone touch required, just a
+# momentum candle with volume. Fast in, fast out.
+SCALPER = {
+    "MIN_SCORE": 50,              # very relaxed — any momentum will do
+    "MIN_BODY_PCT": 50,           # candle body >= 50% of range = momentum
+    "MIN_VOLUME_SURGE": 1.1,      # 1.1x volume (not 1.3x — relaxed)
+    "TARGET_PCT": 15.0,           # +15% = instant full exit
+    "MAX_STOP_RUPEES": 500,       # ₹500 hard stop (not ₹2000)
+    "MAX_TRADES_PER_DAY": 2,      # max 2 scalper trades/day
+    "ACTIVATION_IDLE_MINUTES": 120,  # 2+ hours no trade → activate
+    "ACTIVATION_ZERO_TRADE_TIME": {  # OR: 0 trades at these times
+        "NSE": "14:00",           # NSE: activate at 14:00 if 0 trades
+        "MCX": "21:00",           # MCX: activate at 21:00 if 0 trades
+    },
+}

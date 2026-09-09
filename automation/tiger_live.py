@@ -82,6 +82,9 @@ class TigerLiveRunner:
         self._placed_order_keys: set[str] = self._load_order_keys()
         self._order_log: list[dict] = []
         self._daily_entries_taken: dict = {}  # date → count (Brain 4 quota)
+        # Scalper tracking — per-day count + last trade time
+        self._scalper_trades: dict = {}  # date → count
+        self._last_trade_time: datetime | None = None
         # Real account capital — Angel One se fetch hota hai pre-market
         self.account_capital: float = 0.0
         # Capital lifecycle: start → after_entry → after_exit
@@ -89,8 +92,10 @@ class TigerLiveRunner:
         self.capital_after_entry: float = 0.0
         self.capital_after_exit: float = 0.0
         # Open position tracker — Tiger ki eyes hamesha broker positions pe
-        # {tsym: {"peak": float, "target_booked": bool, "entry": float}}
+        # {tsym: {"peak": float, "target_booked": bool, "entry": float, "is_scalper": bool}}
         self._position_peaks: dict = self._load_position_peaks()
+        # Scalper positions tracker — tsym → True (for special exit rules)
+        self._scalper_positions: set = self._load_scalper_positions()
 
     def _live_re_size(
         self, real_balance: float, real_ltp: float, real_lot_size: int,
@@ -198,6 +203,26 @@ class TigerLiveRunner:
                 json.dump(self._position_peaks, f)
         except OSError as exc:
             logger.warning(f"Position peaks save fail: {exc}")
+
+    _SCALPER_POSITIONS_FILE = "/tmp/tiger_scalper_positions.json"
+
+    def _load_scalper_positions(self) -> set:
+        """Disk se scalper positions load karo (restart-safe)."""
+        import json
+        try:
+            with open(self._SCALPER_POSITIONS_FILE) as f:
+                return set(json.load(f))
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            return set()
+
+    def _save_scalper_positions(self):
+        """Scalper positions disk pe save karo."""
+        import json
+        try:
+            with open(self._SCALPER_POSITIONS_FILE, "w") as f:
+                json.dump(sorted(self._scalper_positions), f)
+        except OSError as exc:
+            logger.warning(f"Scalper positions save fail: {exc}")
 
     # ============================================================
     # PRE-MARKET (09:00) — login + data load
@@ -418,7 +443,48 @@ class TigerLiveRunner:
             logger.info(
                 f"👁️ {tsym}: entry=₹{entry_price:.2f} ltp=₹{ltp:.2f} "
                 f"gain={gain_pct:+.1f}% peak=₹{peak:.2f} "
-                f"{'[target_booked]' if target_booked else ''}")
+                f"{'[target_booked]' if target_booked else ''}"
+                f"{' [SCALPER]' if tsym in self._scalper_positions else ''}")
+
+            # === SCALPER EXIT LOGIC (fast in, fast out) ===
+            # Scalper positions have different rules:
+            #   - Target +15% → instant full exit (no partial booking)
+            #   - Stop ₹500 loss → instant full exit
+            #   - NO trail, NO fixed target booking, NO runaway
+            if tsym in self._scalper_positions:
+                from config.thresholds import SCALPER
+                exit_reason = None
+                exit_qty = qty
+
+                # Scalper stop: ₹500 loss → full exit
+                loss_rupees = (entry_price - ltp) * qty
+
+                # Scalper target: +15% → full exit
+                if gain_pct >= SCALPER["TARGET_PCT"]:
+                    exit_reason = f"scalper_target_{SCALPER['TARGET_PCT']:.0f}pct"
+                elif loss_rupees >= SCALPER["MAX_STOP_RUPEES"]:
+                    exit_reason = f"scalper_stop_₹{SCALPER['MAX_STOP_RUPEES']}"
+
+                if exit_reason:
+                    pos_product = p.get("producttype", "INTRADAY")
+                    if pos_product not in ("INTRADAY", "CARRYFORWARD"):
+                        pos_product = "INTRADAY"
+                    result = self.broker.place_option_order(
+                        tradingsymbol=tsym, symboltoken=token, exchange=exch,
+                        transaction_type="SELL", quantity=exit_qty,
+                        product_type=pos_product, order_type="MARKET")
+                    if result.get("success"):
+                        closed += 1
+                        self._scalper_positions.discard(tsym)
+                        self._save_scalper_positions()
+                        logger.info(
+                            f"📤 SCALPER EXIT {tsym}: {exit_reason} — "
+                            f"SELL {exit_qty}/{qty} @ LTP ₹{ltp:.2f} "
+                            f"(gain {gain_pct:+.1f}%)")
+                    else:
+                        logger.error(
+                            f"❌ SCALPER EXIT FAIL {tsym}: {exit_reason} — {result.get('error')}")
+                continue  # scalper positions don't use V19 exit logic
 
             # === V19 EXIT LOGIC (real broker data pe) ===
             exit_reason = None
@@ -477,6 +543,14 @@ class TigerLiveRunner:
                 del self._position_peaks[tsym]
                 logger.info(f"👁️ {tsym}: position closed — tracker cleanup.")
 
+        # Cleanup scalper positions that are no longer open
+        closed_scalper = self._scalper_positions - active_tsyms
+        if closed_scalper:
+            for tsym in closed_scalper:
+                self._scalper_positions.discard(tsym)
+                logger.info(f"👁️ {tsym}: scalper position closed — cleanup.")
+            self._save_scalper_positions()
+
         self._save_position_peaks()
         if closed:
             logger.info(f"👁️ Position monitor: {closed} exit orders placed.")
@@ -529,6 +603,7 @@ class TigerLiveRunner:
 
             today = datetime.now().date()
             daily_entries = self._daily_entries_taken.get(today, 0)
+            scalper_today = self._scalper_trades.get(today, 0)
 
             signals = scan_live_signals(
                 self.data_map,
@@ -536,6 +611,8 @@ class TigerLiveRunner:
                 self.broker,
                 now=datetime.now(),
                 daily_entries_taken=daily_entries,
+                last_trade_time=self._last_trade_time,
+                scalper_trades_today=scalper_today,
             )
 
             # सिग्नल अभी के bar के हैं — सब entries हैं (exit_ts = None)।
@@ -544,6 +621,13 @@ class TigerLiveRunner:
 
             # दैनिक एंट्री काउंटर अपडेट करें
             self._daily_entries_taken[today] = daily_entries + placed
+            if placed > 0:
+                self._last_trade_time = datetime.now()
+                # Track scalper trades separately
+                for s in signals:
+                    if s.get("is_scalper") and placed > 0:
+                        self._scalper_trades[today] = scalper_today + 1
+                        break
 
             logger.info("Scan done: %d live signals, %d buy orders placed, "
                         "%d monitored exits, balance ₹%.0f",
@@ -838,12 +922,21 @@ class TigerLiveRunner:
                 self._save_order_keys()  # disk pe save — restart-safe
                 available_balance -= trade_cost
                 self.capital_after_entry = available_balance
+
+                # Track scalper positions for special exit rules
+                is_scalper = t.get("is_scalper", False)
+                if is_scalper:
+                    self._scalper_positions.add(contract["tradingsymbol"])
+                    self._save_scalper_positions()
+                    logger.info(f"   🐅 SCALPER position tracked: {contract['tradingsymbol']}")
+
                 logger.info(
                     f"   ✅ Order accepted: {order_status}")
                 logger.info(
                     f"   🔥 REAL ORDER: BUY {quantity} "
                     f"{contract['tradingsymbol']} ({option_type}) "
-                    f"cost ₹{trade_cost:,.0f} → order_id={result['order_id']}")
+                    f"cost ₹{trade_cost:,.0f} → order_id={result['order_id']}"
+                    f"{' [SCALPER]' if is_scalper else ''}")
                 logger.info(
                     f"   💰 Remaining balance: ₹{available_balance:,.0f}")
             else:

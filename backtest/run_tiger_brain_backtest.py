@@ -361,7 +361,7 @@ PDH_PDL_TOLERANCE_PCT = 0.5
 # Only the top 50/100 setups pass — sniper quality, bumper P&L.
 # ============================================================
 ROCKET_MIN_SCORE = 75        # tightened — sirf high-confidence blast trades (was 72)
-ROCKET_MIN_CONFLUENCES = 3   # relaxed from 4 — one less confirmation needed
+ROCKET_MIN_CONFLUENCES = 2   # relaxed from 3 — Tiger freedom: more entries, less waiting
 ROCKET_MIN_FUEL = 1          # need 1+ rocket-fuel signal (sweep/compression/2.5x spike/momentum)
 ROCKET_MOMENTUM_MIN = 2.0    # delta spike must be 2x+ for rocket fuel
 ROCKET_STALE_HARD_REJECT = 999 # disabled — stale penalty (-8) handles it, hard reject kills commodity winners
