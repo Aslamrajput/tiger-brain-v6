@@ -174,4 +174,16 @@ def scan_live_signals(
 
     logger.info("Live scan done @ %s: %d signal(s) from %d symbols",
                 now.strftime("%H:%M"), len(signals), len(data_map))
+
+    # INDEX signals FIRST, STOCK signals AFTER — user requirement:
+    # "Tiger finds trade in indexes after that in stocks"
+    from universe.fno_universe import INDEX_SYMBOLS, STOCK_SYMBOLS
+    index_set = set(INDEX_SYMBOLS.keys())
+
+    def _signal_priority(sig: dict) -> int:
+        sym = sig.get("symbol", "")
+        return 0 if sym in index_set else 1
+
+    signals.sort(key=_signal_priority)
+
     return signals

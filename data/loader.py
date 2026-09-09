@@ -284,9 +284,10 @@ def fetch_bhavcopy_range(start_date: datetime, end_date: datetime) -> pd.DataFra
 # call karna zaroori hai.
 
 # ============================================================
-# V19 INSTRUMENT MASTER FILTER — sirf ALLOWED symbols rakho
-# 1.45 lakh → ~12K (12x kam memory, faster token lookup)
+# V19 INSTRUMENT MASTER FILTER — ALLOWED symbols + ALL F&O stocks
+# 1.45 lakh → ~20K (index + MCX + all stock options kept for filter)
 # ============================================================
+# Index + MCX: always keep (spot + options + futures)
 ALLOWED_INDEX = ["NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX"]
 ALLOWED_MCX = ["GOLDM", "SILVERM", "CRUDEOIL", "NATURALGAS"]
 ALLOWED_INSTRUMENT_NAMES = set(ALLOWED_INDEX + ALLOWED_MCX)
@@ -310,17 +311,37 @@ _instrument_master_cache = None  # ek baar download hone ke baad memory mein rak
 
 
 def _filter_instruments(df: pd.DataFrame) -> pd.DataFrame:
-    """1.45 lakh instruments → sirf ALLOWED symbols (Index + MCX).
+    """1.45 lakh instruments → filtered set.
 
-    STE STOCK options (RELIANCE, TCS, etc) hata do. Sirf:
+    Keep:
     - Index: NIFTY/BANKNIFTY/FINNIFTY/SENSEX (spot + options + futures)
-    - MCX:   GOLDM/SILVERM/CRUDEOIL/NATURALGAS (futures + options)
+    - MCX: GOLDM/SILVERM/CRUDEOIL/NATURALGAS (futures + options)
+    - ALL stock options (OPTSTK on NFO) — liquidity filter selects top 10-11
+      at scan time, but instrument master needs ALL so resolve_option_contract
+      can find any stock's option tokens.
     """
-    mask = (
+    # Index + MCX instruments (by name match)
+    named_mask = (
         df["name"].isin(ALLOWED_INSTRUMENT_NAMES)
         & df["exch_seg"].isin(ALLOWED_EXCH_SEGS)
         & df["instrumenttype"].isin(USEFUL_INSTRUMENT_TYPES)
     )
+
+    # ALL stock options (OPTSTK) on NFO — for liquidity pipeline
+    stock_opt_mask = (
+        (df["exch_seg"] == "NFO")
+        & (df["instrumenttype"] == "OPTSTK")
+    )
+
+    # NSE stock spot tokens (-EQ) for underlying candles
+    # These have instrumenttype "" and exch_seg NSE
+    # We keep them all — resolve_underlying_token needs them
+    nse_eq_mask = (
+        (df["exch_seg"] == "NSE")
+        & (df["symbol"].str.endswith("-EQ", na=False))
+    )
+
+    mask = named_mask | stock_opt_mask | nse_eq_mask
     return df[mask].reset_index(drop=True)
 
 

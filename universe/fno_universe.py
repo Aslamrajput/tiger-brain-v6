@@ -19,6 +19,10 @@ Symbol naming convention:
 
 from __future__ import annotations
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 # Exchange-standard lot sizes (approximate — real lots change quarterly)
 LOT_SIZES = {
     "NIFTY": 75,
@@ -177,13 +181,38 @@ def scan_universe() -> dict:
 # Two markets NEVER overlap — Tiger fetches only the active market per scan.
 
 def nse_scan_symbols() -> dict:
-    """NSE session symbols — INDEX only (NIFTY, BANKNIFTY, FINNIFTY, SENSEX).
+    """NSE session symbols — INDEX first + TOP liquid STOCKS.
 
-    STOCK options BLOCKED — ALLOWED_SYMBOLS filter in entry function
-    bhi block karta hai, par yahan se hi sirf 4 index scan hote hain
-    (27 → 4 symbols = 7x kam API calls, fast scan).
+    Pipeline:
+      1. INDEX (NIFTY, BANKNIFTY, FINNIFTY, SENSEX) — scanned FIRST
+      2. TOP 10-11 liquid F&O stocks (Bhavcopy liquidity filter)
+         All F&O → Volume → Turnover → OI → Liquidity Score → Top 10-11
+
+    Tiger options buying only — sirf liquid stocks trade hote hain.
+    Illiquid stock options (slippage risk) automatically filter hote hain.
     """
-    return dict(INDEX_SYMBOLS)
+    out = dict(INDEX_SYMBOLS)  # indices first (priority)
+
+    # Top liquid stocks — Bhavcopy filter se dynamically select
+    try:
+        from universe.stock_filter import filter_top_liquid_stocks
+        top_stocks = filter_top_liquid_stocks()
+    except Exception as exc:
+        logger.warning("Stock filter fail — fallback top stocks: %s", exc)
+        top_stocks = [
+            "RELIANCE", "HDFCBANK", "ICICIBANK", "INFY", "SBIN",
+            "AXISBANK", "LT", "BHARTIARTL", "ITC", "KOTAKBANK",
+            "BAJFINANCE",
+        ]
+
+    # Add stocks after indices (indices have priority)
+    for sym in top_stocks:
+        if sym in STOCK_SYMBOLS:
+            out[sym] = STOCK_SYMBOLS[sym]
+        else:
+            out[sym] = f"{sym}.NS"  # yfinance fallback format
+
+    return out
 
 
 def mcx_scan_symbols() -> dict:
