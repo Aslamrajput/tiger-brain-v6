@@ -648,6 +648,9 @@ class TigerLiveRunner:
         # === HARD 50s TIMEOUT — 1-min scan must never block the scheduler ===
         # If the scan exceeds 50s (slow REST, rate limit, hung API call),
         # abort it so the next 1-min cycle can fire cleanly.
+        # NOTE: ThreadPoolExecutor context manager calls shutdown(wait=True)
+        # on exit, which blocks until the worker finishes — defeating the
+        # timeout. We use a manual executor + shutdown(wait=False) instead.
         from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
 
         def _run_scan():
@@ -690,14 +693,16 @@ class TigerLiveRunner:
             except Exception as exc:
                 logger.error("Intraday scan error: %s", exc)
 
+        ex = ThreadPoolExecutor(max_workers=1)
+        future = ex.submit(_run_scan)
         try:
-            with ThreadPoolExecutor(max_workers=1) as ex:
-                future = ex.submit(_run_scan)
-                future.result(timeout=50)
+            future.result(timeout=50)
         except FuturesTimeout:
             logger.warning("⚠️ Scan timed out after 50s — aborting (next 1-min cycle will retry)")
         except Exception as exc:
             logger.error("Scan wrapper error: %s", exc)
+        finally:
+            ex.shutdown(wait=False)  # non-blocking — don't trap the scheduler
 
     def _place_live_orders(self, trades: list[dict]) -> int:
         """Backtest signals → REAL Angel One orders.
