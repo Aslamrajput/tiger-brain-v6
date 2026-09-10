@@ -252,10 +252,10 @@ class TigerBrainScheduler:
 
             self.scheduler.add_job(
                 intraday_guarded, "interval",
-                minutes=AUTOMATION.get("RESCAN_INTERVAL_MINUTES", 1),
+                minutes=1,  # HARDCODED 1-min — never rely on config (20-min bug)
                 id="intraday_scan",
                 max_instances=1,           # never overlap — if previous scan running, skip
-                misfire_grace_time=30,     # tolerate 30s late fires
+                misfire_grace_time=10,    # tolerate 10s late fires
                 coalesce=True,             # merge multiple missed fires into one
             )
 

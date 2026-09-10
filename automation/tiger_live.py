@@ -321,7 +321,7 @@ class TigerLiveRunner:
             logger.warning(f"WS subscribe fail (REST fallback): {exc}")
 
     # ============================================================
-    # LIVE DATA REFRESH — fetch FRESH data every 20 min
+    # LIVE DATA REFRESH — fetch FRESH data every 5 min (throttled)
     # ============================================================
     def _refresh_live_data(self):
         """Fetch FRESH 15m data on every intraday scan — ACTIVE market only.
@@ -585,7 +585,7 @@ class TigerLiveRunner:
         return closed
 
     # ============================================================
-    # INTRADAY SCAN (every 20 min) — entry signals + exits
+    # INTRADAY SCAN (every 1 min) — entry signals + exits
     # ============================================================
     def intraday_scan(self):
         """Scan zones every 1 min, find entry signals, check exits.
