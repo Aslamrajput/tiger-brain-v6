@@ -169,28 +169,26 @@ class PremiumDiscountTracker:
         else:
             strike = "ITM"
 
-        # --- Entry decision ---
-        should_enter = False
+        # --- Entry decision (V18 LOOSE — never block on IV) ---
+        # V18 style: the IV filter is advisory only — it NEVER blocks entry.
+        # The premium brain scores discount entries (bonus) but does not
+        # gate them. This ensures the bot takes trades in any IV regime.
+        # V19 exit logic (IV expansion sell) is retained separately below.
+        should_enter = True
         discount_bonus = 0.0
         notes = []
 
         if status == "DEEP_DISCOUNT":
-            should_enter = True
             discount_bonus = 10.0
             notes.append("DEEP DISCOUNT! Premium sabse sasta — best entry window")
             notes.append(f"IV {current_iv:.1%} at {percentile:.0f}th percentile → OTM strike for max gamma")
         elif status == "DISCOUNT":
-            should_enter = True
             discount_bonus = 5.0
             notes.append(f"Discount premium — IV at {percentile:.0f}th percentile, good entry")
         elif status == "FAIR":
-            # V18 loose entry — allow FAIR IV entries (was: only if rocket 90+)
-            should_enter = True
             discount_bonus = 0.0
             notes.append(f"Fair IV ({percentile:.0f}th pct) — V18 loose entry allowed")
         else:  # EXPENSIVE
-            # V18 loose entry — still allow EXPENSIVE entries (don't block)
-            should_enter = True
             discount_bonus = 0.0
             notes.append(f"EXPENSIVE IV at {percentile:.0f}th pct — entry allowed (V18 loose)")
 

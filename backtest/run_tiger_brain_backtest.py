@@ -1854,7 +1854,10 @@ def run_tiger_brain_backtest(data_map, start_capital=150000.0,
                     strike = round(cur_underlying)
                 iv = compute_iv(df_so_far, vix_val, sym, is_call, strike, cur_underlying)
 
-                # === BRAIN 6: Premium discount — uses computed IV ===
+                # === BRAIN 6: Premium discount — V18 LOOSE entry (advisory only) ===
+                # V18 style: the IV filter NEVER blocks entry and NEVER overrides
+                # the strike. It only awards a discount bonus to the score.
+                # V19 exit logic (IV expansion sell) is retained in the exit loop.
                 iv_percentile = 50.0
                 premium_bonus = 0.0
                 prem_snap = None
@@ -1862,19 +1865,8 @@ def run_tiger_brain_backtest(data_map, start_capital=150000.0,
                     prem_snap = premium_tracker.evaluate(sym, current_iv=iv, setup_score=setup["setup_score"])
                     iv_percentile = prem_snap.iv_percentile
                     premium_bonus = prem_snap.discount_bonus
-                    # Block expensive premiums (unless force hunt)
-                    if not prem_snap.should_enter and not force_hunt:
-                        filter_stats["rejected_expensive_premium"] += 1
-                        continue
-                    # Override strike based on IV percentile
-                    if prem_snap.recommended_strike == "OTM":
-                        strike_kind = "OTM"
-                        strike = round(cur_underlying * 1.01) if is_call else round(cur_underlying * 0.99)
-                        iv = compute_iv(df_so_far, vix_val, sym, is_call, strike, cur_underlying)
-                    elif prem_snap.recommended_strike == "ITM":
-                        strike_kind = "ITM"
-                        strike = round(cur_underlying * 0.99) if is_call else round(cur_underlying * 1.01)
-                        iv = compute_iv(df_so_far, vix_val, sym, is_call, strike, cur_underlying)
+                    # V18 loose: should_enter is always True — no IV blocking
+                    # (kept for safety; the gate is a no-op under V18 loose logic)
 
                 entry_prem = bs_premium(cur_underlying, strike, dte_default, is_call, iv)
                 entry_prem = max(entry_prem, 1.0)
