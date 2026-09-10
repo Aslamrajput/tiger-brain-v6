@@ -323,7 +323,7 @@ class TigerLiveRunner:
         """Fetch FRESH 15m data on every intraday scan — ACTIVE market only.
 
         Two-market session:
-          NSE (09:15-15:15): fetch 4 INDEX + 10-11 liquid STOCKS (Bhavcopy filter)
+          NSE (09:15-15:15): fetch 4 INDEX + up to 50 liquid STOCKS (Bhavcopy filter)
           MCX (15:30-23:15): fetch 4 MCX symbols (GOLDM, SILVERM, CRUDEOIL, NATURALGAS)
 
         INDEX scanned first (priority), STOCKS after. Options buying only.
@@ -1351,7 +1351,7 @@ class TigerLiveRunner:
         self._running = True
         logger.info("✅ Tiger scheduler STARTED. 24x7 cycle active.")
         logger.info("   Pre-market:     09:00 (login + NSE data fetch)")
-        logger.info("   NSE open:       09:15 (scan 4 INDEX + 10-11 liquid STOCKS)")
+        logger.info("   NSE open:       09:15 (scan 4 INDEX + up to 50 liquid STOCKS)")
         logger.info("   Intraday:       every 20 min (active market only)")
         logger.info("   Delivery:       15:00 (overnight direction)")
         logger.info("   NSE square-off: 15:15 (close NSE positions)")
