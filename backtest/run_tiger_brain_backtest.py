@@ -914,9 +914,27 @@ def validate_demand_zone_quality(df_15m, zone, i_15m) -> tuple[int, list[str]]:
 
 # --- PCR (Put-Call Ratio) ---
 def fetch_pcr(broker, underlying: str) -> float:
+    """Fetch Put-Call Ratio from option chain OI.
+
+    V18 loose: never hang the scan on a slow/blocked REST call.
+    The PCR is a soft scorer — if it fails, return the fallback.
+    """
+    import signal as _signal
+
+    class _PcrTimeout(Exception):
+        pass
+
+    def _timeout_handler(signum, frame):
+        raise _PcrTimeout("PCR fetch timed out")
+
     try:
+        # Hard timeout: 8s max — never let one symbol's PCR hang the scan
+        old_handler = _signal.signal(_signal.SIGALRM, _timeout_handler)
+        _signal.alarm(8)
         from data.loader import fetch_option_chain_oi
         chain = fetch_option_chain_oi(broker, underlying=underlying, strikes_around_atm=15)
+        _signal.alarm(0)
+        _signal.signal(_signal.SIGALRM, old_handler)
         if chain is None or chain.empty:
             return PCR_FALLBACK
         ce_oi = float(chain["CE_oi"].sum()) if "CE_oi" in chain.columns else 0
@@ -924,7 +942,11 @@ def fetch_pcr(broker, underlying: str) -> float:
         if ce_oi <= 0:
             return PCR_FALLBACK
         return pe_oi / ce_oi
+    except _PcrTimeout:
+        logger.debug("PCR fetch timeout for %s — using fallback", underlying)
+        return PCR_FALLBACK
     except Exception:
+        _signal.alarm(0)
         return PCR_FALLBACK
 
 
@@ -1544,12 +1566,12 @@ def fetch_angel_data(broker, days_15m=365, days_1m=90, use_scan_universe=False, 
         # PRIMARY: Angel One se real historical candles
         if broker is not None and broker.smart_api is not None:
             try:
-                time.sleep(3.0)  # rate-limit guard: 15m call se pehle (AB1021 fix)
+                time.sleep(0.5)  # reduced from 3.0s — 42-symbol universe can't afford 252s sleep
                 d15 = fetch_angel_underlying_candles(
                     broker, sym, "FIFTEEN_MINUTE", days=days_15m)
                 d1 = None
                 if fetch_1m:
-                    time.sleep(3.0)  # rate-limit guard: 1m call se pehle (AB1021 fix)
+                    time.sleep(0.5)  # reduced from 3.0s — keep scan under 60s total
                     d1 = fetch_angel_underlying_candles(
                         broker, sym, "ONE_MINUTE", days=days_1m)
                 if d15 is not None and not d15.empty:

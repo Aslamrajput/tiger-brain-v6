@@ -589,8 +589,8 @@ def fetch_angel_ltp(broker, exchange: str, tradingsymbol: str, symboltoken: str)
     if broker.smart_api is None:
         raise RuntimeError("Broker login nahi hua hai — pehle broker.login() call karo.")
 
-    # Rate-limit guard: ltpData se pehle 3s ruko (monitoring fast, candle se alag endpoint)
-    time.sleep(3.0)
+    # Rate-limit guard: ltpData se pehle 0.5s ruko (reduced from 3.0s for 42-symbol scan)
+    time.sleep(0.5)
     try:
         response = broker.smart_api.ltpData(exchange, tradingsymbol, symboltoken)
         if response.get("status"):
