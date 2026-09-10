@@ -113,9 +113,9 @@ def run_single_period_backtest(
     context=None,
 ) -> dict:
     """
-    Ek data-period (chahe IN-SAMPLE ho ya OUT-OF-SAMPLE) pe backtest
-    chalata hai — har din ka decision uसी din tak ke data se leta hai
-    (no lookahead), phir agle din ki price move se check karta hai.
+    Runs a backtest on one data-period (IN-SAMPLE or OUT-OF-SAMPLE).
+    Each day's decision uses only data up to that day (no lookahead),
+    then checks against the next day's price move.
 
     Args:
         df: poora OHLCV data is period ka

@@ -1,24 +1,24 @@
 """
 Tiger Brain V6.1 — BRAIN 5: Risk Guard, Gamma Tracking & Execution Exit
 =======================================================================
-Paanchwa aur aakhri brain. Trade lagne ke BAAD sab kuch ye sambhalta hai:
+Fifth and final brain. Handles everything AFTER a trade is placed:
 
-  - STOP-LOSS / TARGET: premium pe % based (BRAIN5 config)
-  - TRAILING STOP: gain activate hone ke baad peak se give-back
-  - TIME EXIT: market close se pehle square-off (overnight risk nahi)
-  - GAMMA TRACKING: expiry ke paas option ka gamma bahut tez hota hai
-    (ATM delta flip). Gamma risk threshold cross ho to stop tighten karo
-    ya position book karo.
-  - EXECUTION: exit signal milne pe broker ko exit order.
+  - STOP-LOSS / TARGET: % based on premium (BRAIN5 config)
+  - TRAILING STOP: give-back from peak once gain activates
+  - TIME EXIT: square-off before market close (no overnight risk)
+  - GAMMA TRACKING: near expiry the option's gamma becomes very rapid
+    (ATM delta flip). If the gamma risk threshold is crossed, tighten the
+    stop or book the position.
+  - EXECUTION: send an exit order to the broker on an exit signal.
 
-Position state ek dict hai jo orchestrator (Brain flow) maintain karta hai:
+Position state is a dict maintained by the orchestrator (Brain flow):
 
     position = {
         'symbol': str, 'option_symbol': str,
         'direction': 'BUY'|'SELL',   # option bought: CE=BUY side, PE=SELL side
         'entry_premium': float, 'quantity': int,
         'entry_time': datetime, 'peak_premium': float,
-        'underlying_stop': float,    # Brain 2 ka structural stop (underlying pe)
+        'underlying_stop': float,    # Brain 2's structural stop (on underlying)
         'delta': float | None, 'gamma_pct': float | None,  # gamma as % premium per % move
         'days_to_expiry': int,
     }
@@ -32,11 +32,11 @@ from datetime import datetime, time as dtime
 try:
     from config.thresholds import BRAIN5
 except ImportError:
-    raise ImportError("Repo ROOT se chalao, 'risk/' ke andar se nahi.")
+    raise ImportError("Run from repo ROOT, not from inside 'risk/'.")
 
 logger = logging.getLogger("tiger_brain.exit_brain")
 
-MARKET_CLOSE = dtime(15, 30)  # IST — config/thresholds.py AUTOMATION se match
+MARKET_CLOSE = dtime(15, 30)  # IST — must match config/thresholds.py AUTOMATION
 
 
 def _pct_change(current: float, reference: float) -> float:
@@ -46,7 +46,7 @@ def _pct_change(current: float, reference: float) -> float:
 
 
 def update_peak(position: dict, current_premium: float) -> dict:
-    """Position ka peak premium update karta hai (trailing ke liye)."""
+    """Updates the position's peak premium (for trailing)."""
     if current_premium > position.get("peak_premium", 0):
         position["peak_premium"] = current_premium
     return position
@@ -54,12 +54,12 @@ def update_peak(position: dict, current_premium: float) -> dict:
 
 def check_gamma_risk(position: dict, gamma_pct: float | None = None) -> dict:
     """
-    Gamma tracking guard. Gamma_pct = premium ka kitna % change hota hai
-    underlying ke 1% move pe (ye chhota 'local gamma' proxy hai — real
-    Greeks chain data se aayenge, ye estimation hook hai).
+    Gamma tracking guard. Gamma_pct = how much % of premium changes per
+    1% move in the underlying (a small 'local gamma' proxy — real Greeks
+    come from chain data; this is an estimation hook).
 
-    Expiry ke paas (GAMMA_RISK_DAYS_TO_EXPIRY) aur gamma high dono ho to
-    position exit karo — gamma spike mein stop bhi slip karta hai.
+    If both near expiry (GAMMA_RISK_DAYS_TO_EXPIRY) and high gamma, exit
+    the position — in a gamma spike, even the stop slips.
     """
     g = gamma_pct if gamma_pct is not None else position.get("gamma_pct")
     dte = position.get("days_to_expiry")
@@ -71,16 +71,16 @@ def check_gamma_risk(position: dict, gamma_pct: float | None = None) -> dict:
         return {
             "gamma_exit": True, "reason": "exit",
             "message": (
-                f"GAMMA RISK: {dte} din expiry bache aur gamma {g}% >= "
-                f"{BRAIN5['GAMMA_RISK_THRESHOLD_PCT']}% — gamma spike se bachne "
-                f"ke liye position exit"
+                f"GAMMA RISK: {dte} days to expiry and gamma {g}% >= "
+                f"{BRAIN5['GAMMA_RISK_THRESHOLD_PCT']}% — exit position to avoid "
+                f"gamma spike"
             ),
         }
     if near_expiry:
         return {
             "gamma_exit": False, "reason": "watch",
             "message": (
-                f"{dte} din expiry bache — gamma watch mode (gamma {g})"
+                f"{dte} days to expiry — gamma watch mode (gamma {g})"
             ),
         }
     return {"gamma_exit": False, "reason": "ok",
@@ -94,15 +94,15 @@ def evaluate_exit(
     underlying_price: float | None = None,
 ) -> dict:
     """
-    Brain 5 ka main entry point — kya position exit honi chahiye?
+    Brain 5's main entry point — should the position be exited?
 
-    Priority order (pehla match jeet-ta hai):
-      1. Time exit (market close se pehle square-off)
+    Priority order (first match wins):
+      1. Time exit (square-off before market close)
       2. Gamma exit (expiry + high gamma)
-      3. Structural stop (Brain 2 ka underlying stop hit)
+      3. Structural stop (Brain 2's underlying stop hit)
       4. Hard stop-loss (premium %)
       5. Target (premium %)
-      6. Trailing stop (peak se give-back)
+      6. Trailing stop (give-back from peak)
 
     Returns:
         dict: 'exit', 'reason', 'exit_price', 'message'
@@ -120,7 +120,7 @@ def evaluate_exit(
             "exit": True, "reason": "time_exit",
             "exit_price": current_premium,
             "message": (
-                f"TIME EXIT: market close se sirf {minutes_left:.0f} min bache "
+                f"TIME EXIT: only {minutes_left:.0f} min left to market close "
                 f"(<{BRAIN5['SQUARE_OFF_MINUTES_BEFORE_CLOSE']}) — square off"
             ),
         }
@@ -147,7 +147,7 @@ def evaluate_exit(
                 "exit_price": current_premium,
                 "message": (
                     f"STRUCTURAL STOP: underlying {underlying_price} <= stop "
-                    f"{underlying_stop} (Brain 2 ka SMC level) — exit"
+                    f"{underlying_stop} (Brain 2's SMC level) — exit"
                 ),
             }
         if direction == "SELL" and underlying_price >= underlying_stop:
@@ -156,7 +156,7 @@ def evaluate_exit(
                 "exit_price": current_premium,
                 "message": (
                     f"STRUCTURAL STOP: underlying {underlying_price} >= stop "
-                    f"{underlying_stop} (Brain 2 ka SMC level) — exit"
+                    f"{underlying_stop} (Brain 2's SMC level) — exit"
                 ),
             }
 
@@ -188,8 +188,8 @@ def evaluate_exit(
                     "exit": True, "reason": "trailing_stop",
                     "exit_price": current_premium,
                     "message": (
-                        f"TRAILING STOP: peak {peak} se {drawdown_from_peak:.1f}% "
-                        f"give-back (<= -{BRAIN5['TRAIL_GIVEBACK_PCT']}%)"
+                        f"TRAILING STOP: {drawdown_from_peak:.1f}% give-back from peak {peak} "
+                        f"(<= -{BRAIN5['TRAIL_GIVEBACK_PCT']}%)"
                     ),
                 }
 
@@ -205,32 +205,32 @@ def evaluate_exit(
 
 def execute_exit(position: dict, exit_signal: dict, broker=None) -> dict:
     """
-    Exit signal ko broker order mein convert karta hai.
-    Broker integration abhi stage5_execution.py wale jaisa hi hai —
-    real SmartAPI order flow wahan jayega; ye brain decision layer hai.
+    Converts an exit signal into a broker order.
+    Broker integration is currently like that in stage5_execution.py —
+    the real SmartAPI order flow will go there; this brain is the decision layer.
     """
     if not exit_signal.get("exit"):
-        return {"executed": False, "note": "exit signal nahi tha — kuch nahi kiya"}
+        return {"executed": False, "note": "no exit signal — nothing done"}
 
     logger.info(
         f"EXIT {position.get('option_symbol')}: {exit_signal['reason']} — "
         f"{exit_signal['message']}"
     )
 
-    # Broker abhi stub hai (repo ki existing honest position): real exit
-    # order placement SmartAPI integrate hote hi stage5 se hoga.
+    # Broker is currently a stub (the repo's existing honest position): real exit
+    # order placement will happen via stage5 once SmartAPI is integrated.
     return {
         "executed": True,
         "reason": exit_signal["reason"],
         "exit_price": exit_signal.get("exit_price"),
         "option_symbol": position.get("option_symbol"),
         "quantity": position.get("quantity"),
-        "note": "exit decision final — broker order flow stage5_execution se hoga",
+        "note": "exit decision final — broker order flow via stage5_execution",
     }
 
 
 # ============================================================
-# QUICK MANUAL TEST — repo ROOT se: python3 -m risk.exit_brain
+# QUICK MANUAL TEST — from repo ROOT: python3 -m risk.exit_brain
 # ============================================================
 if __name__ == "__main__":
     from datetime import timedelta

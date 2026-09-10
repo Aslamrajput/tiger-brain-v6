@@ -1,38 +1,38 @@
 """
 Tiger Brain V6+V7 — Risk Management Module (Section 13, 26)
 ==============================================================
-Ye module sabse critical safety layer hai — Blueprint khud kehta hai
-(Section 13): "duniya ke 90% retail traders/algos fail isliye nahi
-hote ki unka signal galat hai, balki isliye ki risk management kamzor
-hota hai."
+This module is the most critical safety layer — the Blueprint itself states
+(Section 13): "90% of retail traders/algos fail not because their signal is
+wrong, but because their risk management is weak."
 
-⚠️ IMPORTANT: `stage4_decision_lock.py` mein basic position-sizing already
-hai, par safety circuit-breakers (daily max-loss, consecutive-loss pause)
-WAHAN NAHI THE — ye ek gap tha jo abhi is file mein fill ho raha hai.
-Jab poora system chalega (automation/scheduler.py mein), ye functions
-Stage 4 se PEHLE call hone chahiye — agar circuit breaker already
-trigger hai, to Stage 4 tak pahunchna hi nahi chahiye, seedha NO_TRADE.
+⚠️ IMPORTANT: `stage4_decision_lock.py` already has basic position-sizing,
+but the safety circuit-breakers (daily max-loss, consecutive-loss pause)
+were NOT there — this was a gap being filled in this file now.
+When the full system runs (automation/scheduler.py), these functions
+should be called BEFORE Stage 4 — if a circuit breaker is already
+triggered, the flow should not even reach Stage 4; it should go straight
+to NO_TRADE.
 """
 
 try:
     from config.thresholds import RISK
 except ImportError:
-    raise ImportError("Repo ROOT se chalao, 'risk/' ke andar se nahi.")
+    raise ImportError("Run from repo ROOT, not from inside 'risk/'.")
 
 
 def check_daily_loss_circuit_breaker(daily_pnl: float, account_capital: float) -> dict:
     """
-    Section 13.2 — Daily Max-Loss Circuit Breaker. Agar aaj ka loss capital
-    ke tay % se zyada ho gaya hai, poora din ke liye trading band.
+    Section 13.2 — Daily Max-Loss Circuit Breaker. If today's loss exceeds a
+    set % of capital, trading is halted for the rest of the day.
 
     Args:
-        daily_pnl: aaj ka profit/loss (negative number = loss)
+        daily_pnl: today's profit/loss (negative number = loss)
         account_capital: total account capital
 
     Returns:
         dict:
             'breaker_triggered': bool
-            'daily_loss_pct': float (positive number, jitna % loss hua)
+            'daily_loss_pct': float (positive number, the % loss)
             'limit_pct': float
             'message': str
     """
@@ -40,7 +40,7 @@ def check_daily_loss_circuit_breaker(daily_pnl: float, account_capital: float) -
         return {
             "breaker_triggered": False, "daily_loss_pct": 0.0,
             "limit_pct": RISK["DAILY_MAX_LOSS_PCT"],
-            "message": "Aaj profit mein hai ya breakeven — koi issue nahi",
+            "message": "Today is in profit or breakeven — no issue",
         }
 
     daily_loss_pct = abs(daily_pnl) / account_capital * 100
@@ -52,23 +52,23 @@ def check_daily_loss_circuit_breaker(daily_pnl: float, account_capital: float) -
         "limit_pct": RISK["DAILY_MAX_LOSS_PCT"],
         "message": (
             f"🚫 Daily Max-Loss Circuit Breaker TRIGGERED: {daily_loss_pct:.2f}% loss "
-            f">= {RISK['DAILY_MAX_LOSS_PCT']}% limit — aaj ke liye system band, "
-            f"koi override nahi (Section 13.2)"
+            f">= {RISK['DAILY_MAX_LOSS_PCT']}% limit — system halted for today, "
+            f"no override (Section 13.2)"
             if triggered else
-            f"Daily loss {daily_loss_pct:.2f}% — limit {RISK['DAILY_MAX_LOSS_PCT']}% se kam hai"
+            f"Daily loss {daily_loss_pct:.2f}% — below the {RISK['DAILY_MAX_LOSS_PCT']}% limit"
         ),
     }
 
 
 def check_consecutive_loss_pause(recent_trade_pnls: list) -> dict:
     """
-    Section 13.3 — Max Consecutive Loss Pause. Agar lagataar N trades
-    (config se) loss mein gaye, system ko kuch der pause hona chahiye.
+    Section 13.3 — Max Consecutive Loss Pause. If N consecutive trades
+    (from config) end in loss, the system should pause for a while.
 
     Args:
-        recent_trade_pnls: list of recent trade P&L values, chronological
-                            order mein (sabse recent trade sabse aakhir mein)
-                            jaise [150, -80, -45, -30] (aakhri 3 loss hain)
+        recent_trade_pnls: list of recent trade P&L values, in chronological
+                            order (most recent trade last)
+                            e.g. [150, -80, -45, -30] (last 3 are losses)
 
     Returns:
         dict:
@@ -80,7 +80,7 @@ def check_consecutive_loss_pause(recent_trade_pnls: list) -> dict:
     if not recent_trade_pnls:
         return {
             "pause_triggered": False, "consecutive_losses": 0,
-            "pause_minutes": 0, "message": "Koi trade history nahi hai abhi",
+            "pause_minutes": 0, "message": "No trade history yet",
         }
 
     consecutive_losses = 0
@@ -97,24 +97,24 @@ def check_consecutive_loss_pause(recent_trade_pnls: list) -> dict:
         "consecutive_losses": consecutive_losses,
         "pause_minutes": RISK["CONSECUTIVE_LOSS_PAUSE_MINUTES"] if triggered else 0,
         "message": (
-            f"🚫 {consecutive_losses} lagataar losses — {RISK['CONSECUTIVE_LOSS_PAUSE_MINUTES']} "
-            f"minute ke liye pause (Section 13.3: 'shayad regime classification "
-            f"galat ho raha hai, rukkar dobara assess karna better hai')"
+            f"🚫 {consecutive_losses} consecutive losses — pausing for {RISK['CONSECUTIVE_LOSS_PAUSE_MINUTES']} "
+            f"minutes (Section 13.3: 'the regime classification may be wrong; "
+            f"it is better to stop and re-assess')"
             if triggered else
-            f"{consecutive_losses} consecutive losses — {RISK['MAX_CONSECUTIVE_LOSSES']} "
-            f"ki limit se kam hai"
+            f"{consecutive_losses} consecutive losses — below the "
+            f"{RISK['MAX_CONSECUTIVE_LOSSES']} limit"
         ),
     }
 
 
 def apply_theta_decay_adjustment(position_size_pct: float, days_to_expiry: int) -> dict:
     """
-    Section 13.7 — Theta Decay Awareness. Expiry ke jitna paas, utna
-    conservative sizing (0 DTE pe size 50% kar dena).
+    Section 13.7 — Theta Decay Awareness. The closer to expiry, the more
+    conservative the sizing (reduce size to 50% on 0 DTE).
 
     Args:
         position_size_pct: originally calculated position size %
-        days_to_expiry: kitne din baaki hain expiry tak (0 = aaj hi expiry)
+        days_to_expiry: days remaining to expiry (0 = expiry today)
 
     Returns:
         dict:
@@ -126,13 +126,13 @@ def apply_theta_decay_adjustment(position_size_pct: float, days_to_expiry: int) 
         multiplier = RISK["THETA_DECAY_0DTE_SIZE_MULTIPLIER"]
         adjusted = position_size_pct * multiplier
         message = (
-            f"0 DTE (aaj hi expiry) — size {multiplier}x kiya gaya "
-            f"({position_size_pct}% -> {adjusted:.2f}%), theta decay bahut tez hai"
+            f"0 DTE (expiry today) — size scaled to {multiplier}x "
+            f"({position_size_pct}% -> {adjusted:.2f}%), theta decay is very rapid"
         )
     else:
         multiplier = 1.0
         adjusted = position_size_pct
-        message = f"{days_to_expiry} din baaki expiry tak — koi extra theta adjustment nahi"
+        message = f"{days_to_expiry} days to expiry — no extra theta adjustment"
 
     return {
         "adjusted_size_pct": round(adjusted, 2),
@@ -147,14 +147,14 @@ def pre_trade_safety_check(
     recent_trade_pnls: list,
 ) -> dict:
     """
-    Ek hi jagah se saare circuit-breakers check karna — Stage 4 se PEHLE
-    ye call karna chahiye. Agar koi bhi breaker trigger hai, trading is
-    din/is waqt ke liye ruk jaani chahiye, chahe signal kitna bhi strong ho.
+    Checks all circuit-breakers from one place — call this BEFORE Stage 4.
+    If any breaker is triggered, trading should halt for the day/moment,
+    no matter how strong the signal is.
 
     Returns:
         dict:
             'safe_to_trade': bool
-            'blocking_reasons': list of str (khaali agar sab theek hai)
+            'blocking_reasons': list of str (empty if all clear)
     """
     blocking_reasons = []
 
@@ -174,7 +174,7 @@ def pre_trade_safety_check(
 
 # ============================================================
 # QUICK MANUAL TEST
-# Chalane ka tarika: repo ROOT se → python3 -m risk.position_sizing
+# How to run: from repo ROOT → python3 -m risk.position_sizing
 # ============================================================
 if __name__ == "__main__":
     print("=== Test 1: Daily Loss Circuit Breaker — normal day ===")
@@ -195,5 +195,5 @@ if __name__ == "__main__":
     )
     print(result)
 
-    print("\n✅ Test complete — koi crash nahi hua.")
+    print("\n✅ Test complete — no crash occurred.")
       

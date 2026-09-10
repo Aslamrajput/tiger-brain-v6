@@ -1,8 +1,8 @@
 """
 Tiger Brain V6+V7 — Central Threshold Configuration
 =====================================================
-Ye file Master Blueprint ke Part B (Sections 17-29) ke saare concrete
-numbers ko ek jagah rakhti hai.
+This file holds all the concrete numbers from Master Blueprint
+Part B (Sections 17-29) in one place.
 """
 
 REGIME = {
@@ -153,12 +153,11 @@ META_BRAIN_WEIGHTS = {
 
 DECISION_SCORE_THRESHOLD = 72
 
-# Meta-Brain ka score sab weights ka weighted average hai. Agar koi
-# sub-brain data hi na hone ki wajah se chup hai (jaise Vol-Arb bina IV
-# feed ke), to uska weight score ko neeche kheenchta hai aur threshold
-# structurally kabhi cross nahi hota. Isliye score ko sirf un brains ke
-# weight se normalise karte hain jinke paas data hai aur jinka regime-fit
-# minimum se upar hai.
+# The Meta-Brain score is the weighted average of all weights. If a sub-brain
+# is silent due to missing data (e.g. Vol-Arb without an IV feed), its weight
+# drags the score down and the threshold can structurally never be crossed.
+# Therefore the score is normalised only by the weights of brains that have
+# data and whose regime-fit is above the minimum.
 META_BRAIN = {
     "NORMALISE_BY_PARTICIPATING_WEIGHT": True,
     "MIN_REGIME_FIT_TO_PARTICIPATE": 20,
@@ -224,11 +223,11 @@ AUTOMATION = {
     "MCX_OPEN_TIME": "15:30",         # MCX trading starts AFTER NSE square-off
     "MCX_CLOSE_TIME": "23:15",        # MCX trading ends (square-off at 23:15)
     "NIGHTLY_REPLAY_TIME": "00:00",
-    # Intraday entry cutoff — 3:00 PM ke baad NO new NSE/equity intraday
-    # orders, sirf profit booking (exits). MCX session starts at 15:30.
+    # Intraday entry cutoff — after 3:00 PM NO new NSE/equity intraday
+    # orders, only profit booking (exits). MCX session starts at 15:30.
     "INTRADAY_ENTRY_CUTOFF_TIME": "15:00",
-    # Delivery snapshot time — 3:00 PM pe Tiger next-day direction decide
-    # karke delivery (overnight) orders lagata hai.
+    # Delivery snapshot time — at 3:00 PM Tiger decides next-day direction
+    # and places delivery (overnight) orders.
     "DELIVERY_SNAPSHOT_TIME": "15:00",
     # NSE square-off — 15:15 (15 min before NSE close 15:30)
     "NSE_SQUARE_OFF_TIME": "15:15",
@@ -324,7 +323,7 @@ BRAIN4 = {
     # Full capital deployable across trades (Angel One balance = 100% trading money).
     "MAX_TOTAL_EXPOSURE_PCT": 100.0,
     # Confidence-based sizing — high score = more capital allocated.
-    # Tiger tbhi jab pura sure hai tab 80%+ capital use karta hai.
+    # Tiger uses 80%+ capital only when fully certain.
     "CONFIDENCE_TIER_ROCKET_MIN": 90,   # 90+ score → 100% allocatable
     "CONFIDENCE_TIER_STRONG_MIN": 80,   # 80-89 score → 80% allocatable (fully sure)
     "CONFIDENCE_TIER_DECENT_MIN": 75,   # 75-79 score → 60% allocatable
@@ -370,7 +369,7 @@ DRY_RUN = os.getenv("TIGER_BRAIN_DRY_RUN", "false").lower() == "true"
 
 # ============================================================
 # TIGER FALLBACK SCALPER MODE
-# "Bina shikar liye ghar nahi" — Tiger's last-resort micro-momentum
+# "Never go home empty-handed" — Tiger's last-resort micro-momentum
 # ============================================================
 # Activates when Tiger has 0 trades near session close, or has been
 # idle 2+ hours. Relaxes ALL gates — no zone touch required, just a

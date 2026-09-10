@@ -1,4 +1,4 @@
-"""Tests for real-time live scanner (बैकटेस्ट से इन्डिपेंडेंट).
+"""Tests for real-time live scanner (independent of backtest).
 
 Covers:
   1. scan_live_signals — empty data, off-hours, daily quota
@@ -111,8 +111,8 @@ class TestScanLiveSignals:
         }
         with patch("automation.live_scanner.find_tiger_brain_entry_15m",
                    return_value=mock_signal):
-            # DF with 50 bars — 09:15 से नहीं, पहले दिन से शुरू
-            # ताकि 10:30 पर latest bar index 40+ हो
+            # DF with 50 bars — starts from prior day (not 09:15)
+            # so that at 10:30 the latest bar index is 40+
             idx = pd.date_range("2026-09-07 09:15", periods=50, freq="15min")
             df = pd.DataFrame({
                 "open": np.random.uniform(99, 101, 50),

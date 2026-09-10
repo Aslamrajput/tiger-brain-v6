@@ -1,10 +1,10 @@
-"""🐅 TIGER REAL-TIME LIVE SCANNER — बैकटेस्ट से इन्डिपेंडेंट।
+"""🐅 TIGER REAL-TIME LIVE SCANNER — independent of backtest.
 
-यह V19 का असली फिक्स है। पहले tiger_live.py → run_tiger_brain_backtest()
-को कॉल करता था जो पूरा दिन सिमुलेशन चलाता था। अगर सिमुलेशन में स्कोर नहीं
-बनता तो "0 entries" आता और कोई buy order नहीं।
+This is the real fix for V19. Previously, tiger_live.py called
+run_tiger_brain_backtest(), which ran a full-day simulation. If no score
+formed in the simulation, "0 entries" resulted and no buy order was placed.
 
-अब यह फाइल अभी के timestamp पर सिर्फ़ latest bar देखकर 7 ब्रेन चलाती है:
+Now this file runs the 7 brains on only the latest bar at the current timestamp:
   - Brain 1: brain1_intraday_pass (gate)
   - Brain 2: detect_zones + zone_touched + volume_delta (gate)
   - Brain 3: scoring pipeline (rocket momentum)
@@ -12,9 +12,9 @@
   - Brain 6: Premium Discount Tracker (IV discount)
   - Brain 7: Session Commander (session threshold)
 
-(Brain 5 exit लाइव रनर के monitor_open_positions में है।)
+(Brain 5 exit lives in the live runner's monitor_open_positions.)
 
-असली रियल-टाइम सिग्नल — बैकटेस्ट सिमुलेशन पर निर्भर नहीं।
+Real real-time signal — does not depend on backtest simulation.
 """
 from __future__ import annotations
 
@@ -45,10 +45,10 @@ except Exception:
 
 
 def _latest_15m_index(df_15m: pd.DataFrame, now: datetime) -> int:
-    """अभी के timestamp से latest CLOSED 15m bar का index दे।
+    """Return the index of the latest CLOSED 15m bar at the current timestamp.
 
-    Live trading में हम सिर्फ़ CLOSED bar देखते हैं (current forming bar
-    पर सिग्नल नहीं — वो अभी बन रहा है)।
+    In live trading we only look at CLOSED bars (no signal on the currently
+    forming bar — it is still being built).
     """
     if df_15m is None or len(df_15m) == 0:
         return -1
@@ -103,8 +103,8 @@ def find_scalper_entry(
 ) -> dict | None:
     """🐅 TIGER FALLBACK SCALPER — micro-momentum entry, NO zone required.
 
-    Tiger ke bina shikar liye ghar nahi — jab koi setup nahi mil raha,
-    chota momentum pakad ke turant entry le leta hai.
+    Tiger's "never go home empty-handed" — when no setup is found, it
+    catches a small momentum move and takes a quick entry.
 
     Criteria (very relaxed — NO zone touch, NO rocket gate):
       1. Latest 15m candle body >= 50% of range (momentum candle)
@@ -174,18 +174,18 @@ def scan_live_signals(
     last_trade_time: datetime | None = None,
     scalper_trades_today: int = 0,
 ) -> list[dict]:
-    """अभी के timestamp पर हर symbol के लिए 7 ब्रेन चलाएँ → live signals।
+    """Run the 7 brains for each symbol at the current timestamp → live signals.
 
-    यह बैकटेस्ट सिमुलेशन नहीं है — सिर्फ़ latest closed 15m bar पर स्कैन।
-    हर symbol के लिए find_tiger_brain_entry या find_tiger_brain_entry_15m
-    कॉल होता है (1m data है या नहीं उसपर निर्भर)।
+    This is NOT a backtest simulation — it scans only the latest closed 15m bar.
+    For each symbol, find_tiger_brain_entry or find_tiger_brain_entry_15m is
+    called (depending on whether 1m data is available).
 
-    अगर कोई normal signal नहीं मिलता और Scalper Mode active है, तो
-    find_scalper_entry() fallback चलता है — बिना zone के momentum entry।
+    If no normal signal is found and Scalper Mode is active, the
+    find_scalper_entry() fallback runs — a momentum entry without a zone.
 
     Returns:
-        list[dict]: सिग्नल जो setup_score >= session_threshold हैं।
-        हर dict में symbol, direction, setup_score, strike_kind, आदि होंगे।
+        list[dict]: signals whose setup_score >= session_threshold.
+        Each dict contains symbol, direction, setup_score, strike_kind, etc.
     """
     if now is None:
         now = datetime.now()
@@ -208,7 +208,7 @@ def scan_live_signals(
         # Brain 7: session threshold (NSE vs MCX)
         session_thresh = get_session_score_threshold(ts_time, seg)
         if session_thresh >= 999.0:
-            continue  # off-hours — इस symbol का session बंद
+            continue  # off-hours — this symbol's session is closed
 
         # force hunt check (Brain 7)
         force_hunt, fh_thresh, _ = should_force_hunt(
@@ -250,7 +250,7 @@ def scan_live_signals(
                          sym, score, min_score)
             continue
 
-        # सिग्नल मिला — लाइव ऑर्डर के लिए तैयार
+        # Signal found — ready for a live order
         # _place_live_orders expects entry_ts, strike, option_type,
         # entry_premium, is_delivery — backtest path adds these when
         # creating positions. Live path must add them here or the signal
@@ -273,7 +273,7 @@ def scan_live_signals(
         setup["option_type"] = "CE" if is_call else "PE"
         setup["entry_premium"] = 0.0  # real LTP fetched in _place_live_orders
         setup["is_delivery"] = False  # intraday by default
-        setup["exit_ts"] = None  # एंट्री सिग्नल — अभी exit नहीं
+        setup["exit_ts"] = None  # entry signal — no exit yet
         logger.info("🐅 LIVE SIGNAL: %s %s score=%.1f (thresh %.1f) %s",
                     sym, setup.get("direction", ""),
                     score, min_score, setup.get("score_details", ""))

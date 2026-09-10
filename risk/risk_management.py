@@ -1,23 +1,23 @@
 """
 Tiger Brain V6.1 — BRAIN 4: Capital Allocation & Trade Counter Guard
 ======================================================================
-Chautha brain. Ye DO capital/risk rules enforce karta hai:
+Fourth brain. Enforces TWO capital/risk rules:
 
   1. TRADE COUNTER GUARD (user requirement):
      - Global daily limit: max 5-10 trades/day across ALL markets
-     - Commodity-specific daily limit: max 5-10 trades/day commodity market
-     - Limit hit hone ke baad us category ke naye trades band — us din.
+     - Commodity-specific daily limit: max 5-10 trades/day for the commodity market
+     - Once a limit is hit, new trades in that category are blocked for the day.
 
   2. CAPITAL ALLOCATION:
-     - Dynamic position sizing — LIVE available capital se (Angel One),
-       hardcoded lot sizes kabhi nahi.
+     - Dynamic position sizing — from LIVE available capital (Angel One),
+       never hardcoded lot sizes.
      - Per-trade cap: max 10% of available capital.
      - Total exposure cap across open positions.
 
-Counter state in-memory hai + date-tracked — naya din = auto reset.
-Persistence (disk) production mein scheduler process ke lifetime ke
-liye kaafi hai; agar multi-process chahiye hoga to KV-store/file
-persistence add karna hoga.
+Counter state is in-memory + date-tracked — a new day auto-resets.
+Persistence (disk) is sufficient in production for the scheduler process
+lifetime; if multi-process is needed later, KV-store/file persistence
+must be added.
 """
 
 from __future__ import annotations
@@ -28,18 +28,18 @@ from datetime import date
 try:
     from config.thresholds import BRAIN4, MARKET_CATEGORIES
 except ImportError:
-    raise ImportError("Repo ROOT se chalao, 'risk/' ke andar se nahi.")
+    raise ImportError("Run from repo ROOT, not from inside 'risk/'.")
 
 logger = logging.getLogger("tiger_brain.risk_management")
 
 
 def resolve_market_category(symbol: str, exchange: str | None = None) -> str:
     """
-    Symbol/exchange se market category nikalta hai.
+    Derives the market category from symbol/exchange.
 
-    Agar exchange diya gaya hai to MARKET_CATEGORIES mapping use hota hai
-    (MCX/NCDEX = commodity). Warna symbol ke naam se common MCX symbols
-    recognize karte hain (CRUDEOIL, GOLD, SILVER, NATURALGAS, COPPER,
+    If exchange is provided, the MARKET_CATEGORIES mapping is used
+    (MCX/NCDEX = commodity). Otherwise the symbol name is used to recognize
+    common MCX symbols (CRUDEOIL, GOLD, SILVER, NATURALGAS, COPPER,
     ZINC, ALUMINIUM, NICKEL, LEAD, MENTHAOIL, COTTONCANDY...).
     """
     if exchange:
@@ -51,7 +51,7 @@ def resolve_market_category(symbol: str, exchange: str | None = None) -> str:
         "NATURALGAS", "COPPER", "ZINC", "ALUMINIUM", "ALLOY", "NICKEL",
         "LEAD", "MENTHAOIL", "COTTONCANDY", "COTTON", "BRENTCRUDEOIL",
     }
-    # Strip expiry-suffix jaise "CRUDEOIL25SEP" ya "GOLD-M"
+    # Strip expiry-suffix e.g. "CRUDEOIL25SEP" or "GOLD-M"
     base = upper
     for suffix in ("-M", "-MES", "MES", "MIC"):
         if base.endswith(suffix):
@@ -103,7 +103,7 @@ class TradeCounterGuard:
 
     # --- date handling ---
     def _roll_date_if_needed(self):
-        """Naya din hua to counters reset."""
+        """Resets counters on a new day."""
         today = date.today()
         if self._today != today:
             logger.info(
@@ -126,7 +126,7 @@ class TradeCounterGuard:
 
     def can_trade(self, symbol: str, exchange: str | None = None) -> dict:
         """
-        Check karta hai ki naya trade allowed hai ya nahi.
+        Checks whether a new trade is allowed.
         Returns dict: 'allowed', 'blocked_by', 'message', 'counts'.
         """
         self._roll_date_if_needed()
@@ -136,12 +136,12 @@ class TradeCounterGuard:
         if self.global_count >= self.global_limit:
             blocking.append(
                 f"GLOBAL limit hit: {self.global_count}/{self.global_limit} trades "
-                f"aaj (all markets) — naye trades band"
+                f"today (all markets) — new trades blocked"
             )
         if category == "commodity" and self.commodity_count >= self.commodity_limit:
             blocking.append(
                 f"COMMODITY limit hit: {self.commodity_count}/{self.commodity_limit} "
-                f"commodity trades aaj — commodity band"
+                f"commodity trades today — commodity blocked"
             )
 
         return {
@@ -154,8 +154,8 @@ class TradeCounterGuard:
 
     def register_trade(self, symbol: str, exchange: str | None = None) -> dict:
         """
-        Ek executed trade register karta hai. YE CAN_TRADE CHECK REPLACE
-        NAHI KARTA — pehle can_trade() call karo, allowed ho tabhi register.
+        Registers an executed trade. THIS DOES NOT REPLACE THE CAN_TRADE
+        CHECK — call can_trade() first, and register only if allowed.
         """
         check = self.can_trade(symbol, exchange)
         if not check["allowed"]:
@@ -177,7 +177,7 @@ class TradeCounterGuard:
         return {"registered": True, **self.counts()}
 
 
-# Singleton — poore process mein ek hi counter state.
+# Singleton — a single counter state across the whole process.
 _guard_instance: TradeCounterGuard | None = None
 
 
@@ -213,13 +213,13 @@ if __name__ == "__main__":
     r = guard.can_trade("CRUDEOIL", exchange="MCX")
     print(f"  6th commodity trade: allowed={r['allowed']} — {r['message']}")
 
-    # Equity abhi allowed hai (global 5 mein se 5 use huye? nahi — 5/5 hit)
+    # Equity is still allowed (5 of 5 global used? yes — 5/5 hit)
     r2 = guard.can_trade("RELIANCE", exchange="NSE")
     print(f"  equity trade after commodity cap: allowed={r2['allowed']} — {r2['message']}")
 
     print("\n=== Test: date roll resets counters ===")
     tomorrow = date.today() + timedelta(days=1)
     guard._today = tomorrow  # simulate: guard thinks today is tomorrow... actually force roll
-    # ab date.today() != tomorrow, so _roll_date_if_needed will reset
+    # now date.today() != tomorrow, so _roll_date_if_needed will reset
     r3 = guard.can_trade("GOLD", exchange="MCX")
     print(f"  next-day trade: allowed={r3['allowed']}, counts={r3['counts']}")

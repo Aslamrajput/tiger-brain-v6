@@ -6,18 +6,17 @@ independent taur pe check karna. Agar apni jaanch Stage 1 se bahut alag
 nikle, candidate reject. 4-5 candidates mein se jo bache, unme se top 2
 sabse mazboot chunna.
 
-⚠️ IMPORTANT — "independent" check ki honest limitation:
-Asli production system mein Stage 2 ka "independent re-check" iska matlab
-hota hai ki thodi der baad (jab data thoda fresh ho chuka ho) dobara same
-calculation chale, taaki agar Stage 1 ka signal ek fluke tha (ek candle ka
-noise), wo Stage 2 mein pakड़ा jaaye. Abhi ye function sirf SAME data pe
-dobara run karta hai (deterministic hai, matlab same input = same output)
-— isliye abhi ke liye ye "independent" check nahi hai, sirf ek CONSISTENCY
-check hai (ki calculation sahi se dobara ho rahi hai, koi random bug nahi).
+IMPORTANT — honest limitation of the "independent" check:
+In a production system, Stage 2's "independent re-check" means re-running
+the calculation after a short delay (when data is fresher), so that if
+Stage 1's signal was a fluke (single-candle noise), Stage 2 catches it.
+Currently this function re-runs on the SAME data (deterministic: same
+input = same output), so it is a CONSISTENCY check, not a truly
+independent one.
 
-Jab live data feed lagega (Phase 2/3), tab Stage 2 ko ek chhota time-gap
-(jaise 1-2 minute baad ka fresh data) dena hoga taaki ye asal mein
-"independent" bane. Ye ek KNOWN GAP hai, chhupaya nahi ja raha.
+When a live data feed is added (Phase 2/3), Stage 2 should use a small
+time-gap (1-2 minutes of fresh data) before re-checking. This is a
+KNOWN GAP, not hidden.
 """
 
 try:

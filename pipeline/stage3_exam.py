@@ -1,13 +1,13 @@
 """
 Tiger Brain V6+V7 — STAGE 3: Exam Brain (Section 9, 25)
 ==========================================================
-Sabse kathor filter — execution se pehle ka aakhri check. Self-Challenge
-Engine apply karta hai: bullish ke khilaf khud bearish saboot dhundhna
-(aur vice-versa). Koi bhi hard-veto factor (IV danger, liquidity, data
-quality) lagा to score chahe kitna bhi ho, turant reject.
+The Stage 3 Exam Brain — the strictest filter before execution. The
+Self-Challenge Engine looks for bearish evidence against a bullish
+setup (and vice-versa). Any hard-veto factor (IV danger, liquidity,
+data quality) triggers immediate rejection regardless of score.
 
-Section 25 ka bar sabse ooncha hai yahan: confidence >= 65 (Stage 1's
-50 aur Stage 2's 50 se zyada sakht).
+Section 25 sets the highest confidence threshold here: >= 65
+(stricter than Stage 1's 50 and Stage 2's 50).
 """
 
 try:

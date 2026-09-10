@@ -1,17 +1,17 @@
 """
 Tiger Brain V6.1 — BRAIN 4 (part 2): Dynamic Position Sizer
 ============================================================
-Broker se LIVE available capital laakar trade size dynamically scale
-karta hai. Kabhi bhi hardcoded/static lot size nahi.
+Fetches LIVE available capital from the broker and dynamically scales
+trade size. Never uses a hardcoded/static lot size.
 
 Rules:
-  - Capital source: Angel One (getRMS available cash). Broker fail ho to
-    fallback config value (default None = trade block — fail-safe).
+  - Capital source: Angel One (getRMS available cash). If the broker fails,
+    fall back to a config value (default None = trade block — fail-safe).
   - Per trade: maximum BRAIN4['MAX_CAPITAL_PER_TRADE_PCT'] (10%) of
     available capital.
-  - Total exposure: MAX_TOTAL_EXPOSURE_PCT se zyada nahi.
+  - Total exposure: must not exceed MAX_TOTAL_EXPOSURE_PCT.
   - Quantity = floor(allocatable capital / (premium * lot_size)) * lot_size.
-    Lot size 0/None ho to 1 maan lo (contract-level trading).
+    If lot size is 0/None, assume 1 (contract-level trading).
 """
 
 from __future__ import annotations
@@ -21,18 +21,18 @@ import logging
 try:
     from config.thresholds import BRAIN4
 except ImportError:
-    raise ImportError("Repo ROOT se chalao, 'broker/' ke andar se nahi.")
+    raise ImportError("Run from repo ROOT, not from inside 'broker/'.")
 
 logger = logging.getLogger("tiger_brain.position_sizer")
 
 
 def get_available_capital(broker) -> dict:
     """
-    Angel One broker se LIVE available cash laata hai.
+    Fetches LIVE available cash from the Angel One broker.
 
     Args:
-        broker: AngelBroker instance (broker/angel_connect.py) — logged-in
-                hona chahiye. None ho to fallback apply hoga.
+        broker: AngelBroker instance (broker/angel_connect.py) — must be
+                logged in. If None, fallback is applied.
 
     Returns:
         dict:
@@ -44,34 +44,34 @@ def get_available_capital(broker) -> dict:
         fallback = BRAIN4["FALLBACK_CAPITAL_ON_BROKER_FAIL"]
         if fallback is None:
             return {"available_capital": None, "source": "none",
-                    "note": "broker diya hi nahi gaya aur fallback None — trade block"}
+                    "note": "broker not provided and fallback is None — trade block"}
         return {"available_capital": float(fallback), "source": "fallback",
-                "note": f"broker None — fallback capital {fallback} use hua"}
+                "note": f"broker None — fallback capital {fallback} used"}
 
     try:
         # Angel One: broker.get_balance() uses rmsLimit() for real available cash.
         available = broker.get_balance()
         if available <= 0:
-            raise ValueError("get_balance() ne ₹0 diya — rmsLimit() fail")
+            raise ValueError("get_balance() returned ₹0 — rmsLimit() failed")
         return {"available_capital": available, "source": "broker", "note": None}
 
     except Exception as exc:
-        logger.warning(f"Broker se capital fetch fail: {exc}")
+        logger.warning(f"Capital fetch from broker failed: {exc}")
         fallback = BRAIN4["FALLBACK_CAPITAL_ON_BROKER_FAIL"]
         if fallback is None:
             return {"available_capital": None, "source": "none",
-                    "note": f"broker capital fetch fail ({exc}) aur fallback None — trade block"}
+                    "note": f"broker capital fetch failed ({exc}) and fallback is None — trade block"}
         return {"available_capital": float(fallback), "source": "fallback",
-                "note": f"broker fail ({exc}) — fallback capital {fallback} use hua"}
+                "note": f"broker failed ({exc}) — fallback capital {fallback} used"}
 
 
 def confidence_multiplier(score: float) -> tuple[float, str]:
     """
-    Tiger ke setup score se conviction multiplier nikalta hai.
-    High score = zyada capital, low score = kam capital.
+    Derives a conviction multiplier from Tiger's setup score.
+    High score = more capital, low score = less capital.
 
-    Note: Entry decision brain2 ka hai (MIN_SCORE_TO_ENTER). Yahan sirf
-    SIZING hota hai — score low ho to decent tier use karo, block mat karo.
+    Note: Entry decision is made by brain2 (MIN_SCORE_TO_ENTER). Here only
+    SIZING happens — if the score is low, use the decent tier; do not block.
 
     Returns:
         (multiplier, tier_label)
@@ -93,16 +93,16 @@ def size_position(
     score: float | None = None,
 ) -> dict:
     """
-    Available capital + premium + setup score se position size nikalta hai.
+    Computes position size from available capital + premium + setup score.
 
-    Confidence-based: high score pe zyada lots, low score pe kam.
-    Angel One ka full capital trading ke liye use hota hai (100%).
+    Confidence-based: more lots on high score, fewer on low score.
+    Angel One's full capital is used for trading (100%).
 
     Args:
-        available_capital: live available cash (get_available_capital se)
-        premium: option ka per-unit price (LTP)
-        lot_size: contract ka lot size (None/0 = 1)
-        current_exposure: pehle se lagi hui total capital (open positions)
+        available_capital: live available cash (from get_available_capital)
+        premium: per-unit price of the option (LTP)
+        lot_size: contract lot size (None/0 = 1)
+        current_exposure: total capital already deployed (open positions)
         score: Tiger setup score (brain2_setup_score). High = more capital.
 
     Returns:
@@ -110,7 +110,7 @@ def size_position(
             'quantity': int — total units (lots * lot_size)
             'lots': int
             'allocated_capital': float
-            'allocation_pct': float — available capital ka %
+            'allocation_pct': float — % of available capital
             'confidence_tier': str
             'notes': list
     """
@@ -120,13 +120,13 @@ def size_position(
     if available_capital is None or available_capital <= 0:
         return {"quantity": 0, "lots": 0, "allocated_capital": 0.0,
                 "allocation_pct": 0.0, "confidence_tier": "none",
-                "notes": ["available capital nahi hai (None/<=0) — trade nahi ho sakta"]}
+                "notes": ["no available capital (None/<=0) — trade not possible"]}
     if premium is None or premium <= 0:
         return {"quantity": 0, "lots": 0, "allocated_capital": 0.0,
                 "allocation_pct": 0.0, "confidence_tier": "none",
-                "notes": [f"premium invalid ({premium}) — trade nahi ho sakta"]}
+                "notes": [f"premium invalid ({premium}) — trade not possible"]}
 
-    # --- Confidence-based scaling: score se decide kitta capital lagana ---
+    # --- Confidence-based scaling: decide how much capital to deploy from score ---
     conf_mult, tier = confidence_multiplier(score)
 
     # --- Per-trade cap (now 100% = full capital, scaled by confidence) ---
@@ -140,7 +140,7 @@ def size_position(
                 "allocation_pct": 0.0, "confidence_tier": tier,
                 "notes": [
                     f"total exposure cap hit: current {current_exposure} + cap "
-                    f"{max_total} — naya trade nahi"
+                    f"{max_total} — no new trade"
                 ]}
     allocatable = min(per_trade_cap, headroom)
 
@@ -148,8 +148,8 @@ def size_position(
     cost_per_lot = premium * lot
     if cost_per_lot > allocatable:
         notes.append(
-            f"ek lot ka cost ({cost_per_lot:.2f}) allocatable "
-            f"({allocatable:.2f}) se zyada — trade nahi ho sakta"
+            f"cost of one lot ({cost_per_lot:.2f}) exceeds allocatable "
+            f"({allocatable:.2f}) — trade not possible"
         )
         return {"quantity": 0, "lots": 0, "allocated_capital": 0.0,
                 "allocation_pct": 0.0, "confidence_tier": tier, "notes": notes}

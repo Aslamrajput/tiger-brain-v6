@@ -1,22 +1,20 @@
 """
 Tiger Brain V6.1 — BRAIN 2: Setup Trigger & Entry Engine (SMC)
 ================================================================
-Dusra brain. Brain 1 ne momentum confirm kiya; ab ye brain SMART MONEY
-CONCEPTS (SMC) se asli setup trigger banata hai:
+Second brain. Brain 1 confirmed momentum; this brain builds the actual
+setup trigger using SMART MONEY CONCEPTS (SMC):
 
-  1. ORDER BLOCK — structure break se theek pehle ki last opposite
-     candle. Institutional footprint jahan se displacement nikla.
-  2. LIQUIDITY SWEEP — swing high/low ke paar wick ghuskar wapas
-     andar close hona (stop-hunt / false breakout rejection).
-  3. RS SCORE (0-100) — Brain 1 ke RS divergence ko setup confidence
-     mein convert karna.
+  1. ORDER BLOCK — the last opposite candle just before a structure break.
+     The institutional footprint from which displacement originated.
+  2. LIQUIDITY SWEEP — a wick piercing beyond a swing high/low, then
+     closing back inside (stop-hunt / false breakout rejection).
+  3. RS SCORE (0-100) — converts Brain 1's RS divergence into setup confidence.
 
-Output: ek setup dict — direction (BUY=call side / SELL=put side), entry,
-stop-loss level, aur confidence score. Ye Brain 3 (option selector) ko
-jaata hai.
+Output: a setup dict — direction (BUY=call side / SELL=put side), entry,
+stop-loss level, and confidence score. This goes to Brain 3 (option selector).
 
-Note: is repo ke pichhle requirements (SMC Order Blocks, Liquidity Sweeps,
-RS scores) isi file mein live hain.
+Note: this repo's prior requirements (SMC Order Blocks, Liquidity Sweeps,
+RS scores) live in this file.
 """
 
 from __future__ import annotations
@@ -26,7 +24,7 @@ import logging
 try:
     from config.thresholds import BRAIN1, BRAIN2
 except ImportError:
-    raise ImportError("Repo ROOT se chalao, 'pipeline/' ke andar se nahi.")
+    raise ImportError("Run from repo ROOT, not from inside 'pipeline/'.")
 
 logger = logging.getLogger("tiger_brain.smart_money_scanner")
 
@@ -46,15 +44,15 @@ def find_order_blocks(df) -> dict:
     """
     SMC Order Block detection.
 
-    Bullish OB: displacement-up se theek pehle ki last bearish candle,
-    jahan displacement ATR-multiple se badi ho aur market structure
-    (recent swing high) break kare.
-    Bearish OB: iska mirror image.
+    Bullish OB: the last bearish candle just before displacement-up, where
+    the displacement is larger than an ATR-multiple and breaks market
+    structure (recent swing high).
+    Bearish OB: the mirror image.
 
     Returns dict with bullish/bearish OB zones (price ranges) or None.
     """
     if len(df) < BRAIN2["ORDER_BLOCK_LOOKBACK_BARS"] + 5:
-        return {"bullish": None, "bearish": None, "note": "kaafi bars nahi hain"}
+        return {"bullish": None, "bearish": None, "note": "not enough bars"}
 
     atr = _atr(df)
     if atr <= 0:
@@ -68,7 +66,7 @@ def find_order_blocks(df) -> dict:
     bearish_ob = None
 
     for i in range(2, len(recent)):
-        # Displacement candle(s): current bar ka body
+        # Displacement candle(s): the current bar's body
         bar = recent.iloc[i]
         body = abs(float(bar["close"]) - float(bar["open"]))
         if body < min_disp:
@@ -77,7 +75,7 @@ def find_order_blocks(df) -> dict:
         prev = recent.iloc[i - 1]
 
         if bar["close"] > bar["open"]:  # displacement UP
-            # structure break check: pichhle kuch bars ka swing high todna
+            # structure break check: break the swing high of the prior few bars
             swing_high = float(recent.iloc[: i]["high"].max())
             if bar["close"] > swing_high and prev["close"] < prev["open"]:
                 bullish_ob = {
@@ -102,14 +100,14 @@ def find_liquidity_sweep(df) -> dict:
     """
     SMC Liquidity Sweep detection.
 
-    Bullish sweep: kisi recent swing LOW ke neeche wick ghusi, par close
-    us level ke upar wapas aa gayi (sellers ke stops hunt karke rejection).
-    Bearish sweep: swing HIGH ke upar wick, close neeche wapas.
+    Bullish sweep: a wick pierced below a recent swing LOW, but the close
+    came back above that level (rejection after hunting sellers' stops).
+    Bearish sweep: a wick above a swing HIGH, close back below.
 
     Returns dict with sweep direction, swept level, wick extreme — or None.
     """
     if len(df) < BRAIN2["SWING_LOOKBACK_BARS"] + 2:
-        return {"sweep": None, "note": "kaafi bars nahi hain"}
+        return {"sweep": None, "note": "not enough bars"}
 
     atr = _atr(df)
     if atr <= 0:
@@ -118,12 +116,12 @@ def find_liquidity_sweep(df) -> dict:
     lookback = BRAIN2["SWING_LOOKBACK_BARS"]
     window = df.tail(lookback + 1).reset_index(drop=True)
     last = window.iloc[-1]
-    prior = window.iloc[:-1]  # last bar se pehle ke swings
+    prior = window.iloc[:-1]  # swings before the last bar
 
     min_pierce = atr * BRAIN2["LIQUIDITY_SWEEP_MIN_PIERCE_ATR"]
     result = {"sweep": None, "note": None}
 
-    # --- Bullish sweep: low wick neeche ghusi, close upar ---
+    # --- Bullish sweep: low wick pierced down, close above ---
     swing_low = float(prior["low"].min())
     if (
         float(last["low"]) < swing_low - min_pierce
@@ -136,7 +134,7 @@ def find_liquidity_sweep(df) -> dict:
             "pierce_atr": round((swing_low - float(last["low"])) / atr, 2),
         }
 
-    # --- Bearish sweep: high wick upar ghusi, close neeche ---
+    # --- Bearish sweep: high wick pierced up, close below ---
     swing_high = float(prior["high"].max())
     if (
         float(last["high"]) > swing_high + min_pierce
@@ -154,11 +152,11 @@ def find_liquidity_sweep(df) -> dict:
 
 def compute_rs_score(rs_divergence_pct) -> float:
     """
-    RS divergence ko 0-100 score mein map karna.
-    ±1pp (BRAIN1 threshold) pe ~50; har additional pp 10 points.
+    Maps RS divergence to a 0-100 score.
+    ~50 at ±1pp (BRAIN1 threshold); 10 points per additional pp.
     """
     if rs_divergence_pct is None:
-        return 50.0  # neutral — benchmark data nahi tha
+        return 50.0  # neutral — no benchmark data
     # 50 + 10*divergence, clamped 0-100
     score = 50 + 10 * rs_divergence_pct
     return float(max(0.0, min(100.0, score)))
@@ -166,11 +164,11 @@ def compute_rs_score(rs_divergence_pct) -> float:
 
 def generate_setup(brain1_result: dict, df) -> dict:
     """
-    Brain 2 ka main entry point. Brain 1 ke output + OHLCV se SMC setup
-    banata hai (ya reject karta hai).
+    Brain 2's main entry point. Builds (or rejects) an SMC setup from
+    Brain 1's output + OHLCV.
 
     Args:
-        brain1_result: pipeline.brain1_scanner.scan() ka output
+        brain1_result: output of pipeline.brain1_scanner.scan()
         df: symbol OHLCV DataFrame
 
     Returns:
@@ -178,7 +176,7 @@ def generate_setup(brain1_result: dict, df) -> dict:
             'setup_found': bool
             'direction': 'BUY' | 'SELL' | None   (BUY = call, SELL = put)
             'entry_price': float | None
-            'stop_loss': float | None   (underlying pe, OB/sweep-based)
+            'stop_loss': float | None   (on underlying, OB/sweep-based)
             'setup_score': float (0-100)
             'order_block': detected OB details
             'liquidity_sweep': detected sweep details
@@ -192,7 +190,7 @@ def generate_setup(brain1_result: dict, df) -> dict:
             "setup_found": False, "direction": None, "entry_price": None,
             "stop_loss": None, "setup_score": 0, "order_block": None,
             "liquidity_sweep": None, "rs_score": 0, "brain2_notes":
-            ["Brain 1 pass nahi hua — Brain 2 run hi nahi hoga"],
+            ["Brain 1 did not pass — Brain 2 will not run"],
         }
 
     obs = find_order_blocks(df)
@@ -203,7 +201,7 @@ def generate_setup(brain1_result: dict, df) -> dict:
         rs_pct = brain1_result["rs_divergence"].get("divergence_pct")
     rs_score = compute_rs_score(rs_pct)
 
-    # --- Direction resolve karna: OB + sweep + RS ek hon mein ---
+    # --- Resolve direction: align OB + sweep + RS ---
     votes = []
 
     if obs["bullish"]:
@@ -222,7 +220,7 @@ def generate_setup(brain1_result: dict, df) -> dict:
             "setup_found": False, "direction": None, "entry_price": None,
             "stop_loss": None, "setup_score": 0, "order_block": obs,
             "liquidity_sweep": sweep, "rs_score": rs_score,
-            "brain2_notes": ["koi SMC structure nahi mila (OB/sweep/RS) — koi setup nahi"],
+            "brain2_notes": ["no SMC structure found (OB/sweep/RS) — no setup"],
         }
 
     buy_votes = votes.count("BUY")
@@ -234,7 +232,7 @@ def generate_setup(brain1_result: dict, df) -> dict:
             "stop_loss": None, "setup_score": 0, "order_block": obs,
             "liquidity_sweep": sweep, "rs_score": rs_score,
             "brain2_notes": [
-                f"conflicting signals ({buy_votes} BUY vs {sell_votes} SELL votes) — koi setup nahi"
+                f"conflicting signals ({buy_votes} BUY vs {sell_votes} SELL votes) — no setup"
             ],
         }
 
@@ -248,7 +246,7 @@ def generate_setup(brain1_result: dict, df) -> dict:
     if direction == "BUY":
         ob = obs["bullish"]
         swp = (sweep.get("sweep") or {}).get("direction") == "bullish" and sweep["sweep"] or None
-        # Stop: OB bottom ya sweep wick extreme, jo zyada conservative ho
+        # Stop: OB bottom or sweep wick extreme, whichever is more conservative
         candidates = []
         if ob:
             candidates.append(ob["bottom"])
@@ -256,7 +254,7 @@ def generate_setup(brain1_result: dict, df) -> dict:
             candidates.append(swp["wick_extreme"])
         if candidates:
             stop_loss = min(candidates)
-            notes.append(f"Bullish setup — stop OB-bottom/sweep-wick se: {stop_loss}")
+            notes.append(f"Bullish setup — stop from OB-bottom/sweep-wick: {stop_loss}")
     else:
         ob = obs["bearish"]
         swp = (sweep.get("sweep") or {}).get("direction") == "bearish" and sweep["sweep"] or None
@@ -267,20 +265,20 @@ def generate_setup(brain1_result: dict, df) -> dict:
             candidates.append(swp["wick_extreme"])
         if candidates:
             stop_loss = max(candidates)
-            notes.append(f"Bearish setup — stop OB-top/sweep-wick se: {stop_loss}")
+            notes.append(f"Bearish setup — stop from OB-top/sweep-wick: {stop_loss}")
 
     if stop_loss is not None and direction == "BUY" and stop_loss >= entry_price:
         stop_loss = None
-        notes.append("stop-loss entry ke upar aa gaya (structure invalid) — stop hata diya, setup reject")
+        notes.append("stop-loss moved above entry (invalid structure) — stop removed, setup rejected")
     if stop_loss is not None and direction == "SELL" and stop_loss <= entry_price:
         stop_loss = None
-        notes.append("stop-loss entry ke neeche aa gaya (structure invalid) — stop hata diya, setup reject")
+        notes.append("stop-loss moved below entry (invalid structure) — stop removed, setup rejected")
     if stop_loss is None:
         return {
             "setup_found": False, "direction": None, "entry_price": None,
             "stop_loss": None, "setup_score": 0, "order_block": obs,
             "liquidity_sweep": sweep, "rs_score": rs_score,
-            "brain2_notes": notes + ["valid stop-loss nahi bana — setup reject"],
+            "brain2_notes": notes + ["no valid stop-loss formed — setup rejected"],
         }
 
     # --- Setup score (0-100): OB + sweep + RS weighted ---
@@ -295,9 +293,9 @@ def generate_setup(brain1_result: dict, df) -> dict:
             (direction == "BUY" and sweep["sweep"]["direction"] == "bullish")
             or (direction == "SELL" and sweep["sweep"]["direction"] == "bearish")
         )
-        # pierce depth se thoda bonus (deeper sweep = stronger signal)
+        # slight bonus from pierce depth (deeper sweep = stronger signal)
         sweep_aligned = min(1.0, (sweep["sweep"]["pierce_atr"] or 0.5) / 1.0) if aligned else 0.0
-    # RS score ko direction ke hisaab se: BUY ke liye high RS, SELL ke liye low
+    # RS score by direction: high RS for BUY, low RS for SELL
     rs_component = rs_score / 100.0 if direction == "BUY" else (100 - rs_score) / 100.0
 
     setup_score = 100 * (
@@ -329,7 +327,7 @@ def generate_setup(brain1_result: dict, df) -> dict:
 
 
 # ============================================================
-# QUICK MANUAL TEST — repo ROOT se: python3 -m pipeline.smart_money_scanner
+# QUICK MANUAL TEST — from repo ROOT: python3 -m pipeline.smart_money_scanner
 # ============================================================
 if __name__ == "__main__":
     import numpy as np

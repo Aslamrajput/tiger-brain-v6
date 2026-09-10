@@ -1,21 +1,21 @@
 """
 Tiger Brain V6.1 — BRAIN 1: Market Scanner & Regime Detection
 ===============================================================
-Pehla brain. Ye decide karta hai ki kisi symbol pe dhyaan dene layak
-momentum hai ya nahi — matalab ye NOISE FILTER hai.
+First brain. Decides whether a symbol has noteworthy momentum worth
+attention — i.e. this is a NOISE FILTER.
 
-Core rule (user requirement): Brain 1 ko minor, choppy candle movements
-IGNORE karni hain. Kisi setup ko Brain 2 tak sirf tab pass karna hai jab:
+Core rule (user requirement): Brain 1 must IGNORE minor, choppy candle
+movements. A setup should only pass to Brain 2 when:
 
-  1. High VOLUME VELOCITY ho (current volume average se kaafi zyada), YA
-  2. Significant RS DIVERGENCE ho (symbol apne benchmark/index se alag
-     chal raha ho).
+  1. There is high VOLUME VELOCITY (current volume well above average), OR
+  2. There is significant RS DIVERGENCE (the symbol is moving differently
+     from its benchmark/index).
 
-Ye regime classification (regime/classifier.py) ke UPAR baithta hai —
-regime bhi detect karta hai, par momentum gate bhi lagata hai, taaki bot
-major market momentum pakde, minor retracements nahi.
+This sits ON TOP of regime classification (regime/classifier.py) — it
+detects regime, but also applies a momentum gate, so the bot catches
+major market momentum, not minor retracements.
 
-Wiring: brain1_scanner.scan() → agar passed, smart_money_scanner (Brain 2)
+Wiring: brain1_scanner.scan() → if passed, smart_money_scanner (Brain 2)
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ try:
     from config.thresholds import BRAIN1
     from regime.classifier import classify_regime
 except ImportError:
-    raise ImportError("Repo ROOT se chalao, 'pipeline/' ke andar se nahi.")
+    raise ImportError("Run from repo ROOT, not from inside 'pipeline/'.")
 
 logger = logging.getLogger("tiger_brain.brain1_scanner")
 
@@ -51,15 +51,15 @@ def volume_velocity(df) -> dict:
     lookback = BRAIN1["VOLUME_LOOKBACK_BARS"]
     if len(df) < lookback + 1:
         return {"ratio": 0.0, "high_velocity": False, "avg_volume": None,
-                "note": f"data {len(df)} bars — {lookback + 1} chahiye"}
+                "note": f"data has {len(df)} bars — need {lookback + 1}"}
 
     volumes = df["volume"]
-    # Zero-volume bars (index spot data) ko "data missing" maano, average
-    # mein sirf non-zero bars gino — repo ki existing policy ke hisaab se.
+    # Treat zero-volume bars (index spot data) as "data missing"; count only
+    # non-zero bars in the average — per the repo's existing policy.
     nonzero = volumes.iloc[:-1][volumes.iloc[:-1] > 0]
     if nonzero.empty:
         return {"ratio": 0.0, "high_velocity": False, "avg_volume": None,
-                "note": "sab volumes 0 hain (index spot) — volume velocity NAHI nikal sakti"}
+                "note": "all volumes are 0 (index spot) — cannot compute volume velocity"}
 
     avg_volume = float(nonzero.tail(lookback).mean())
     current = float(volumes.iloc[-1])
@@ -78,8 +78,8 @@ def volume_velocity(df) -> dict:
 
 def rs_divergence(df, benchmark_df) -> dict:
     """
-    RS divergence = symbol ka N-bar return minus benchmark ka N-bar return.
-    Positive = symbol outperforming; magnitude matters, sign direction batata hai.
+    RS divergence = the symbol's N-bar return minus the benchmark's N-bar return.
+    Positive = symbol outperforming; magnitude matters, sign indicates direction.
 
     Args:
         df: symbol OHLCV DataFrame
@@ -88,7 +88,7 @@ def rs_divergence(df, benchmark_df) -> dict:
     lookback = BRAIN1["RS_LOOKBACK_BARS"]
     if len(df) < lookback + 1 or len(benchmark_df) < lookback + 1:
         return {"divergence_pct": None, "significant": False,
-                "note": f"dono series mein {lookback + 1} bars chahiye"}
+                "note": f"need {lookback + 1} bars in both series"}
 
     symbol_ret = (float(df["close"].iloc[-1]) / float(df["close"].iloc[-lookback - 1]) - 1) * 100
     bench_ret = (
@@ -107,16 +107,16 @@ def rs_divergence(df, benchmark_df) -> dict:
 
 def is_choppy(df) -> dict:
     """
-    Chop filter: agar last N bars ki combined range ATR ke multiple se kam
-    hai, to market dead hai — koi momentum nahi, skip karo.
+    Chop filter: if the combined range of the last N bars is below an
+    ATR multiple, the market is dead — no momentum, skip.
     """
     lookback = BRAIN1["CHOP_LOOKBACK_BARS"]
     if len(df) < lookback + 15:
-        return {"choppy": None, "note": "ATR compute karne ko kaafi data nahi"}
+        return {"choppy": None, "note": "not enough data to compute ATR"}
 
     atr = _atr(df)
     if atr <= 0:
-        return {"choppy": None, "note": "ATR 0 hai — filter skip"}
+        return {"choppy": None, "note": "ATR is 0 — filter skipped"}
 
     recent = df.tail(lookback)
     combined_range = float(recent["high"].max() - recent["low"].min())
@@ -132,8 +132,8 @@ def is_choppy(df) -> dict:
 
 def body_to_range_ratio(df) -> float:
     """
-    Current bar ka body/range ratio — 1.0 ke paas = strong directional
-    candle, 0 ke paas = pure doji/chop.
+    Current bar's body/range ratio — near 1.0 = strong directional
+    candle, near 0 = pure doji/chop.
     """
     last = df.iloc[-1]
     body = abs(float(last["close"]) - float(last["open"]))
@@ -145,22 +145,22 @@ def body_to_range_ratio(df) -> float:
 
 def scan(df, benchmark_df=None, vix_series=None) -> dict:
     """
-    Brain 1 ka main entry point. Symbol ko momentum-gate se guzarne deta hai.
+    Brain 1's main entry point. Lets a symbol pass through the momentum gate.
 
     Args:
-        df: symbol ka OHLCV DataFrame
-        benchmark_df: benchmark (index) OHLCV — RS divergence ke liye
-        vix_series: regime classifier ke liye (optional)
+        df: the symbol's OHLCV DataFrame
+        benchmark_df: benchmark (index) OHLCV — for RS divergence
+        vix_series: for the regime classifier (optional)
 
     Returns:
         dict:
-            'passed_brain1': bool — Brain 2 mein bhejna hai ya nahi
-            'regime': regime classifier output (agar compute hua)
+            'passed_brain1': bool — whether to send to Brain 2
+            'regime': regime classifier output (if computed)
             'momentum': volume-velocity details
-            'rs_divergence': RS details (agar benchmark diya)
+            'rs_divergence': RS details (if benchmark provided)
             'chop': chop-filter details
             'body_to_range_ratio': float
-            'brain1_notes': list — kya blocking tha
+            'brain1_notes': list — what was blocking
     """
     notes = []
 
@@ -168,7 +168,7 @@ def scan(df, benchmark_df=None, vix_series=None) -> dict:
         return {
             "passed_brain1": False, "regime": None, "momentum": None,
             "rs_divergence": None, "chop": None, "body_to_range_ratio": None,
-            "brain1_notes": [f"data kam hai ({len(df)} bars) — Brain 1 pass nahi ho sakta"],
+            "brain1_notes": [f"insufficient data ({len(df)} bars) — Brain 1 cannot pass"],
         }
 
     # --- Regime detection (existing classifier reuse) ---
@@ -182,9 +182,9 @@ def scan(df, benchmark_df=None, vix_series=None) -> dict:
     chop = is_choppy(df)
     if chop["choppy"] is True:
         notes.append(
-            f"CHOP FILTER: last {BRAIN1['CHOP_LOOKBACK_BARS']} bars ki range "
-            f"({chop['combined_range']}) ATR ({chop['atr']}) ka sirf "
-            f"{BRAIN1['CHOP_RANGE_ATR_MULTIPLIER']}x hai — dead market, skip"
+            f"CHOP FILTER: last {BRAIN1['CHOP_LOOKBACK_BARS']} bars' range "
+            f"({chop['combined_range']}) is only {BRAIN1['CHOP_RANGE_ATR_MULTIPLIER']}x "
+            f"of ATR ({chop['atr']}) — dead market, skip"
         )
 
     # --- Candle quality: body-to-range ---
@@ -192,7 +192,7 @@ def scan(df, benchmark_df=None, vix_series=None) -> dict:
     if btr < BRAIN1["MIN_BODY_TO_RANGE_RATIO"]:
         notes.append(
             f"CHOPPY CANDLE: body/range {btr:.2f} < {BRAIN1['MIN_BODY_TO_RANGE_RATIO']} "
-            f"— wick-heavy indecision candle, noise hai"
+            f"— wick-heavy indecision candle, this is noise"
         )
 
     # --- Momentum gate: volume velocity ---
@@ -202,7 +202,7 @@ def scan(df, benchmark_df=None, vix_series=None) -> dict:
             f"VOLUME VELOCITY OK: {momentum['ratio']}x average volume"
         )
     elif momentum["note"]:
-        notes.append(f"volume velocity nahi nikal sakti: {momentum['note']}")
+        notes.append(f"cannot compute volume velocity: {momentum['note']}")
 
     # --- Momentum gate: RS divergence ---
     rs = None
@@ -214,11 +214,11 @@ def scan(df, benchmark_df=None, vix_series=None) -> dict:
                 f"(symbol {rs['symbol_return_pct']}% vs bench {rs['benchmark_return_pct']}%)"
             )
     else:
-        notes.append("benchmark data nahi diya gaya — RS divergence check skip hua")
+        notes.append("no benchmark data provided — RS divergence check skipped")
 
     # --- FINAL GATE ---
-    # Brain 1 pass hone ke liye: (volume velocity high) YA (RS divergence
-    # significant) — aur chop/last-candle quality reject na kare.
+    # To pass Brain 1: (high volume velocity) OR (significant RS divergence)
+    # — and the chop/last-candle quality must not reject.
     momentum_ok = momentum["high_velocity"] or (rs is not None and rs["significant"])
     not_choppy = chop["choppy"] is not True and btr >= BRAIN1["MIN_BODY_TO_RANGE_RATIO"]
 
@@ -226,8 +226,8 @@ def scan(df, benchmark_df=None, vix_series=None) -> dict:
 
     if not momentum_ok:
         notes.append(
-            "MOMENTUM GATE FAIL: na volume velocity high hai, na RS divergence "
-            "significant — minor retracement hai, major momentum nahi. Brain 2 pass nahi hua."
+            "MOMENTUM GATE FAIL: neither volume velocity is high nor RS divergence "
+            "significant — this is a minor retracement, not major momentum. Brain 2 not passed."
         )
 
     return {
@@ -242,7 +242,7 @@ def scan(df, benchmark_df=None, vix_series=None) -> dict:
 
 
 # ============================================================
-# QUICK MANUAL TEST — repo ROOT se: python3 -m pipeline.brain1_scanner
+# QUICK MANUAL TEST — from repo ROOT: python3 -m pipeline.brain1_scanner
 # ============================================================
 if __name__ == "__main__":
     import numpy as np

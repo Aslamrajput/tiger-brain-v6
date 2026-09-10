@@ -30,7 +30,7 @@ Part B ke starting numbers). Iska matlab:
     hota hai, aur asli conclusion sirf test-windows se nikalta hai.
   - Positive side: kyunki kuch fit nahi ho raha, in-sample overfitting
     ka khatra bhi utna nahi — par "curve fitting by hand" (humne khud
-    numbers चुने) ka khatra phir bhi hai, isliye out-of-sample folds
+    numbers chosen) ka khatra phir bhi hai, isliye out-of-sample folds
     hi sach bolenge.
   Jab Phase 2 mein threshold-tuning add hoga, wo tuning sirf train
   window ke andar honi chahiye aur `run_walk_forward()` ko wahi tuned

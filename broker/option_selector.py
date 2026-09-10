@@ -1,21 +1,20 @@
 """
 Tiger Brain V6.1 — BRAIN 3: Option Chain & Greeks/OI Velocity Selector
 =======================================================================
-Teesra brain. Brain 2 ne direction diya (BUY setup = call side, SELL
-setup = put side). Ab ye brain decide karta hai ki KAUNSA option contract
-kharidna hai:
+Third brain. Brain 2 provided direction (BUY setup = call side, SELL
+setup = put side). This brain decides WHICH option contract to buy:
 
-  - Option type: direction se (BUY→CE, SELL→PE)
-  - Strike: ATM/ITM preference (delta band ke andar)
-  - Expiry: gamma/theta-safe window ke andar
-  - Liquidity gates: spread aur OI minimum
-  - OI velocity: jis strike pe OI tezi se badh raha hai use prefer karna
+  - Option type: from direction (BUY→CE, SELL→PE)
+  - Strike: ATM/ITM preference (within delta band)
+  - Expiry: within a gamma/theta-safe window
+  - Liquidity gates: spread and OI minimums
+  - OI velocity: prefer the strike where OI is rising fastest
 
-Input ek "chain snapshot" dict hai (live ya simulated — Angel One se aayega):
+Input is a "chain snapshot" dict (live or simulated — comes from Angel One):
 
     {
         "underlying_price": float,
-        "expiry_days": int,          # nearest expiry tak din
+        "expiry_days": int,          # days to nearest expiry
         "contracts": [
             {
                 "strike": float,
@@ -25,14 +24,14 @@ Input ek "chain snapshot" dict hai (live ya simulated — Angel One se aayega):
                 "open_interest": float,
                 "oi_change_pct": float,    # OI velocity (recent % change)
                 "iv": float | None,         # implied volatility (optional)
-                "delta": float | None,      # broker se aaye to warna estimate
+                "delta": float | None,      # from broker, else estimated
             }, ...
         ]
     }
 
-Delta estimate (jab broker delta nahi deta): moneyness-based approximation
-— ye Black-Scholes nahi hai, honest heuristic hai; jab tak real chain data
-aayega, kaafi kaam karta hai.
+Delta estimate (when broker does not provide delta): moneyness-based approximation
+— this is not Black-Scholes, it is an honest heuristic; it works well enough
+until real chain data arrives.
 """
 
 from __future__ import annotations
@@ -42,15 +41,15 @@ import logging
 try:
     from config.thresholds import BRAIN3
 except ImportError:
-    raise ImportError("Repo ROOT se chalao, 'broker/' ke andar se nahi.")
+    raise ImportError("Run from repo ROOT, not from inside 'broker/'.")
 
 logger = logging.getLogger("tiger_brain.option_selector")
 
 
 def estimate_delta(contract: dict, underlying_price: float, option_type: str) -> float:
     """
-    Delta estimate jab broker chain mein delta nahi aata.
-    ATM = ~0.5; ITM ki taraf ~1.0; OTM ki taraf ~0.0 (CE convention).
+    Delta estimate when the broker chain does not include delta.
+    ATM = ~0.5; toward ITM ~1.0; toward OTM ~0.0 (CE convention).
     """
     if contract.get("delta") is not None:
         return float(contract["delta"])
@@ -61,13 +60,13 @@ def estimate_delta(contract: dict, underlying_price: float, option_type: str) ->
     if option_type == "CE":
         raw = 0.5 + moneyness * 5.0  # 1% ITM ≈ +0.05 delta
         return max(0.01, min(0.99, raw))
-    else:  # PE: moneyness ulta
+    else:  # PE: moneyness inverted
         raw = 0.5 - moneyness * 5.0
         return max(0.01, min(0.99, raw))
 
 
 def _spread_ok(contract: dict) -> bool:
-    """Bid-ask spread premium ke % mein — BRAIN3 limit ke andar hona chahiye."""
+    """Bid-ask spread as % of premium — must be within the BRAIN3 limit."""
     bid, ask, ltp = contract.get("bid"), contract.get("ask"), contract.get("ltp")
     if bid is None or ask is None or ltp is None or ltp <= 0 or ask <= bid:
         return False
@@ -77,12 +76,12 @@ def _spread_ok(contract: dict) -> bool:
 
 def select_option(chain_snapshot: dict, direction: str) -> dict:
     """
-    Brain 3 ka main entry point. Direction ke hisaab se best option
-    contract select karta hai.
+    Brain 3's main entry point. Selects the best option contract based
+    on direction.
 
     Args:
-        chain_snapshot: upar documented format ka dict
-        direction: 'BUY' (call) ya 'SELL' (put) — Brain 2 se
+        chain_snapshot: dict in the format documented above
+        direction: 'BUY' (call) or 'SELL' (put) — from Brain 2
 
     Returns:
         dict:
@@ -98,11 +97,11 @@ def select_option(chain_snapshot: dict, direction: str) -> dict:
 
     if underlying is None or not contracts:
         return {"selected": False, "contract": None, "delta": None,
-                "reasons": ["chain snapshot mein underlying/contracts missing"], "oi_velocity_note": None}
+                "reasons": ["chain snapshot missing underlying/contracts"], "oi_velocity_note": None}
 
     if direction not in ("BUY", "SELL"):
         return {"selected": False, "contract": None, "delta": None,
-                "reasons": [f"direction '{direction}' invalid hai — BUY/SELL chahiye"], "oi_velocity_note": None}
+                "reasons": [f"direction '{direction}' invalid — BUY/SELL required"], "oi_velocity_note": None}
 
     option_type = "CE" if direction == "BUY" else "PE"
     expiry_days = chain_snapshot.get("expiry_days")
@@ -110,14 +109,14 @@ def select_option(chain_snapshot: dict, direction: str) -> dict:
     if expiry_days is not None:
         if expiry_days < BRAIN3["MIN_DAYS_TO_EXPIRY"]:
             reasons.append(
-                f"expiry {expiry_days} din — minimum {BRAIN3['MIN_DAYS_TO_EXPIRY']} chahiye "
+                f"expiry {expiry_days} days — minimum {BRAIN3['MIN_DAYS_TO_EXPIRY']} required "
                 f"(gamma/theta burn) — chain reject"
             )
             return {"selected": False, "contract": None, "delta": None,
                     "reasons": reasons, "oi_velocity_note": None}
         if expiry_days > BRAIN3["MAX_DAYS_TO_EXPIRY"]:
             reasons.append(
-                f"expiry {expiry_days} din — maximum {BRAIN3['MAX_DAYS_TO_EXPIRY']} "
+                f"expiry {expiry_days} days — maximum {BRAIN3['MAX_DAYS_TO_EXPIRY']} "
                 f"(far-month illiquidity) — chain reject"
             )
             return {"selected": False, "contract": None, "delta": None,
@@ -149,12 +148,12 @@ def select_option(chain_snapshot: dict, direction: str) -> dict:
         candidates.append(c)
 
     if not candidates:
-        reasons.append("koi bhi contract liquidity gates pass nahi kar paya")
+        reasons.append("no contract passed the liquidity gates")
         return {"selected": False, "contract": None, "delta": None,
                 "reasons": reasons, "oi_velocity_note": None}
 
     # --- Step 2: delta band filter (ATM/slightly-ITM preference) ---
-    # PE deltas negative hote hain — magnitude check karo, sign nahi.
+    # PE deltas are negative — check magnitude, not sign.
     in_band = []
     for c in candidates:
         delta = estimate_delta(c, underlying, option_type)
@@ -162,20 +161,20 @@ def select_option(chain_snapshot: dict, direction: str) -> dict:
             in_band.append((c, abs(delta)))
         else:
             reasons.append(
-                f"strike {c.get('strike')} — delta {delta:.2f} band "
-                f"[{BRAIN3['MIN_DELTA']}, {BRAIN3['MAX_DELTA']}] ke bahar"
+                f"strike {c.get('strike')} — delta {delta:.2f} outside "
+                f"band [{BRAIN3['MIN_DELTA']}, {BRAIN3['MAX_DELTA']}]"
             )
 
     if not in_band:
-        reasons.append("delta band mein koi contract nahi mila")
+        reasons.append("no contract found within the delta band")
         return {"selected": False, "contract": None, "delta": None,
                 "reasons": reasons, "oi_velocity_note": None}
 
-    # --- Step 3: OI velocity preference (hot strikes ko priority) ---
+    # --- Step 3: OI velocity preference (priority to hot strikes) ---
     def score(c_and_delta):
         c, delta = c_and_delta
         oi_vel = c.get("oi_change_pct", 0) or 0
-        # Score: OI velocity dominant, delta-band center pe thoda bonus
+        # Score: OI velocity dominant, small bonus at delta-band center
         delta_center_bonus = 1 - abs(delta - (BRAIN3["MIN_DELTA"] + BRAIN3["MAX_DELTA"]) / 2)
         return oi_vel * 1.0 + delta_center_bonus * 5.0
 
@@ -209,7 +208,7 @@ if __name__ == "__main__":
         "underlying_price": 25000.0,
         "expiry_days": 5,
         "contracts": [
-            # CE contracts — sabse liquid + hot OI 25100 pe
+            # CE contracts — most liquid + hot OI at 25100
             {"strike": 25000, "option_type": "CE", "ltp": 180, "bid": 179, "ask": 181,
              "open_interest": 5000, "oi_change_pct": 8, "iv": 14, "delta": 0.52},
             {"strike": 25100, "option_type": "CE", "ltp": 120, "bid": 119.3, "ask": 120.7,

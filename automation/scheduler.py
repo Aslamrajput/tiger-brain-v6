@@ -201,6 +201,7 @@ class TigerBrainScheduler:
         mcx_square_off_fn=None,
         delivery_snapshot_fn=None,
         mcx_market_open_fn=None,
+        daily_cleanup_fn=None,
     ):
         pre_h, pre_m = map(int, AUTOMATION["PRE_MARKET_WAKE_TIME"].split(":"))
         open_h, open_m = map(int, AUTOMATION["MARKET_OPEN_TIME"].split(":"))
@@ -215,6 +216,16 @@ class TigerBrainScheduler:
             self.scheduler.add_job(
                 self._guarded(pre_market_fn), "cron",
                 hour=pre_h, minute=pre_m, id="pre_market_wakeup",
+            )
+
+        # Daily cleanup runs 5 minutes before pre-market wake.
+        # Purges stale logs, refreshes Scrip Master, cleans temp files.
+        if daily_cleanup_fn:
+            cleanup_m = pre_m - 5 if pre_m >= 5 else 55
+            cleanup_h = pre_h if pre_m >= 5 else pre_h - 1
+            self.scheduler.add_job(
+                self._guarded(daily_cleanup_fn), "cron",
+                hour=cleanup_h, minute=cleanup_m, id="daily_cleanup",
             )
 
         if market_open_fn:

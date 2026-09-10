@@ -1,7 +1,7 @@
 """
 Tiger Brain V6.1 — BRAIN FLOW ORCHESTRATOR
 ===========================================
-Saare 5 Brains ko ek sequence mein wire karta hai:
+Wires all 5 Brains together in a sequence:
 
     Brain 1 (brain1_scanner)        — momentum + regime gate
         ↓ passed
@@ -16,9 +16,9 @@ Saare 5 Brains ko ek sequence mein wire karta hai:
         ↓ position open
     Brain 5 (risk.exit_brain)       — stop/target/trail/time/gamma exits
 
-Ye orchestrator pure-function style mein hai — har brain ka output dict
-aage jaata hai, koi hidden state nahi (trade counter ke siwa, jo
-process-wide singleton hai).
+This orchestrator is pure-function style — each brain's output dict flows
+forward, with no hidden state (except the trade counter, which is a
+process-wide singleton).
 """
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ try:
     from broker.position_sizer import get_available_capital, size_position
     from risk.risk_management import get_trade_counter
 except ImportError:
-    raise ImportError("Repo ROOT se chalao, 'pipeline/' ke andar se nahi.")
+    raise ImportError("Run from repo ROOT, not from inside 'pipeline/'.")
 
 logger = logging.getLogger("tiger_brain.brain_flow")
 
@@ -49,41 +49,41 @@ def run_brain_flow(
     trade_counter=None,
 ) -> dict:
     """
-    Poora 5-Brain flow ek symbol ke liye chalata hai.
+    Runs the full 5-Brain flow for a single symbol.
 
     Args:
-        symbol: trading symbol (jaise 'NIFTY', 'CRUDEOIL')
-        df: symbol ka OHLCV DataFrame
-        chain_snapshot: Brain 3 ka input (option chain data)
-        benchmark_df: benchmark OHLCV (RS divergence ke liye)
-        vix_series: VIX history (regime ke liye)
-        exchange: symbol ka exchange ('MCX', 'NSE', ...) — category detect
-        broker: AngelBroker instance — live capital ke liye (None = fallback)
-        trade_counter: TradeCounterGuard instance — default process singleton
+        symbol: trading symbol (e.g. 'NIFTY', 'CRUDEOIL')
+        df: the symbol's OHLCV DataFrame
+        chain_snapshot: Brain 3's input (option chain data)
+        benchmark_df: benchmark OHLCV (for RS divergence)
+        vix_series: VIX history (for regime)
+        exchange: the symbol's exchange ('MCX', 'NSE', ...) — for category detection
+        broker: AngelBroker instance — for live capital (None = fallback)
+        trade_counter: TradeCounterGuard instance — defaults to process singleton
 
     Returns:
-        dict: har brain ka result + final 'trade' dict ya None
+        dict: each brain's result + final 'trade' dict or None
     """
     flow_notes = []
 
     # ============ BRAIN 1: Scanner & Regime ============
     b1 = brain1_scan(df, benchmark_df=benchmark_df, vix_series=vix_series)
     if not b1["passed_brain1"]:
-        flow_notes.append("Brain 1 FAIL — flow yahin ruk gaya")
+        flow_notes.append("Brain 1 FAIL — flow stopped here")
         return {"brain1": b1, "brain2": None, "brain3": None, "brain4": None,
                 "trade": None, "flow_notes": flow_notes}
 
     # ============ BRAIN 2: SMC Setup ============
     b2 = brain2_setup(b1, df)
     if not b2["setup_found"]:
-        flow_notes.append("Brain 2 FAIL — koi SMC setup nahi mila")
+        flow_notes.append("Brain 2 FAIL — no SMC setup found")
         return {"brain1": b1, "brain2": b2, "brain3": None, "brain4": None,
                 "trade": None, "flow_notes": flow_notes}
 
     # ============ BRAIN 3: Option Selection ============
     b3 = brain3_select(chain_snapshot, b2["direction"])
     if not b3["selected"]:
-        flow_notes.append("Brain 3 FAIL — koi valid option contract nahi mila")
+        flow_notes.append("Brain 3 FAIL — no valid option contract found")
         return {"brain1": b1, "brain2": b2, "brain3": b3, "brain4": None,
                 "trade": None, "flow_notes": flow_notes}
 
@@ -99,8 +99,8 @@ def run_brain_flow(
     capital_info = get_available_capital(broker)
     if capital_info["available_capital"] is None:
         flow_notes.append(
-            f"Brain 4 BLOCK: live capital nahi mila ({capital_info['note']}) — "
-            f"fail-safe: trade nahi"
+            f"Brain 4 BLOCK: live capital not available ({capital_info['note']}) — "
+            f"fail-safe: no trade"
         )
         return {"brain1": b1, "brain2": b2, "brain3": b3,
                 "brain4": {"counter": counter_check, "sizing": None,
@@ -150,7 +150,7 @@ def run_brain_flow(
     flow_notes.append(
         f"TRADE: {trade['direction']} {trade['option_symbol']} x{trade['quantity']} "
         f"@ {trade['premium']} — capital {trade['allocated_capital']} "
-        f"(Brain 5 ab exit sambhalega)"
+        f"(Brain 5 will handle exits)"
     )
 
     return {
@@ -163,7 +163,7 @@ def run_brain_flow(
 
 
 # ============================================================
-# QUICK MANUAL TEST — repo ROOT se: python3 -m pipeline.brain_flow
+# QUICK MANUAL TEST — from repo ROOT: python3 -m pipeline.brain_flow
 # ============================================================
 if __name__ == "__main__":
     import numpy as np
@@ -175,8 +175,8 @@ if __name__ == "__main__":
     n = 80
     dates = pd.date_range("2025-01-01", periods=n, freq="D")
 
-    # Gentle momentum uptrend (tests wala pattern) — NIFTY scale tak scale
-    # kiya hua, taaki sweep-reclaim ke baad bhi 10-bar return positive rahe.
+    # Gentle momentum uptrend (the test pattern) — scaled to NIFTY scale so
+    # that the 10-bar return stays positive even after the sweep-reclaim.
     base = 100 + np.linspace(0, 0.2 * n, n) + np.random.normal(0, 0.15, n).cumsum() * 0.1
     scale = 200.0  # 100-ish -> 20000-ish (NIFTY)
     d = pd.DataFrame(index=dates)
@@ -193,8 +193,8 @@ if __name__ == "__main__":
     d.iloc[-1, d.columns.get_loc("high")] = d.iloc[-1]["close"] + 0.2 * scale
     d.iloc[-1, d.columns.get_loc("low")] = d.iloc[-1]["open"] - 0.2 * scale
 
-    # Bullish sweep — detector ke SAME swing window (last 20 bars, final
-    # bar exclusive) se inject karo, deep pierce + strong reclaim body.
+    # Bullish sweep — inject via the detector's SAME swing window (last 20
+    # bars, final bar exclusive): deep pierce + strong reclaim body.
     prior_low = float(d["low"].iloc[-21:-1].min())
     d.iloc[-1, d.columns.get_loc("low")] = prior_low - 1.5 * scale
     d.iloc[-1, d.columns.get_loc("open")] = prior_low - 0.3 * scale
@@ -211,7 +211,7 @@ if __name__ == "__main__":
     chain = {
         "underlying_price": float(d["close"].iloc[-1]),
         "expiry_days": 5,
-        # Strikes underlying ke aas-paas — delta band valid rahe
+        # Strikes around the underlying — keep the delta band valid
         "contracts": [
             {"strike": 19600, "option_type": "CE", "ltp": 180, "bid": 179, "ask": 181,
              "open_interest": 8000, "oi_change_pct": 25, "iv": 14, "delta": 0.48,
