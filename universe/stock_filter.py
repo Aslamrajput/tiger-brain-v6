@@ -1,12 +1,17 @@
 """Tiger V19 — Stock Liquidity Filter Pipeline (Section 28)
 
-All F&O Stocks → Option Volume → Premium Turnover → OI → Bid-Ask
-Spread → OI+Volume Confirmation → Liquidity Score → Top 10-11 Stocks
-→ Signal → CALL / PUT
+All F&O Stocks -> Option Volume -> Premium Turnover -> OI -> Bid-Ask
+Spread -> OI+Volume Confirmation -> Liquidity Score -> Top N Stocks
+-> Signal -> CALL / PUT
 
-Tiger options BUYING only — isliye liquidity sabse zaroori hai. Illiquid
-stock options pe slippage khayega. Ye pipeline Bhavcopy (EOD) data se
-top liquid stocks chunta hai, taaki live scan me sirf wahi stocks aaye.
+Tiger is an options BUYING engine, so liquidity is the most important
+filter — illiquid stock options suffer slippage. This pipeline selects
+the most liquid stock options from Bhavcopy (EOD) data so the live scan
+only targets stocks that actually trade.
+
+SmartWebSocketV2 has zero rate limits on streaming data, so the cap is
+set high (default 50) to exploit the full liquid F&O stock universe.
+The cap is configurable via config/thresholds.py UNIVERSE["TOP_N_LIQUID_STOCKS"].
 
 Usage:
     from universe.stock_filter import filter_top_liquid_stocks
@@ -21,19 +26,44 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
-# Sabse liquid F&O stocks — fallback jab Bhavcopy na mile
-# (NSE se download fail ho ya holiday ho)
+# Fallback: most liquid F&O stocks, used when Bhavcopy is unavailable
+# (NSE download fail, holiday, weekend). Expanded to cover the full
+# high-liquidity F&O universe so the scanner is never artificially narrow.
 FALLBACK_TOP_STOCKS = [
-    "RELIANCE", "HDFCBANK", "ICICIBANK", "INFY", "SBIN",
-    "AXISBANK", "LT", "BHARTIARTL", "ITC", "KOTAKBANK",
-    "BAJFINANCE",
+    # Mega-cap banks + financials
+    "HDFCBANK", "ICICIBANK", "SBIN", "AXISBANK", "KOTAKBANK",
+    "BAJFINANCE", "BAJAJFINSV",
+    # IT giants
+    "RELIANCE", "TCS", "INFY", "HCLTECH", "WIPRO", "TECHM",
+    # Energy + metals + infra
+    "TATASTEEL", "HINDALCO", "JSWSTEEL", "ONGC", "COALINDIA",
+    "NTPC", "POWERGRID", "LT",
+    # FMCG + pharma + auto
+    "ITC", "HINDUNILVR", "NESTLEIND", "BRITANNIA", "DABUR",
+    "SUNPHARMA", "CIPLA", "DRREDDY", "DIVISLAB", "GRASIM",
+    "MARUTI", "TITAN", "ASIANPAINT", "ULTRACEMCO",
+    # Telecom + consumer
+    "BHARTIARTL", "TATACONSUM", "ADANIENT",
 ]
 
-# Pipeline thresholds — har stage pe kitna filter karna hai
-MIN_OPTION_VOLUME = 500_000        # contracts/day — very low volume hata
-MIN_PREMIUM_TURNOVER_LAKH = 500   # ₹500 lakh/day premium turnover minimum
+# Pipeline thresholds — each stage filters out illiquid options
+MIN_OPTION_VOLUME = 500_000        # contracts/day — remove very low volume
+MIN_PREMIUM_TURNOVER_LAKH = 500   # 500 lakh/day premium turnover minimum
 MIN_OPEN_INTEREST = 100_000       # 1 lakh OI minimum (deep market)
-TOP_N_STOCKS = 11                 # final top 10-11 stocks
+
+
+def _get_top_n_stocks() -> int:
+    """Read the liquid stock scan cap from config (default 50).
+
+    SmartWebSocketV2 has zero rate limits — the cap is set high to scan
+    the full liquid F&O stock options universe. Override via
+    config/thresholds.py UNIVERSE["TOP_N_LIQUID_STOCKS"].
+    """
+    try:
+        from config.thresholds import UNIVERSE
+        return int(UNIVERSE.get("TOP_N_LIQUID_STOCKS", 50))
+    except Exception:
+        return 50
 
 
 def _aggregate_stock_liquidity(bhavcopy: pd.DataFrame) -> pd.DataFrame:
@@ -85,8 +115,8 @@ def _liquidity_score(row: pd.Series) -> float:
     )
 
 
-def filter_top_liquid_stocks(top_n: int = TOP_N_STOCKS) -> list[str]:
-    """All F&O stocks → liquidity pipeline → top 10-11 stocks.
+def filter_top_liquid_stocks(top_n: int | None = None) -> list[str]:
+    """All F&O stocks -> liquidity pipeline -> top N stocks.
 
     Pipeline stages:
       1. Option Volume filter (MIN_OPTION_VOLUME)
@@ -95,13 +125,20 @@ def filter_top_liquid_stocks(top_n: int = TOP_N_STOCKS) -> list[str]:
       4. Liquidity Score (rank remaining stocks)
       5. Top N stocks
 
-    Uses yesterday's NSE Bhavcopy (EOD data). Agar Bhavcopy na mile
-    (holiday/weekend/NSE block), to FALLBACK_TOP_STOCKS use karta hai.
+    Uses yesterday's NSE Bhavcopy (EOD data). If Bhavcopy is unavailable
+    (holiday/weekend/NSE block), falls back to FALLBACK_TOP_STOCKS.
+
+    Args:
+        top_n: number of stocks to return. If None, reads from config
+               (UNIVERSE["TOP_N_LIQUID_STOCKS"], default 50).
 
     Returns:
         list of stock symbol names (uppercase), max top_n items.
     """
     from data.loader import fetch_nse_bhavcopy
+
+    if top_n is None:
+        top_n = _get_top_n_stocks()
 
     # Try yesterday's Bhavcopy (most recent complete trading day)
     # Weekend pe Friday ka data

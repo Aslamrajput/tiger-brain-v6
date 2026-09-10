@@ -66,6 +66,20 @@ LOT_SIZES = {
     "NESTLEIND": 125,
     "DABUR": 1300,
     "BRITANNIA": 200,
+    # Expanded universe — additional liquid F&O stock lot sizes
+    "INDUSINDBK": 300, "FEDERALBNK": 3000, "IDFCFIRSTB": 1300,
+    "AUBANK": 1100, "PNB": 14500, "BANKBARODA": 3750,
+    "M&M": 550, "TATAMOTORS": 850, "HEROMOTOCO": 200,
+    "BAJAJ-AUTO": 250, "EICHERMOT": 100, "MOTHERSON": 4400,
+    "BOSCHLTD": 40, "MRF": 10, "INDIGO": 200, "JETAIRWAYS": 1200,
+    "DIXON": 700, "AMBER": 1100, "PIDILITIND": 100, "SIEMENS": 80,
+    "ABB": 50, "GODREJCP": 400, "COLGPALM": 1400, "GAIL": 2400,
+    "PETRONET": 1825, "IGL": 2900, "DLF": 900, "LODHA": 350,
+    "ABCAPITAL": 850, "HDFCLIFE": 750, "SBILIFE": 750,
+    "ICICIPRULI": 700, "ICICIGI": 1400, "LICI": 1200,
+    "PFC": 2750, "RECLTD": 2750, "IRCTC": 320, "NAUKRI": 65,
+    "DMART": 80, "TRENT": 125, "HINDUNILVR": 300,
+    "JSWSTEEL": 260,
     # Commodities (MCX proxy via US futures)
     "CRUDEOIL": 100,
     "NATURALGAS": 1250,
@@ -79,7 +93,10 @@ LOT_SIZES = {
 }
 
 # F&O universe — high-liquidity stocks + index + commodities
-# Segmented for Brain 4's separate commodity counter
+# Segmented for Brain 4's separate commodity counter.
+# This is the comprehensive NSE F&O stock options universe (~60 symbols).
+# The live scanner dynamically selects the top N by Bhavcopy liquidity;
+# this map provides the yfinance ticker for each symbol.
 INDEX_SYMBOLS = {
     "NIFTY": "^NSEI",
     "BANKNIFTY": "^NSEBANK",
@@ -88,43 +105,50 @@ INDEX_SYMBOLS = {
 }
 
 STOCK_SYMBOLS = {
-    # Top 10 highly liquid F&O stocks (user priority)
-    "RELIANCE": "RELIANCE.NS",
-    "TCS": "TCS.NS",
-    "ICICIBANK": "ICICIBANK.NS",
-    "HDFCBANK": "HDFCBANK.NS",
-    "INFY": "INFY.NS",
-    "SBIN": "SBIN.NS",
-    "AXISBANK": "AXISBANK.NS",
-    "LT": "LT.NS",
-    "BHARTIARTL": "BHARTIARTL.NS",
-    "ITC": "ITC.NS",
-    # Additional high-liquidity F&O stocks
-    "KOTAKBANK": "KOTAKBANK.NS",
-    "WIPRO": "WIPRO.NS",
-    "HCLTECH": "HCLTECH.NS",
-    "MARUTI": "MARUTI.NS",
-    "TATASTEEL": "TATASTEEL.NS",
-    "SUNPHARMA": "SUNPHARMA.NS",
-    "ADANIENT": "ADANIENT.NS",
-    "TATACONSUM": "TATACONSUM.NS",
-    "BAJFINANCE": "BAJFINANCE.NS",
-    "ASIANPAINT": "ASIANPAINT.NS",
-    "ULTRACEMCO": "ULTRACEMCO.NS",
-    "TITAN": "TITAN.NS",
-    "POWERGRID": "POWERGRID.NS",
-    "NTPC": "NTPC.NS",
-    "ONGC": "ONGC.NS",
-    "COALINDIA": "COALINDIA.NS",
-    "TECHM": "TECHM.NS",
-    "DIVISLAB": "DIVISLAB.NS",
-    "CIPLA": "CIPLA.NS",
-    "DRREDDY": "DRREDDY.NS",
-    "GRASIM": "GRASIM.NS",
-    "HINDALCO": "HINDALCO.NS",
-    "BAJAJFINSV": "BAJAJFINSV.NS",
-    "NESTLEIND": "NESTLEIND.NS",
-    "BRITANNIA": "BRITANNIA.NS",
+    # Banks + financials
+    "RELIANCE": "RELIANCE.NS", "HDFCBANK": "HDFCBANK.NS",
+    "ICICIBANK": "ICICIBANK.NS", "SBIN": "SBIN.NS",
+    "AXISBANK": "AXISBANK.NS", "KOTAKBANK": "KOTAKBANK.NS",
+    "BAJFINANCE": "BAJFINANCE.NS", "BAJAJFINSV": "BAJAJFINSV.NS",
+    # IT giants
+    "TCS": "TCS.NS", "INFY": "INFY.NS", "WIPRO": "WIPRO.NS",
+    "HCLTECH": "HCLTECH.NS", "TECHM": "TECHM.NS",
+    # Energy + metals + infra
+    "ONGC": "ONGC.NS", "NTPC": "NTPC.NS", "POWERGRID": "POWERGRID.NS",
+    "COALINDIA": "COALINDIA.NS", "TATASTEEL": "TATASTEEL.NS",
+    "HINDALCO": "HINDALCO.NS", "JSWSTEEL": "JSWSTEEL.NS",
+    "LT": "LT.NS", "ULTRACEMCO": "ULTRACEMCO.NS", "GRASIM": "GRASIM.NS",
+    # FMCG + pharma
+    "ITC": "ITC.NS", "HINDUNILVR": "HINDUNILVR.NS",
+    "NESTLEIND": "NESTLEIND.NS", "BRITANNIA": "BRITANNIA.NS",
+    "DABUR": "DABUR.NS",
+    "SUNPHARMA": "SUNPHARMA.NS", "CIPLA": "CIPLA.NS",
+    "DRREDDY": "DRREDDY.NS", "DIVISLAB": "DIVISLAB.NS",
+    # Auto + consumer + telecom
+    "MARUTI": "MARUTI.NS", "TITAN": "TITAN.NS",
+    "ASIANPAINT": "ASIANPAINT.NS", "BHARTIARTL": "BHARTIARTL.NS",
+    "TATACONSUM": "TATACONSUM.NS", "ADANIENT": "ADANIENT.NS",
+    # Additional liquid F&O names
+    "INDUSINDBK": "INDUSINDBK.NS",
+    "FEDERALBNK": "FEDERALBNK.NS", "IDFCFIRSTB": "IDFCFIRSTB.NS",
+    "AUBANK": "AUBANK.NS", "PNB": "PNB.NS", "BANKBARODA": "BANKBARODA.NS",
+    "M&M": "M&M.NS", "TATAMOTORS": "TATAMOTORS.NS",
+    "HEROMOTOCO": "HEROMOTOCO.NS", "BAJAJ-AUTO": "BAJAJ-AUTO.NS",
+    "EICHERMOT": "EICHERMOT.NS", "MOTHERSON": "MOTHERSON.NS",
+    "BOSCHLTD": "BOSCHLTD.NS", "MRF": "MRF.NS",
+    "INDIGO": "INDIGO.NS", "JETAIRWAYS": "JETAIRWAYS.NS",
+    "DIXON": "DIXON.NS", "AMBER": "AMBER.NS",
+    "PIDILITIND": "PIDILITIND.NS", "SIEMENS": "SIEMENS.NS",
+    "ABB": "ABB.NS", "GODREJCP": "GODREJCP.NS",
+    "COLGPALM": "COLGPALM.NS", "GAIL": "GAIL.NS",
+    "PETRONET": "PETRONET.NS", "IGL": "IGL.NS",
+    "DLF": "DLF.NS", "LODHA": "LODHA.NS",
+    "ABCAPITAL": "ABCAPITAL.NS", "HDFCLIFE": "HDFCLIFE.NS",
+    "SBILIFE": "SBILIFE.NS", "ICICIPRULI": "ICICIPRULI.NS",
+    "ICICIGI": "ICICIGI.NS", "LICI": "LICI.NS",
+    "PFC": "PFC.NS", "RECLTD": "RECLTD.NS",
+    "IRCTC": "IRCTC.NS", "NAUKRI": "NAUKRI.NS",
+    "DMART": "DMART.NS", "TRENT": "TRENT.NS",
 }
 
 COMMODITY_SYMBOLS = {
@@ -138,21 +162,12 @@ COMMODITY_SYMBOLS = {
 }
 
 # ============================================================
-# EXPANDED SCAN UNIVERSE — 150+ liquid NSE F&O stocks (Brain 1 scanner)
+# EXPANDED SCAN UNIVERSE — full liquid NSE F&O stock options
 # ============================================================
-# Broader high-liquidity F&O list for the pre-market gun-powder scanner.
-# These are real, actively-traded NSE F&O names. Lot sizes approximated
-# for sizing; the scanner uses daily/4H zones (lot size not critical there).
-SCAN_STOCK_SYMBOLS = {
-    # Top 20 most liquid F&O stocks — Angel One rate-limit ke liye compact
-    "RELIANCE": "RELIANCE.NS", "TCS": "TCS.NS", "HDFCBANK": "HDFCBANK.NS",
-    "ICICIBANK": "ICICIBANK.NS", "INFY": "INFY.NS", "SBIN": "SBIN.NS",
-    "AXISBANK": "AXISBANK.NS", "LT": "LT.NS", "BHARTIARTL": "BHARTIARTL.NS",
-    "ITC": "ITC.NS", "KOTAKBANK": "KOTAKBANK.NS", "BAJFINANCE": "BAJFINANCE.NS",
-    "HCLTECH": "HCLTECH.NS", "MARUTI": "MARUTI.NS", "ASIANPAINT": "ASIANPAINT.NS",
-    "TITAN": "TITAN.NS", "TATASTEEL": "TATASTEEL.NS", "SUNPHARMA": "SUNPHARMA.NS",
-    "ADANIENT": "ADANIENT.NS", "ULTRACEMCO": "ULTRACEMCO.NS",
-}
+# SmartWebSocketV2 has zero rate limits — no reason to cap at 11 stocks.
+# The live scanner dynamically selects the top N (default 50) by Bhavcopy
+# liquidity. This dict provides yfinance tickers for the full F&O universe.
+SCAN_STOCK_SYMBOLS = STOCK_SYMBOLS  # same comprehensive universe
 
 # MCX commodities expanded for scanner (Silver added)
 SCAN_COMMODITY_SYMBOLS = {
@@ -176,43 +191,72 @@ def scan_universe() -> dict:
 # ============================================================
 # TWO-MARKET SESSION UNIVERSE (NSE + MCX split)
 # ============================================================
-# NSE:  09:15 - 15:15  →  20 stocks + 3 indices = 23 symbols
-# MCX:  15:30 - 23:15  →  4 commodities (GOLDM, SILVERM, CRUDEOIL, NATURALGAS)
+# NSE:  09:15 - 15:15  ->  4 INDEX OPTIONS + top 50 liquid STOCK OPTIONS
+# MCX:  15:30 - 23:15  ->  4 commodities (GOLDM, SILVERM, CRUDEOIL, NATURALGAS)
 # Two markets NEVER overlap — Tiger fetches only the active market per scan.
 
 def nse_scan_symbols() -> dict:
-    """NSE session symbols — INDEX first + TOP liquid STOCKS.
+    """NSE session symbols — INDEX first + TOP liquid STOCKS (priority order).
 
-    Pipeline:
-      1. INDEX (NIFTY, BANKNIFTY, FINNIFTY, SENSEX) — scanned FIRST
-      2. TOP 10-11 liquid F&O stocks (Bhavcopy liquidity filter)
-         All F&O → Volume → Turnover → OI → Liquidity Score → Top 10-11
+    SCANNING PRIORITY:
+      PRIORITY 1: INDEX OPTIONS (NIFTY, BANKNIFTY, FINNIFTY, SENSEX)
+                   scanned FIRST — highest liquidity, tightest spreads.
+      PRIORITY 2: TOP N liquid F&O STOCK OPTIONS (Bhavcopy liquidity filter)
+                   All F&O -> Volume -> Turnover -> OI -> Liquidity Score -> Top N
+                   Default N=50 (config: UNIVERSE["TOP_N_LIQUID_STOCKS"]).
 
-    Tiger options buying only — sirf liquid stocks trade hote hain.
-    Illiquid stock options (slippage risk) automatically filter hote hain.
+    SmartWebSocketV2 has zero rate limits on streaming data, so the stock
+    cap is set high to exploit the full liquid F&O universe. Tiger is an
+    options-buying engine — only liquid options are traded; illiquid ones
+    are automatically filtered out by the liquidity pipeline.
     """
-    out = dict(INDEX_SYMBOLS)  # indices first (priority)
+    # PRIORITY 1: INDEX OPTIONS (always first, highest priority)
+    out = dict(INDEX_SYMBOLS)
+    logger.info("SCAN PRIORITY 1: %d INDEX OPTIONS — %s",
+                len(INDEX_SYMBOLS), list(INDEX_SYMBOLS.keys()))
 
-    # Top liquid stocks — Bhavcopy filter se dynamically select
+    # PRIORITY 2: TOP N liquid F&O stock options (Bhavcopy dynamic filter)
     try:
         from universe.stock_filter import filter_top_liquid_stocks
         top_stocks = filter_top_liquid_stocks()
     except Exception as exc:
         logger.warning("Stock filter fail — fallback top stocks: %s", exc)
-        top_stocks = [
-            "RELIANCE", "HDFCBANK", "ICICIBANK", "INFY", "SBIN",
-            "AXISBANK", "LT", "BHARTIARTL", "ITC", "KOTAKBANK",
-            "BAJFINANCE",
-        ]
+        top_stocks = _fallback_stock_symbols()
 
-    # Add stocks after indices (indices have priority)
+    # Add stocks AFTER indices (indices have priority — scanned first)
+    stock_count = 0
     for sym in top_stocks:
+        if sym in INDEX_SYMBOLS:
+            continue  # skip if somehow an index is in the stock list
         if sym in STOCK_SYMBOLS:
             out[sym] = STOCK_SYMBOLS[sym]
         else:
             out[sym] = f"{sym}.NS"  # yfinance fallback format
+        stock_count += 1
 
+    logger.info("SCAN PRIORITY 2: %d LIQUID STOCK OPTIONS — %s",
+                stock_count, top_stocks[:10])
+    logger.info("NSE scan universe: %d symbols total (%d index + %d stocks)",
+                len(out), len(INDEX_SYMBOLS), stock_count)
     return out
+
+
+def _fallback_stock_symbols() -> list[str]:
+    """Return the fallback stock list when Bhavcopy is unavailable.
+
+    Self-contained (does not import stock_filter, which needs pandas).
+    """
+    return [
+        "HDFCBANK", "ICICIBANK", "SBIN", "AXISBANK", "KOTAKBANK",
+        "BAJFINANCE", "BAJAJFINSV",
+        "RELIANCE", "TCS", "INFY", "HCLTECH", "WIPRO", "TECHM",
+        "TATASTEEL", "HINDALCO", "JSWSTEEL", "ONGC", "COALINDIA",
+        "NTPC", "POWERGRID", "LT",
+        "ITC", "HINDUNILVR", "NESTLEIND", "BRITANNIA", "DABUR",
+        "SUNPHARMA", "CIPLA", "DRREDDY", "DIVISLAB", "GRASIM",
+        "MARUTI", "TITAN", "ASIANPAINT", "ULTRACEMCO",
+        "BHARTIARTL", "TATACONSUM", "ADANIENT",
+    ]
 
 
 def mcx_scan_symbols() -> dict:
@@ -348,6 +392,17 @@ LIQUIDITY_TIER = {
     "POWERGRID": 3, "NTPC": 3, "ONGC": 3, "COALINDIA": 3, "DIVISLAB": 3,
     "CIPLA": 3, "DRREDDY": 3, "BAJAJFINSV": 3, "NESTLEIND": 3, "BRITANNIA": 3,
     "TATACONSUM": 3,
+    # Expanded universe additions
+    "INDUSINDBK": 2, "FEDERALBNK": 3, "IDFCFIRSTB": 3, "AUBANK": 3,
+    "PNB": 3, "BANKBARODA": 3, "TATAMOTORS": 2, "HEROMOTOCO": 2,
+    "BAJAJ-AUTO": 2, "EICHERMOT": 2, "M&M": 2, "MRF": 3, "BOSCHLTD": 3,
+    "MOTHERSON": 3, "INDIGO": 2, "JETAIRWAYS": 3, "DIXON": 3, "AMBER": 3,
+    "PIDILITIND": 2, "SIEMENS": 2, "ABB": 3, "GODREJCP": 3, "COLGPALM": 3,
+    "GAIL": 3, "PETRONET": 3, "IGL": 3, "DLF": 2, "LODHA": 3,
+    "ABCAPITAL": 3, "HDFCLIFE": 2, "SBILIFE": 2, "ICICIPRULI": 3,
+    "ICICIGI": 3, "LICI": 2, "PFC": 3, "RECLTD": 3,
+    "IRCTC": 3, "NAUKRI": 3, "DMART": 2, "TRENT": 3,
+    "HINDUNILVR": 2, "DABUR": 3, "JSWSTEEL": 2,
     # MCX commodities — separate session, different spread regime
     "CRUDEOIL": 2, "GOLD": 2, "SILVER": 2, "NATURALGAS": 3,
 }

@@ -194,6 +194,12 @@ REPLAY = {
 
 UNIVERSE = {
     "TOP_N_SYMBOLS": 5,
+    # Live NSE scan: how many liquid stock options to scan after indexes.
+    # SmartWebSocketV2 has zero rate limits — no reason to cap at 11.
+    # Bhavcopy liquidity pipeline ranks all F&O stocks; we take the top N.
+    # 50 = full liquid F&O stock options universe (index options scanned
+    # separately + first, on top of this count).
+    "TOP_N_LIQUID_STOCKS": 50,
     "RESCAN_INTERVAL_MINUTES": 20,
     "SCORE_WEIGHTS": {
         "volume_rank": 0.35,
