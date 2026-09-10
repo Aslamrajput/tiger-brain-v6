@@ -585,16 +585,24 @@ class TigerWebSocket:
     # ============================================================
     def status(self) -> dict:
         """Return a status dict for logging/monitoring."""
-        # Copy primitive values under lock, then build dict outside lock
+        # Read primitive values under lock, compute derived values outside.
+        # CRITICAL: must NOT call last_tick_age_seconds() inside the lock —
+        # that method also acquires self._lock → deadlock with threading.Lock.
         with self._lock:
             tick_count = self._tick_count
             sub_count = len(self._subscribed_tokens)
-            last_age = self.last_tick_age_seconds()
+            last_tick_time = self._last_tick_time
             sample_tokens = list(self._subscribed_tokens)[:5]
+
+        # Compute tick age outside the lock
+        if last_tick_time is None:
+            last_age = 9999.0
+        else:
+            last_age = (datetime.now() - last_tick_time).total_seconds()
 
         return {
             "connected": self.is_connected(),
-            "healthy": self.is_healthy(),
+            "healthy": self.is_connected() and last_age < 60.0,
             "tick_count": tick_count,
             "subscribed_tokens": sub_count,
             "last_tick_age_s": round(last_age, 1),

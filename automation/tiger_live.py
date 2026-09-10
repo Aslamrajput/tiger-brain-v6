@@ -81,6 +81,7 @@ class TigerLiveRunner:
         self.data_map_1m: dict = {}
         self.instrument_master = None
         self._running = False
+        self._scan_lock = __import__("threading").Lock()  # prevent overlapping scans
         # Track placed order keys — load from disk, restart-safe
         self._placed_order_keys: set[str] = self._load_order_keys()
         self._order_log: list[dict] = []
@@ -587,7 +588,7 @@ class TigerLiveRunner:
     # INTRADAY SCAN (every 20 min) — entry signals + exits
     # ============================================================
     def intraday_scan(self):
-        """Scan zones every 20 min, find entry signals, check exits.
+        """Scan zones every 1 min, find entry signals, check exits.
 
         The backtest engine generates strategy signals. Then _place_live_orders()
         converts those signals into REAL Angel One orders.
@@ -636,73 +637,51 @@ class TigerLiveRunner:
             logger.debug("Data refresh skipped (last %.0f min ago) — using WS live ticks",
                          mins_since)
 
-        # === TIGER'S EYES — monitor open positions first ===
-        # Fetch real LTP from broker + apply V19 exit logic. INDEPENDENT of backtest.
-        # Don't forget yesterday's trade — check positions on every scan.
+        # === DIRECT SCAN (no threading wrapper — threading timeout doesn't work
+        # with Angel SDK's C extensions holding the GIL) ===
+        # The scan runs directly. If it hangs, the 60s sleep cycle is delayed,
+        # but the next cycle will retry. REST calls have 7s SmartAPI timeout.
         try:
-            monitored = self.monitor_open_positions()
-        except Exception as exc:
-            logger.error("👁️ Position monitor error: %s", exc)
-            monitored = 0
-
-        # === HARD 50s TIMEOUT — 1-min scan must never block the scheduler ===
-        # If the scan exceeds 50s (slow REST, rate limit, hung API call),
-        # abort it so the next 1-min cycle can fire cleanly.
-        # NOTE: ThreadPoolExecutor context manager calls shutdown(wait=True)
-        # on exit, which blocks until the worker finishes — defeating the
-        # timeout. We use a manual executor + shutdown(wait=False) instead.
-        from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
-
-        def _run_scan():
             try:
-                # === REAL-TIME LIVE SCANNER (independent of backtest) ===
-                from automation.live_scanner import scan_live_signals
-
-                today = datetime.now().date()
-                daily_entries = self._daily_entries_taken.get(today, 0)
-                scalper_today = self._scalper_trades.get(today, 0)
-
-                signals = scan_live_signals(
-                    self.data_map,
-                    self.data_map_1m if self.data_map_1m else None,
-                    self.broker,
-                    now=datetime.now(),
-                    daily_entries_taken=daily_entries,
-                    last_trade_time=self._last_trade_time,
-                    scalper_trades_today=scalper_today,
-                )
-
-                # Signals are for the current bar — all are entries (exit_ts = None).
-                # Exits already came from monitor_open_positions() (above).
-                placed = self._place_live_orders(signals)
-
-                # Update the daily entry counter
-                self._daily_entries_taken[today] = daily_entries + placed
-                if placed > 0:
-                    self._last_trade_time = datetime.now()
-                    # Track scalper trades separately
-                    for s in signals:
-                        if s.get("is_scalper") and placed > 0:
-                            self._scalper_trades[today] = scalper_today + 1
-                            break
-
-                logger.info("Scan done: %d live signals, %d buy orders placed, "
-                            "%d monitored exits, balance ₹%.0f",
-                            len(signals), placed, monitored,
-                            self.account_capital)
+                monitored = self.monitor_open_positions()
             except Exception as exc:
-                logger.error("Intraday scan error: %s", exc)
+                logger.error("👁️ Position monitor error: %s", exc)
+                monitored = 0
 
-        ex = ThreadPoolExecutor(max_workers=1)
-        future = ex.submit(_run_scan)
-        try:
-            future.result(timeout=50)
-        except FuturesTimeout:
-            logger.warning("⚠️ Scan timed out after 50s — aborting (next 1-min cycle will retry)")
+            from automation.live_scanner import scan_live_signals
+
+            today = datetime.now().date()
+            daily_entries = self._daily_entries_taken.get(today, 0)
+            scalper_today = self._scalper_trades.get(today, 0)
+
+            signals = scan_live_signals(
+                self.data_map,
+                self.data_map_1m if self.data_map_1m else None,
+                self.broker,
+                now=datetime.now(),
+                daily_entries_taken=daily_entries,
+                last_trade_time=self._last_trade_time,
+                scalper_trades_today=scalper_today,
+            )
+
+            placed = self._place_live_orders(signals)
+
+            # Update the daily entry counter
+            self._daily_entries_taken[today] = daily_entries + placed
+            if placed > 0:
+                self._last_trade_time = datetime.now()
+                # Track scalper trades separately
+                for s in signals:
+                    if s.get("is_scalper") and placed > 0:
+                        self._scalper_trades[today] = scalper_today + 1
+                        break
+
+            logger.info("Scan done: %d live signals, %d buy orders placed, "
+                        "%d monitored exits, balance ₹%.0f",
+                        len(signals), placed, monitored,
+                        self.account_capital)
         except Exception as exc:
-            logger.error("Scan wrapper error: %s", exc)
-        finally:
-            ex.shutdown(wait=False)  # non-blocking — don't trap the scheduler
+            logger.error("Intraday scan error: %s", exc, exc_info=True)
 
     def _place_live_orders(self, trades: list[dict]) -> int:
         """Backtest signals → REAL Angel One orders.
@@ -1411,14 +1390,22 @@ class TigerLiveRunner:
         signal.signal(signal.SIGINT, _shutdown)
         signal.signal(signal.SIGTERM, _shutdown)
 
-        # Keep main thread alive
+        # Keep main thread alive — also serves as reliable scan trigger
+        # (BackgroundScheduler sometimes fails to fire in worker threads)
         try:
             while self._running:
                 time.sleep(60)
                 mode = get_day_mode()
-                if mode == "TRADING" and is_market_hours():
-                    logger.debug("Tiger alive — TRADING mode (%s)",
-                                 datetime.now().strftime("%H:%M"))
+                if mode == "TRADING" and is_market_hours() and not is_opening_range_period():
+                    logger.info("❤️ Tiger heartbeat — TRADING mode (%s) — triggering scan",
+                                datetime.now().strftime("%H:%M"))
+                    if self._scan_lock.acquire(blocking=False):
+                        try:
+                            self.intraday_scan()
+                        finally:
+                            self._scan_lock.release()
+                    else:
+                        logger.debug("Scan already running (scheduler), skip manual trigger")
         except KeyboardInterrupt:
             self.stop()
 

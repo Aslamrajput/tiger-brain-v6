@@ -16,7 +16,10 @@ extra dependency nahi chahiye, aur neeche test bhi hua hai.
 """
 
 import sys
+import logging
 from datetime import datetime, time
+
+logger = logging.getLogger("tiger_brain.scheduler")
 
 try:
     from config.thresholds import AUTOMATION
@@ -236,8 +239,16 @@ class TigerBrainScheduler:
 
         if intraday_fn:
             def intraday_guarded():
-                if get_day_mode() == "TRADING" and is_market_hours() and not is_opening_range_period():
-                    intraday_fn()
+                try:
+                    mode = get_day_mode()
+                    mkt = is_market_hours()
+                    opening = is_opening_range_period()
+                    logger.info("intraday_guarded fired: mode=%s market=%s opening=%s",
+                                mode, mkt, opening)
+                    if mode == "TRADING" and mkt and not opening:
+                        intraday_fn()
+                except Exception as exc:
+                    logger.error("intraday_guarded error: %s", exc)
 
             self.scheduler.add_job(
                 intraday_guarded, "interval",

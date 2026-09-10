@@ -935,9 +935,11 @@ def fetch_pcr(broker, underlying: str) -> float:
         return pe_oi / ce_oi
 
     try:
-        with ThreadPoolExecutor(max_workers=1) as ex:
-            future = ex.submit(_do_fetch)
-            return future.result(timeout=8)
+        ex = ThreadPoolExecutor(max_workers=1)
+        future = ex.submit(_do_fetch)
+        result = future.result(timeout=8)
+        ex.shutdown(wait=False)  # non-blocking — don't trap on hung worker
+        return result
     except FuturesTimeout:
         logger.debug("PCR fetch timeout for %s — using fallback", underlying)
         return PCR_FALLBACK
