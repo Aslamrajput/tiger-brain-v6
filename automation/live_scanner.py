@@ -282,14 +282,18 @@ def scan_live_signals(
     logger.info("Live scan done @ %s: %d signal(s) from %d symbols",
                 now.strftime("%H:%M"), len(signals), len(data_map))
 
-    # === TIGER FALLBACK SCALPER MODE ===
-    # If no normal signals found AND scalper should activate → try scalper
+    # === TIGER FALLBACK SCALPER MODE (Priority 2) ===
+    # Dual-execution logic: if NO Big Move (Supply/Demand zone) signal found,
+    # automatically switch to Scalping Mode for this cycle. This ensures Tiger
+    # never goes empty-handed — it hunts micro-momentum when zones are absent.
     if len(signals) == 0:
         # Determine segment from active market
         from automation.scheduler import get_active_market
         active_market = get_active_market(now)
         seg = "mcx" if active_market == "MCX" else "nse"
 
+        # Scalper always attempts when no Big Move found — but quota limits
+        # and momentum criteria keep it controlled (max 2/day, needs 50%+ body)
         if _should_activate_scalper(ts_time, seg, daily_entries_taken, last_trade_time):
             if scalper_trades_today < SCALPER["MAX_TRADES_PER_DAY"]:
                 logger.info(

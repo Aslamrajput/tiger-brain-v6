@@ -200,7 +200,7 @@ UNIVERSE = {
     # 50 = full liquid F&O stock options universe (index options scanned
     # separately + first, on top of this count).
     "TOP_N_LIQUID_STOCKS": 50,
-    "RESCAN_INTERVAL_MINUTES": 20,
+    "RESCAN_INTERVAL_MINUTES": 1,
     "SCORE_WEIGHTS": {
         "volume_rank": 0.35,
         "oi_velocity": 0.25,
@@ -387,9 +387,9 @@ SCALPER = {
     "TARGET_PCT": 15.0,           # +15% = instant full exit
     "MAX_STOP_RUPEES": 500,       # ₹500 hard stop (not ₹2000)
     "MAX_TRADES_PER_DAY": 2,      # max 2 scalper trades/day
-    "ACTIVATION_IDLE_MINUTES": 120,  # 2+ hours no trade → activate
+    "ACTIVATION_IDLE_MINUTES": 30,   # 30 min idle → activate (was 120 — 1-min scan needs faster fallback)
     "ACTIVATION_ZERO_TRADE_TIME": {  # OR: 0 trades at these times
-        "NSE": "14:00",           # NSE: activate at 14:00 if 0 trades
-        "MCX": "21:00",           # MCX: activate at 21:00 if 0 trades
+        "NSE": "09:30",           # NSE: activate from 09:30 if 0 trades (was 14:00)
+        "MCX": "15:45",           # MCX: activate from 15:45 if 0 trades (was 21:00)
     },
 }

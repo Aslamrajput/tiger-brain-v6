@@ -99,6 +99,9 @@ class TigerLiveRunner:
         self._position_peaks: dict = self._load_position_peaks()
         # Scalper positions tracker — tsym → True (for special exit rules)
         self._scalper_positions: set = self._load_scalper_positions()
+        # Data refresh throttle — with 1-min scans, only refresh REST candles
+        # every 5 min. SmartWebSocketV2 live ticks fill the gap between refreshes.
+        self._last_data_refresh: datetime | None = None
 
     def _live_re_size(
         self, real_balance: float, real_ltp: float, real_lot_size: int,
@@ -616,8 +619,22 @@ class TigerLiveRunner:
                 logger.warning("📡 WS: unhealthy (%s) — REST fallback active",
                                ws_status.get("last_error", "disconnected"))
 
-        # === FRESH DATA — fetch latest candles on every scan (active market) ===
-        self._refresh_live_data()
+        # === FRESH DATA — throttled refresh (every 5 min, not every 1-min scan) ===
+        # With 1-min scan intervals, fetching REST candles for 42 symbols every
+        # minute would hit Angel One rate limits. SmartWebSocketV2 live ticks
+        # update prices between refreshes. Refresh every 5th minute only.
+        now_dt = datetime.now()
+        need_refresh = True
+        if self._last_data_refresh is not None:
+            mins_since = (now_dt - self._last_data_refresh).total_seconds() / 60
+            if mins_since < 5.0:
+                need_refresh = False
+        if need_refresh:
+            self._refresh_live_data()
+            self._last_data_refresh = now_dt
+        else:
+            logger.debug("Data refresh skipped (last %.0f min ago) — using WS live ticks",
+                         mins_since)
 
         # === TIGER'S EYES — monitor open positions first ===
         # Fetch real LTP from broker + apply V19 exit logic. INDEPENDENT of backtest.
@@ -1352,7 +1369,7 @@ class TigerLiveRunner:
         logger.info("✅ Tiger scheduler STARTED. 24x7 cycle active.")
         logger.info("   Pre-market:     09:00 (login + NSE data fetch)")
         logger.info("   NSE open:       09:15 (scan 4 INDEX + up to 50 liquid STOCKS)")
-        logger.info("   Intraday:       every 20 min (active market only)")
+        logger.info("   Intraday:       every 1 min (active market only, data refresh 5 min)")
         logger.info("   Delivery:       15:00 (overnight direction)")
         logger.info("   NSE square-off: 15:15 (close NSE positions)")
         logger.info("   NSE close:      15:30 (NSE session end)")

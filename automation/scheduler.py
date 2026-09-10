@@ -241,8 +241,11 @@ class TigerBrainScheduler:
 
             self.scheduler.add_job(
                 intraday_guarded, "interval",
-                minutes=AUTOMATION.get("RESCAN_INTERVAL_MINUTES", 20),
+                minutes=AUTOMATION.get("RESCAN_INTERVAL_MINUTES", 1),
                 id="intraday_scan",
+                max_instances=1,           # never overlap — if previous scan running, skip
+                misfire_grace_time=30,     # tolerate 30s late fires
+                coalesce=True,             # merge multiple missed fires into one
             )
 
         # Delivery snapshot at 3:00 PM — Tiger next-day direction decide
