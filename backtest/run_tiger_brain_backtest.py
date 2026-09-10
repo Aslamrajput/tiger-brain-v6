@@ -916,25 +916,16 @@ def validate_demand_zone_quality(df_15m, zone, i_15m) -> tuple[int, list[str]]:
 def fetch_pcr(broker, underlying: str) -> float:
     """Fetch Put-Call Ratio from option chain OI.
 
-    V18 loose: never hang the scan on a slow/blocked REST call.
-    The PCR is a soft scorer — if it fails, return the fallback.
+    Thread-safe 8s hard timeout via concurrent.futures — works in any
+    thread context (BackgroundScheduler worker threads). The previous
+    signal.SIGALRM approach only works in the main thread and silently
+    fails in apscheduler's ThreadPoolExecutor.
     """
-    import signal as _signal
+    from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
 
-    class _PcrTimeout(Exception):
-        pass
-
-    def _timeout_handler(signum, frame):
-        raise _PcrTimeout("PCR fetch timed out")
-
-    try:
-        # Hard timeout: 8s max — never let one symbol's PCR hang the scan
-        old_handler = _signal.signal(_signal.SIGALRM, _timeout_handler)
-        _signal.alarm(8)
+    def _do_fetch():
         from data.loader import fetch_option_chain_oi
         chain = fetch_option_chain_oi(broker, underlying=underlying, strikes_around_atm=15)
-        _signal.alarm(0)
-        _signal.signal(_signal.SIGALRM, old_handler)
         if chain is None or chain.empty:
             return PCR_FALLBACK
         ce_oi = float(chain["CE_oi"].sum()) if "CE_oi" in chain.columns else 0
@@ -942,11 +933,15 @@ def fetch_pcr(broker, underlying: str) -> float:
         if ce_oi <= 0:
             return PCR_FALLBACK
         return pe_oi / ce_oi
-    except _PcrTimeout:
+
+    try:
+        with ThreadPoolExecutor(max_workers=1) as ex:
+            future = ex.submit(_do_fetch)
+            return future.result(timeout=8)
+    except FuturesTimeout:
         logger.debug("PCR fetch timeout for %s — using fallback", underlying)
         return PCR_FALLBACK
     except Exception:
-        _signal.alarm(0)
         return PCR_FALLBACK
 
 

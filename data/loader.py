@@ -431,9 +431,9 @@ ANGEL_INTERVAL_MAX_DAYS = {
 # NOTE: retries kam (2) aur backoff chhota (2s) rakha gaya hai taaki
 # rate-limit hit hone par symbol jaldi yfinance fallback pe chale —
 # 75s retry backoff ke bajaye 6s me fail ho jaaye.
-ANGEL_CHUNK_PAUSE_SEC = 12.0
-ANGEL_MAX_RETRIES = 4
-ANGEL_RETRY_BACKOFF_SEC = 10.0
+ANGEL_CHUNK_PAUSE_SEC = 0.5
+ANGEL_MAX_RETRIES = 2
+ANGEL_RETRY_BACKOFF_SEC = 3.0
 
 _RATE_LIMIT_MARKERS = (
     "access rate", "rate limit", "exceeding access", "too many request",
