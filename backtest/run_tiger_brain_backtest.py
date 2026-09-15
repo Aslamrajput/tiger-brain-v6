@@ -1387,8 +1387,8 @@ def compute_structural_stop(entry_premium, zone, zone_type, cur_underlying,
     stop_underlying = zone["bottom"] if zone_type == "demand" else zone["top"]
     stop_prem = bs_premium_at(stop_underlying, strike, dte, is_call, iv)
     stop_prem = max(stop_prem, 0.5)
-    # 60% of entry — V2 sweet spot (50% was too tight, 85% was too wide)
-    stop_prem = min(stop_prem, entry_premium * 0.60)
+    # 80% of entry = -20% stop (was 0.60 = -40% — too wide, bled to death)
+    stop_prem = min(stop_prem, entry_premium * 0.80)
     return max(stop_prem, 0.5)
 
 def size_dynamic(entry_premium, stop_premium, lot_sz, current_capital,

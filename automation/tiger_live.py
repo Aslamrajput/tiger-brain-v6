@@ -131,9 +131,9 @@ class TigerLiveRunner:
             return {"quantity": 0, "lots": 0, "allocated_capital": 0,
                     "reason": f"fund_plan_fail: {exc}"}
 
-        # Stop distance: entry × 40% (60% stop-loss = 40% risk per unit)
+        # Stop distance: entry × 20% (tight stop — exit fast when wrong)
         entry = real_ltp
-        stop = entry * 0.60
+        stop = entry * 0.80  # -20% stop (was 0.60 = -40% — too wide)
         sizing = size_trade_with_fund_brain(
             plan, entry, stop, lot,
             current_exposure=current_exposure,
@@ -515,20 +515,31 @@ class TigerLiveRunner:
                 continue  # scalper positions don't use V19 exit logic
 
             # === V19 EXIT LOGIC (on real broker data) ===
+            # TIGHT EXIT — Tiger exits fast when wrong. No riding losers.
+            #   1. Hard stop: -20% (was -40% — too wide, bled to death)
+            #   2. Breakeven lock: once +5% seen, stop moves to entry (no loss after profit)
+            #   3. Trail: activates at +5%, locks 80% of peak (tighter than 70%)
+            #   4. Fixed target: book 40% at +50%
+            #   5. Runaway safety: exit at +250%
             exit_reason = None
             exit_qty = qty
 
-            # 1. Stop-loss (60% of entry)
-            stop_premium = entry_price * 0.60
-            if ltp <= stop_premium:
-                exit_reason = "stop_loss_60pct"
+            # 1. Hard stop-loss: -20% (premium drops 20% → exit immediately)
+            stop_threshold = entry_price * 0.80
+            if ltp <= stop_threshold:
+                exit_reason = "stop_loss_20pct"
 
-            # 2. Trail (active at +5%) — exit on 30% give-back from peak
-            elif gain_pct >= V19_TRAIL_ACTIVATE_PCT:
+            # 2. Breakeven lock — once position hit +5%, never take a loss on it
+            elif gain_pct >= V19_TRAIL_ACTIVATE_PCT or target_booked:
                 peak_gain = (peak - entry_price) / entry_price
-                trail_floor = entry_price * (1 + peak_gain * V19_TRAIL_LOCK_PCT / 100)
-                if ltp <= trail_floor:
-                    exit_reason = "trail_lock_70pct"
+                if peak_gain > 0:
+                    # Lock 80% of peak (tighter than 70% — give back only 20%)
+                    trail_floor = entry_price * (1 + peak_gain * 0.80)
+                    if ltp <= trail_floor:
+                        if ltp >= entry_price:
+                            exit_reason = "trail_lock_80pct_profit"
+                        else:
+                            exit_reason = "breakeven_exit"
 
             # 3. Fixed target — book 40% quantity at +50% (first time only)
             if exit_reason is None and gain_pct >= V19_FIXED_TARGET_PCT \
