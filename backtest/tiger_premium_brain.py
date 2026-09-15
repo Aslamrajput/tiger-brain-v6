@@ -49,7 +49,7 @@ logger = logging.getLogger("tiger_brain.premium_brain")
 # ============================================================
 IV_DEEP_DISCOUNT_MAX = 30.0   # <30% = cheapest premium (best entry)
 IV_DISCOUNT_MAX = 50.0        # 30-50% = discount (good entry)
-IV_FAIR_MAX = 85.0            # 50-85% = fair (V18 loose entry — was 65, too strict)
+IV_FAIR_MAX = 65.0            # 50-65% = fair (entry only if setup_score >= 90)
 IV_EXPENSIVE_EXIT = 90.0      # >90% = exit signal (was 70 — only exit truly expensive)
 
 # Lookback window for IV percentile (number of historical IV readings)
@@ -169,28 +169,37 @@ class PremiumDiscountTracker:
         else:
             strike = "ITM"
 
-        # --- Entry decision (V18 LOOSE — never block on IV) ---
-        # V18 style: the IV filter is advisory only — it NEVER blocks entry.
-        # The premium brain scores discount entries (bonus) but does not
-        # gate them. This ensures the bot takes trades in any IV regime.
-        # V19 exit logic (IV expansion sell) is retained separately below.
+        # --- Entry decision (V19 STRICT — IV gates entry) ---
+        # EXPENSIVE IV → block entry (buying overpriced premium = guaranteed bleed)
+        # FAIR IV → entry only if setup_score >= 90 (need strong confluence to pay fair price)
+        # DISCOUNT/DEEP_DISCOUNT → entry always allowed (cheap premium)
         should_enter = True
         discount_bonus = 0.0
         notes = []
 
         if status == "DEEP_DISCOUNT":
             discount_bonus = 10.0
+            should_enter = True
             notes.append("DEEP DISCOUNT! Premium sabse sasta — best entry window")
             notes.append(f"IV {current_iv:.1%} at {percentile:.0f}th percentile → OTM strike for max gamma")
         elif status == "DISCOUNT":
             discount_bonus = 5.0
+            should_enter = True
             notes.append(f"Discount premium — IV at {percentile:.0f}th percentile, good entry")
         elif status == "FAIR":
             discount_bonus = 0.0
-            notes.append(f"Fair IV ({percentile:.0f}th pct) — V18 loose entry allowed")
+            # Fair IV — entry only with strong confluence (score >= 90)
+            if setup_score is not None and setup_score >= 90:
+                should_enter = True
+                notes.append(f"Fair IV ({percentile:.0f}th pct) — entry allowed (score {setup_score} >= 90)")
+            else:
+                should_enter = False
+                score_str = f"score {setup_score}" if setup_score is not None else "no score"
+                notes.append(f"Fair IV ({percentile:.0f}th pct) — blocked ({score_str} < 90)")
         else:  # EXPENSIVE
             discount_bonus = 0.0
-            notes.append(f"EXPENSIVE IV at {percentile:.0f}th pct — entry allowed (V18 loose)")
+            should_enter = False
+            notes.append(f"EXPENSIVE IV at {percentile:.0f}th pct — entry BLOCKED (premium overpriced)")
 
         # --- Exit decision (if holding) ---
         should_exit = False

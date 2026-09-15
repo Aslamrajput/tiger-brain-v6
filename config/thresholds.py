@@ -385,8 +385,8 @@ SCALPER = {
     # Only the highest-conviction momentum candles pass. body>80%, vol>2.0x,
     # supertrend confirmed, RSI aligned, score>=75. No more BRITANNIA-type losses.
     "MIN_SCORE": 75,              # was 50 — only high-conviction scalps
-    "MIN_BODY_PCT": 80,           # was 50 — body must dominate the candle
-    "MIN_VOLUME_SURGE": 2.0,      # was 1.1 — need real volume explosion
+    "MIN_BODY_PCT": 85,           # was 80 — zero tolerance for long-wick fake traps
+    "MIN_VOLUME_SURGE": 3.0,      # was 2.0 — need real velocity explosion (3x avg)
     "MIN_RSI_BUY": 60,            # CE: RSI >= 60 (bullish momentum)
     "MAX_RSI_SELL": 40,           # PE: RSI <= 40 (bearish momentum)
     "REQUIRE_SUPERTREND": True,   # supertrend must agree with direction

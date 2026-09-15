@@ -296,7 +296,10 @@ def test_load_cached_missing_file_is_empty(tmp_path):
 def test_offline_mode_never_touches_network(tmp_path):
     today = pd.Timestamp.now().normalize()
     day = today - pd.Timedelta(days=1)
-    while day.dayofweek >= 5:
+    # Skip weekends AND NSE holidays — cached candles on a holiday get
+    # filtered out by clean_intraday, so the test must use a trading day.
+    from automation.holidays import is_market_holiday
+    while day.dayofweek >= 5 or is_market_holiday(day.date())[0]:
         day -= pd.Timedelta(days=1)
 
     df = make_session(day.strftime("%Y-%m-%d"), n=10)

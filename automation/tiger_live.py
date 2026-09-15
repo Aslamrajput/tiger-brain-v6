@@ -384,6 +384,95 @@ class TigerLiveRunner:
         logger.info(f"📋 Direction locked: {symbol} {option_type} for 2 hours")
 
     # ============================================================
+    # 1-MINUTE VELOCITY CONFIRMATION — final gate before order
+    # ============================================================
+    def _verify_1m_velocity(self, symbol: str, option_type: str) -> bool:
+        """Final entry-confirmation gate using the LATEST 1-minute candle.
+
+        Prevents premature entries on unconfirmed candles. Before Tiger
+        transmits any BUY to Angel One, it re-verifies:
+          1. Real Body >= 85% of total range (zero long-wick fake traps)
+          2. Volume >= 3.0x rolling average (real velocity explosion)
+          3. Candle direction matches option_type (CE → green, PE → red)
+
+        This is the ABSOLUTE CONFIRMATION layer — scanner signals are
+        necessary but NOT sufficient. The 1m candle must confirm live.
+
+        Returns:
+            True if the latest 1m candle passes all velocity checks.
+        """
+        from config.thresholds import SCALPER
+        df_1m = self.data_map_1m.get(symbol)
+        if df_1m is None or df_1m.empty:
+            logger.info(
+                f"🚫 VELOCITY BLOCK {symbol} — no 1m data available, "
+                f"cannot confirm entry")
+            return False
+
+        # Latest 1m candle
+        row = df_1m.iloc[-1]
+        o = float(row.get("open", 0) or 0)
+        h = float(row.get("high", 0) or 0)
+        l = float(row.get("low", 0) or 0)
+        c = float(row.get("close", 0) or 0)
+        v = float(row.get("volume", 0) or 0)
+
+        rng = h - l
+        if rng <= 0:
+            logger.info(
+                f"🚫 VELOCITY BLOCK {symbol} — 1m candle range is 0 (no movement)")
+            return False
+
+        body = abs(c - o)
+        body_pct = (body / rng) * 100
+
+        # Rolling average volume (last 10 1m candles, excluding current)
+        lookback = min(10, len(df_1m) - 1)
+        if lookback < 3:
+            logger.info(
+                f"🚫 VELOCITY BLOCK {symbol} — insufficient 1m history "
+                f"({lookback} candles, need 3+)")
+            return False
+        avg_vol = float(df_1m["volume"].iloc[-(lookback + 1):-1].mean())
+        vol_ratio = v / avg_vol if avg_vol > 0 else 0
+
+        # Direction check: CE needs green candle, PE needs red candle
+        is_ce = option_type.upper() == "CE"
+        candle_green = c > o
+        candle_red = c < o
+        direction_ok = (is_ce and candle_green) or (not is_ce and candle_red)
+
+        # Gate 1: Body >= 85%
+        if body_pct < SCALPER["MIN_BODY_PCT"]:
+            logger.info(
+                f"🚫 VELOCITY BLOCK {symbol} {option_type} — "
+                f"1m body {body_pct:.0f}% < {SCALPER['MIN_BODY_PCT']}% "
+                f"(fake wick trap rejected)")
+            return False
+
+        # Gate 2: Volume >= 3.0x
+        if vol_ratio < SCALPER["MIN_VOLUME_SURGE"]:
+            logger.info(
+                f"🚫 VELOCITY BLOCK {symbol} {option_type} — "
+                f"1m vol {vol_ratio:.1f}x < {SCALPER['MIN_VOLUME_SURGE']}x "
+                f"(no velocity explosion)")
+            return False
+
+        # Gate 3: Direction match
+        if not direction_ok:
+            logger.info(
+                f"🚫 VELOCITY BLOCK {symbol} {option_type} — "
+                f"1m candle {'green' if candle_green else 'red'} "
+                f"but need {'green' if is_ce else 'red'} for {option_type}")
+            return False
+
+        logger.info(
+            f"✅ VELOCITY CONFIRMED {symbol} {option_type} — "
+            f"1m body={body_pct:.0f}% vol={vol_ratio:.1f}x "
+            f"{'green' if candle_green else 'red'} candle")
+        return True
+
+    # ============================================================
     # PRE-MARKET (09:00) — login + data load
     # ============================================================
     def pre_market_wake(self):
@@ -1294,6 +1383,22 @@ class TigerLiveRunner:
                     "tradingsymbol": contract["tradingsymbol"],
                     "success": False,
                     "error": "direction_blocked_2h",
+                })
+                continue
+
+            # === 1-MINUTE VELOCITY CONFIRMATION — absolute final gate ===
+            # Scanner signal is necessary but NOT sufficient. Before Tiger
+            # transmits ANY BUY to Angel One, the latest 1m candle must
+            # confirm: body>=85%, vol>=3.0x, direction match.
+            # This stops premature entries on unconfirmed/fake candles.
+            if not self._verify_1m_velocity(symbol, option_type):
+                self._order_log.append({
+                    "time": datetime.now().isoformat(),
+                    "symbol": symbol, "strike": strike,
+                    "option_type": option_type,
+                    "tradingsymbol": contract["tradingsymbol"],
+                    "success": False,
+                    "error": "velocity_block_1m",
                 })
                 continue
 
