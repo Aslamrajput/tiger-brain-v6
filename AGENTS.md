@@ -4,6 +4,16 @@
 Algorithmic trading platform for pure intraday Call/Put options buying on NSE/MCX.
 Core strategy: pure Supply/Demand zones (no VWAP/RS/EMA/Black-Scholes).
 
+## Momentum Hunter (Sep 2026)
+New module `subbrains/momentum_hunter.py` — Tiger's 3rd hunting layer:
+- ORB Breakout (9:15-9:30 range breakout with volume)
+- Momentum Spike (3-bar acceleration + volume explosion)
+- VWAP Reclaim (institutional re-entry signal)
+- Options Math Gate: IV percentile < 65% + delta 0.40-0.75 (MANDATORY)
+Integrated in scan_live_signals as Priority 1.5 (after 7-Brain, before scalper).
+Scalper also has options math gate (Gate 9) — no more overpriced premium entries.
+Morning golden window scalper activation reduced to 10 min (was 30).
+
 ## V16 Architecture (Current — Tiger Brain ARMY)
 - **Fund Announcement Brain** (Brain 0): `backtest/tiger_fund_brain.py`
   - Reads account capital (₹10k to ₹10cr), classifies tier (MICRO/SMALL/MID/LARGE/WHALE)
