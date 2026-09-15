@@ -389,10 +389,12 @@ class TigerLiveRunner:
     def _verify_1m_velocity(self, symbol: str, option_type: str) -> bool:
         """Final entry-confirmation gate using the LATEST 1-minute candle.
 
-        Prevents premature entries on unconfirmed candles. Before Tiger
-        transmits any BUY to Angel One, it re-verifies:
-          1. Real Body >= 85% of total range (zero long-wick fake traps)
-          2. Volume >= 3.0x rolling average (real velocity explosion)
+        High-frequency scalping micro-momentum layer. Before Tiger
+        transmits any BUY to Angel One, it re-verifies the live 1m candle:
+          1. Real Body >= 65% of total range (captures bottom sweeps +
+             sharp wick turnarounds on 1m timeframe — the initial impulse)
+          2. Volume >= 1.4x rolling average (sensitive instantaneous
+             multiplier — 1.3x-1.5x band, anti-freeze)
           3. Candle direction matches option_type (CE → green, PE → red)
 
         This is the ABSOLUTE CONFIRMATION layer — scanner signals are
@@ -442,20 +444,20 @@ class TigerLiveRunner:
         candle_red = c < o
         direction_ok = (is_ce and candle_green) or (not is_ce and candle_red)
 
-        # Gate 1: Body >= 85%
+        # Gate 1: Body >= 65% (dynamic — captures impulse + wick turnarounds)
         if body_pct < SCALPER["MIN_BODY_PCT"]:
             logger.info(
                 f"🚫 VELOCITY BLOCK {symbol} {option_type} — "
                 f"1m body {body_pct:.0f}% < {SCALPER['MIN_BODY_PCT']}% "
-                f"(fake wick trap rejected)")
+                f"(no impulse confirmation)")
             return False
 
-        # Gate 2: Volume >= 3.0x
+        # Gate 2: Volume >= 1.4x (sensitive — anti-freeze, 1.3x-1.5x band)
         if vol_ratio < SCALPER["MIN_VOLUME_SURGE"]:
             logger.info(
                 f"🚫 VELOCITY BLOCK {symbol} {option_type} — "
                 f"1m vol {vol_ratio:.1f}x < {SCALPER['MIN_VOLUME_SURGE']}x "
-                f"(no velocity explosion)")
+                f"(no micro-momentum surge)")
             return False
 
         # Gate 3: Direction match
@@ -1389,8 +1391,9 @@ class TigerLiveRunner:
             # === 1-MINUTE VELOCITY CONFIRMATION — absolute final gate ===
             # Scanner signal is necessary but NOT sufficient. Before Tiger
             # transmits ANY BUY to Angel One, the latest 1m candle must
-            # confirm: body>=85%, vol>=3.0x, direction match.
-            # This stops premature entries on unconfirmed/fake candles.
+            # confirm: body>=65%, vol>=1.4x, direction match.
+            # This stops premature entries on unconfirmed candles while
+            # keeping Tiger's high-frequency scalping engine agile.
             if not self._verify_1m_velocity(symbol, option_type):
                 self._order_log.append({
                     "time": datetime.now().isoformat(),

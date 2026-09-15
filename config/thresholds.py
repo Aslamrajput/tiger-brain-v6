@@ -45,7 +45,7 @@ OI = {
 VOLUME = {
     "SPIKE_MULTIPLIER": 2,
     "WEAK_VOLUME_PCT_OF_AVG": 50,
-    "OPENING_RANGE_MINUTES": 15,
+    "OPENING_RANGE_MINUTES": 3,
     "OPENING_RANGE_ACTIVE_MULTIPLIER": 1.5,
 }
 
@@ -381,19 +381,20 @@ DRY_RUN = os.getenv("TIGER_BRAIN_DRY_RUN", "false").lower() == "true"
 # idle 2+ hours. Relaxes ALL gates — no zone touch required, just a
 # momentum candle with volume. Fast in, fast out.
 SCALPER = {
-    # === ROCKET FILTER (was: relaxed 50/1.1 — took junk signals, lost money) ===
-    # Only the highest-conviction momentum candles pass. body>80%, vol>2.0x,
-    # supertrend confirmed, RSI aligned, score>=75. No more BRITANNIA-type losses.
-    "MIN_SCORE": 75,              # was 50 — only high-conviction scalps
-    "MIN_BODY_PCT": 85,           # was 80 — zero tolerance for long-wick fake traps
-    "MIN_VOLUME_SURGE": 3.0,      # was 2.0 — need real velocity explosion (3x avg)
+    # === ROCKET FILTER (dynamic — high-frequency scalping, anti-freeze) ===
+    # Volume is highly sensitive: 1.3x-1.5x rolling average captures the
+    # initial impulse wave without freezing. Body 65% allows bottom sweeps
+    # and sharp wick turnarounds on 1m timeframe. Score>=75 keeps quality.
+    "MIN_SCORE": 75,              # high-conviction scalps only
+    "MIN_BODY_PCT": 65,           # dynamic — capture bottom sweeps + wick turnarounds
+    "MIN_VOLUME_SURGE": 1.4,      # dynamic — instantaneous vol 1.3x-1.5x of trailing avg
     "MIN_RSI_BUY": 60,            # CE: RSI >= 60 (bullish momentum)
     "MAX_RSI_SELL": 40,           # PE: RSI <= 40 (bearish momentum)
     "REQUIRE_SUPERTREND": True,   # supertrend must agree with direction
     # === EXIT RULES (tighter — protect capital) ===
     "TARGET_PCT": 10.0,           # +10% = exit (was 15 — take profit fast)
     "MAX_STOP_PCT": 5.0,          # -5% = hard stop (percentage-based)
-    "MAX_STOP_RUPEES": 800,       # -₹800 = hard stop (absolute cap — was ₹600)
+    "MAX_STOP_RUPEES": 800,       # -₹800 = hard stop (absolute cap — protects ₹28,769 equity)
     "MAX_TRADES_PER_DAY": 6,      # was 2 — allow up to 6 quality scalps
     # === ACTIVATION ===
     "ACTIVATION_IDLE_MINUTES": 30,   # 30 min idle → activate
