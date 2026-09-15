@@ -73,6 +73,10 @@ class TigerLiveRunner:
     _ORDER_KEYS_FILE = "/tmp/tiger_placed_orders.json"
     # Persist per-position peak + target_booked — Tiger's eyes stay open across restart
     _POSITION_TRACK_FILE = "/tmp/tiger_position_peaks.json"
+    # Persist order log — exposure tracking survives restart
+    _ORDER_LOG_FILE = "/tmp/tiger_order_log.json"
+    # Persist direction blocks — 2-hour lockout survives restart
+    _DIRECTION_BLOCKS_FILE = "/tmp/tiger_direction_blocks.json"
 
     def __init__(self):
         self.broker: AngelBroker | None = None
@@ -84,7 +88,7 @@ class TigerLiveRunner:
         self._scan_lock = __import__("threading").Lock()  # prevent overlapping scans
         # Track placed order keys — load from disk, restart-safe
         self._placed_order_keys: set[str] = self._load_order_keys()
-        self._order_log: list[dict] = []
+        self._order_log: list[dict] = self._load_order_log()
         self._daily_entries_taken: dict = {}  # date → count (Brain 4 quota)
         # Scalper tracking — per-day count + last trade time
         self._scalper_trades: dict = {}  # date → count
@@ -99,7 +103,7 @@ class TigerLiveRunner:
         # If CE_BUY taken on CRUDEOIL, PE_BUY blocked for 2 hours on CRUDEOIL.
         # Prevents the Trade 2 & 3 bug (9900CE + 9900PE same day).
         # {underlying: {"direction": "BUY"/"SELL", "time": datetime, "option_type": "CE"/"PE"}}
-        self._direction_blocks: dict[str, dict] = {}
+        self._direction_blocks: dict[str, dict] = self._load_direction_blocks()
         # Real account capital — fetched from Angel One pre-market
         self.account_capital: float = 0.0
         # Capital lifecycle: start → after_entry → after_exit
@@ -199,6 +203,71 @@ class TigerLiveRunner:
                 json.dump(sorted(self._placed_order_keys), f)
         except OSError as exc:
             logger.warning(f"Order keys save fail: {exc}")
+
+    def _load_order_log(self) -> list:
+        """Load order log from disk (restart-safe exposure tracking).
+
+        Without this, a restart wipes exposure memory — Tiger thinks
+        no capital is deployed and over-trades. Loaded entries keep
+        their success/exited flags so exposure calc is correct.
+        """
+        import json
+        try:
+            with open(self._ORDER_LOG_FILE) as f:
+                return json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            return []
+
+    def _save_order_log(self):
+        """Save order log to disk — exposure tracking survives restart."""
+        import json
+        try:
+            with open(self._ORDER_LOG_FILE, "w") as f:
+                json.dump(self._order_log, f, default=str)
+        except OSError as exc:
+            logger.warning(f"Order log save fail: {exc}")
+
+    def _load_direction_blocks(self) -> dict:
+        """Load direction blocks from disk (restart-safe 2-hour lockout).
+
+        Without this, a restart wipes the lockout — Tiger can take
+        CE+PE on the same symbol within minutes (capital waste).
+        """
+        import json
+        try:
+            with open(self._DIRECTION_BLOCKS_FILE) as f:
+                raw = json.load(f)
+            blocks = {}
+            now = datetime.now()
+            for symbol, block in raw.items():
+                block_time_str = block.get("time")
+                if not block_time_str:
+                    continue
+                try:
+                    block_time = datetime.fromisoformat(block_time_str)
+                except (ValueError, TypeError):
+                    continue
+                if (now - block_time).total_seconds() < 2 * 3600:
+                    blocks[symbol] = {
+                        "option_type": block.get("option_type", ""),
+                        "time": block_time,
+                    }
+            if blocks:
+                active = ", ".join(
+                    f"{s} {b['option_type']}" for s, b in blocks.items())
+                logger.info(f"📋 Direction locks restored: {active}")
+            return blocks
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            return []
+
+    def _save_direction_blocks(self):
+        """Save direction blocks to disk — 2-hour lockout survives restart."""
+        import json
+        try:
+            with open(self._DIRECTION_BLOCKS_FILE, "w") as f:
+                json.dump(self._direction_blocks, f, default=str)
+        except OSError as exc:
+            logger.warning(f"Direction blocks save fail: {exc}")
 
     def _load_position_peaks(self) -> dict:
         """Load per-position peak + target_booked from disk (restart-safe).
@@ -373,6 +442,7 @@ class TigerLiveRunner:
         else:
             # Block expired — clear it
             del self._direction_blocks[symbol]
+            self._save_direction_blocks()
         return False
 
     def _record_direction_taken(self, symbol: str, option_type: str):
@@ -381,6 +451,7 @@ class TigerLiveRunner:
             "option_type": option_type,
             "time": datetime.now(),
         }
+        self._save_direction_blocks()
         logger.info(f"📋 Direction locked: {symbol} {option_type} for 2 hours")
 
     # ============================================================
@@ -775,6 +846,7 @@ class TigerLiveRunner:
                         for o in self._order_log:
                             if o.get("tradingsymbol") == tsym and o.get("success"):
                                 o["exited"] = True
+                        self._save_order_log()
                         # Trade log exit
                         try:
                             from replay.nightly_replay import append_trade_record
@@ -869,6 +941,7 @@ class TigerLiveRunner:
                     for o in self._order_log:
                         if o.get("tradingsymbol") == tsym and o.get("success"):
                             o["exited"] = True
+                    self._save_order_log()
                     # Trade log exit
                     try:
                         from replay.nightly_replay import append_trade_record
@@ -1285,11 +1358,13 @@ class TigerLiveRunner:
                     "time": datetime.now().isoformat(),
                     "symbol": symbol, "strike": strike,
                     "option_type": option_type,
+                    "exchange": contract["exchange"],
                     "tradingsymbol": contract["tradingsymbol"],
                     "real_ltp": real_ltp, "one_lot_cost": one_lot_cost,
                     "balance": available_balance,
                     "success": False, "error": sizing_reason,
                 })
+                self._save_order_log()
                 continue
 
             # Final safety: trade_cost must fit balance
@@ -1319,12 +1394,14 @@ class TigerLiveRunner:
                         "time": datetime.now().isoformat(),
                         "symbol": symbol, "strike": strike,
                         "option_type": option_type,
+                        "exchange": contract["exchange"],
                         "tradingsymbol": contract["tradingsymbol"],
                         "real_ltp": real_ltp,
                         "balance": available_balance,
                         "success": False, "error": "scalper_unaffordable",
                         "is_scalper": True,
                     })
+                    self._save_order_log()
                     continue
                 logger.info(
                     f"   🐅 SCALPER BYPASS — conviction gate skipped "
@@ -1352,15 +1429,17 @@ class TigerLiveRunner:
                         "time": datetime.now().isoformat(),
                         "symbol": symbol, "strike": strike,
                         "option_type": option_type,
-                    "tradingsymbol": contract["tradingsymbol"],
-                    "quantity": quantity, "real_ltp": real_ltp,
-                    "trade_cost": trade_cost,
-                    "balance": available_balance,
-                    "success": False,
-                    "error": cap_check.reason,
-                    "capital_blocked": True,
-                })
-                continue
+                        "exchange": contract["exchange"],
+                        "tradingsymbol": contract["tradingsymbol"],
+                        "quantity": quantity, "real_ltp": real_ltp,
+                        "trade_cost": trade_cost,
+                        "balance": available_balance,
+                        "success": False,
+                        "error": cap_check.reason,
+                        "capital_blocked": True,
+                    })
+                    self._save_order_log()
+                    continue
 
             if cap_check is not None:
                 logger.info(
@@ -1382,10 +1461,12 @@ class TigerLiveRunner:
                     "time": datetime.now().isoformat(),
                     "symbol": symbol, "strike": strike,
                     "option_type": option_type,
+                    "exchange": contract["exchange"],
                     "tradingsymbol": contract["tradingsymbol"],
                     "success": False,
                     "error": "direction_blocked_2h",
                 })
+                self._save_order_log()
                 continue
 
             # === 1-MINUTE VELOCITY CONFIRMATION — absolute final gate ===
@@ -1399,10 +1480,12 @@ class TigerLiveRunner:
                     "time": datetime.now().isoformat(),
                     "symbol": symbol, "strike": strike,
                     "option_type": option_type,
+                    "exchange": contract["exchange"],
                     "tradingsymbol": contract["tradingsymbol"],
                     "success": False,
                     "error": "velocity_block_1m",
                 })
+                self._save_order_log()
                 continue
 
             result = self.broker.place_option_order(
@@ -1433,6 +1516,7 @@ class TigerLiveRunner:
                         "time": datetime.now().isoformat(),
                         "symbol": symbol, "strike": strike,
                         "option_type": option_type,
+                        "exchange": contract["exchange"],
                         "tradingsymbol": contract["tradingsymbol"],
                         "quantity": quantity, "real_ltp": real_ltp,
                         "trade_cost": trade_cost,
@@ -1440,6 +1524,7 @@ class TigerLiveRunner:
                         "success": False, "error": f"REJECTED: {reject_reason}",
                         "reject_reason": reject_reason,
                     })
+                    self._save_order_log()
                     continue
 
                 # Order accepted!
@@ -1499,6 +1584,7 @@ class TigerLiveRunner:
                 "symbol": symbol, "strike": strike,
                 "option_type": option_type, "direction": direction,
                 "transaction_type": transaction_type,
+                "exchange": contract["exchange"],
                 "quantity": quantity,
                 "lot_size": real_lot_size,
                 "sim_premium": sim_premium,
@@ -1510,6 +1596,7 @@ class TigerLiveRunner:
                 "success": result.get("success", False),
                 "error": result.get("error"),
             })
+            self._save_order_log()
 
         # Update capital lifecycle
         self.capital_after_entry = available_balance
@@ -1703,6 +1790,7 @@ class TigerLiveRunner:
         for o in self._order_log:
             if o.get("success") and "NFO" in str(o.get("exchange", "")):
                 o["exited"] = True
+        self._save_order_log()
         # Update capital after exits
         self._log_capital_after_exit("NSE square-off")
 
@@ -1727,6 +1815,7 @@ class TigerLiveRunner:
         for o in self._order_log:
             if o.get("success") and "MCX" in str(o.get("exchange", "")):
                 o["exited"] = True
+        self._save_order_log()
         # Update capital after exits + logout
         self._log_capital_after_exit("MCX square-off")
         try:
