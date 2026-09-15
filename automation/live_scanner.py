@@ -139,7 +139,7 @@ def find_scalper_entry(
     zone_idx = max(0, i_15m - 1)
     zones = detect_zones(df_15m, zone_idx, lookback=zone_idx)
     if not zones:
-        logger.debug(f"🐅 {symbol}: no zones detected — no mid-entry")
+        logger.info(f"🚫 SKIP {symbol} — no supply/demand zones detected")
         return None
 
     # Find the best zone touch
@@ -153,7 +153,7 @@ def find_scalper_entry(
                 best_zone_touch = touch
 
     if best_zone is None:
-        logger.debug(f"🐅 {symbol}: zones exist but no touch — waiting for edge")
+        logger.info(f"🚫 SKIP {symbol} — zones exist but price not at zone edge (waiting)")
         return None
 
     direction = "BUY" if best_zone_touch == "demand" else "SELL"
