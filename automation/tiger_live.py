@@ -104,6 +104,8 @@ class TigerLiveRunner:
         # Prevents the Trade 2 & 3 bug (9900CE + 9900PE same day).
         # {underlying: {"direction": "BUY"/"SELL", "time": datetime, "option_type": "CE"/"PE"}}
         self._direction_blocks: dict[str, dict] = self._load_direction_blocks()
+        # Current market regime (updated during scan, used by trade log)
+        self._current_regime: str = "UNKNOWN"
         # Real account capital — fetched from Angel One pre-market
         self.account_capital: float = 0.0
         # Capital lifecycle: start → after_entry → after_exit
@@ -554,6 +556,15 @@ class TigerLiveRunner:
         logger.info("🐅 TIGER PRE-MARKET WAKE — %s", datetime.now().strftime("%A %Y-%m-%d"))
         logger.info("=" * 60)
 
+        # === TIGER MEMORY RECALL — what Tiger remembers from past trades ===
+        try:
+            from replay.tiger_memory import recall_memory
+            recall_msg = recall_memory()
+            for line in recall_msg.split("\n"):
+                logger.info(line)
+        except Exception as exc:
+            logger.warning(f"Memory recall fail: {exc}")
+
         if get_day_mode() != "TRADING":
             logger.info("Today is NOT a TRADING day — pre-market skip.")
             return
@@ -853,6 +864,7 @@ class TigerLiveRunner:
                             append_trade_record({
                                 "symbol": tsym,
                                 "tradingsymbol": tsym,
+                                "exchange": exch,
                                 "exit_time": datetime.now().isoformat(),
                                 "exit_price": ltp,
                                 "exit_reason": exit_reason,
@@ -948,6 +960,7 @@ class TigerLiveRunner:
                         append_trade_record({
                             "symbol": tsym,
                             "tradingsymbol": tsym,
+                            "exchange": exch,
                             "exit_time": datetime.now().isoformat(),
                             "exit_price": ltp,
                             "exit_reason": exit_reason,
@@ -1123,6 +1136,17 @@ class TigerLiveRunner:
         placed_count = 0
         now = datetime.now()
 
+        # === TIGER MEMORY — bad time slot warning ===
+        try:
+            from replay.tiger_memory import is_bad_time_slot
+            is_bad, slot = is_bad_time_slot(now)
+            if is_bad:
+                logger.info(
+                    f"🧠 TIGER MEMORY: ⚠️ Bad time slot {slot} — "
+                    f"historically low win rate. Trading with caution.")
+        except Exception:
+            pass
+
         # Step 1: Real balance fetch (fresh on every scan)
         # ❗ FAIL = NO orders. ₹10,000 fallback REMOVED — Tiger should not
         # place orders from a wrong balance. If balance not found, stop.
@@ -1207,6 +1231,17 @@ class TigerLiveRunner:
             # NOTE: backtest quantity is IGNORED — re-sized by Fund Brain using
             # REAL balance + REAL LTP + REAL lot size
             is_delivery = t.get("is_delivery", False)
+
+            # === TIGER MEMORY GATE — skip blacklisted symbols ===
+            try:
+                from replay.tiger_memory import is_symbol_blacklisted
+                if is_symbol_blacklisted(symbol):
+                    logger.info(
+                        f"🧠 TIGER MEMORY: SKIP {symbol} — blacklisted "
+                        f"(historically <35% win rate). Tiger remembers.")
+                    continue
+            except Exception:
+                pass  # memory system down → don't block trading
 
             # NSE hard cutoff: no NSE orders after 15:30
             # (neither intraday nor delivery — both blocked). Only MCX commodity.
@@ -1557,11 +1592,15 @@ class TigerLiveRunner:
                 # === TRADE LOG (Fix 4 — Night Replay needs this) ===
                 try:
                     from replay.nightly_replay import append_trade_record
+                    from replay.tiger_memory import _get_time_slot
                     append_trade_record({
                         "symbol": symbol,
                         "tradingsymbol": contract["tradingsymbol"],
                         "direction": direction,
                         "option_type": option_type,
+                        "exchange": contract["exchange"],
+                        "regime": self._current_regime,
+                        "time_slot": _get_time_slot(datetime.now().isoformat()),
                         "entry_time": datetime.now().isoformat(),
                         "entry_price": real_ltp,
                         "quantity": quantity,
@@ -1868,12 +1907,14 @@ class TigerLiveRunner:
     # NIGHTLY REPLAY (00:00) — audit + pattern tracking
     # ============================================================
     def nightly_replay(self):
-        """Nightly audit of today's trades + pattern tracking."""
+        """Nightly audit of today's trades + Tiger Memory Core update."""
         logger.info("=" * 60)
-        logger.info("🐅 NIGHTLY REPLAY — %s", datetime.now().strftime("%Y-%m-%d"))
+        logger.info("🐅 NIGHTLY REPLAY + MEMORY UPDATE — %s",
+                    datetime.now().strftime("%Y-%m-%d"))
         logger.info("=" * 60)
         try:
             from replay.nightly_replay import run_nightly_replay, load_trade_log
+            from replay.tiger_memory import update_memory_from_trades
             records = load_trade_log()
             result = run_nightly_replay(records)
             audit = result.get("audit", {})
@@ -1883,6 +1924,18 @@ class TigerLiveRunner:
                         audit.get("total_pnl", 0))
             for note in result.get("notes", []):
                 logger.info("  → %s", note)
+
+            # === TIGER MEMORY CORE UPDATE ===
+            mem = update_memory_from_trades(records)
+            logger.info("🧠 Tiger Memory updated:")
+            logger.info("   Total: %d trades, %d wins, ₹%.0f PnL",
+                        mem["total_trades"], mem["total_wins"], mem["total_pnl"])
+            if mem.get("blacklist"):
+                logger.info("   🚫 Blacklist: %s", ", ".join(mem["blacklist"]))
+            if mem.get("best_setups"):
+                best = mem["best_setups"][0]
+                logger.info("   🏆 Best: %s (%d%% win, ₹%.0f)",
+                            best["symbol"], best["win_rate"], best["pnl"])
         except Exception as exc:
             logger.error("Nightly replay error: %s", exc)
 
