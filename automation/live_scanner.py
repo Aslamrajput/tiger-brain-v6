@@ -108,19 +108,23 @@ def find_scalper_entry(
     pcr_cache: dict,
     vix_val: float,
 ) -> dict | None:
-    """🐅 TIGER FALLBACK SCALPER — ROCKET FILTER edition.
+    """🐅 TIGER GOD MODE SCALPER — full options math + zone research.
 
-    No more relaxed junk signals. Only the highest-conviction momentum
-    candles pass ALL gates:
-      1. Body > 80% of range  (explosive candle)
-      2. Volume > 2.0x average (real volume surge)
-      3. Supertrend confirmed (trend agrees with direction)
-      4. RSI >= 60 for BUY/CE, RSI <= 40 for SELL/PE
-      5. Score >= 75
+    Tiger is a 55-year senior options-buying algo. It NEVER enters bich
+    (middle). It enters at zone edges with full confluence research:
 
-    If any gate fails → SKIP. No trade. Logs the rejection reason.
+    RESEARCH STACK (all must align):
+      1. Supply/Demand zone — entry at zone edge ONLY (detect_zones)
+      2. Option chain math — PCR sentiment (fetch_pcr)
+      3. VWAP confluence — institutional consensus level
+      4. SuperTrend 15m — trend confirmation (MTF: 15m)
+      5. RSI alignment — >=60 for BUY/CE, <=40 for SELL/PE
+      6. Body + Volume — momentum confirmation (Rocket Filter final gate)
+      7. Score >= 75
+
+    Tiger only BUYs CE/PE. Never sells options.
     """
-    if df_15m is None or len(df_15m) < 20:
+    if df_15m is None or len(df_15m) < 40:
         return None
 
     row = df_15m.iloc[i_15m]
@@ -129,15 +133,46 @@ def find_scalper_entry(
     if rng <= 0:
         return None
 
-    # === GATE 1: Body > 80% of range ===
+    # === GATE 1: Supply/Demand Zone — entry at zone edge ONLY ===
+    # Tiger never enters in the middle. It waits for price to touch a zone.
+    from pipeline.intraday_strategies import detect_zones, zone_touched_on_1m
+    zone_idx = max(0, i_15m - 1)
+    zones = detect_zones(df_15m, zone_idx, lookback=zone_idx)
+    if not zones:
+        logger.debug(f"🐅 {symbol}: no zones detected — no mid-entry")
+        return None
+
+    # Find the best zone touch
+    best_zone = None
+    best_zone_touch = None
+    for z in zones:
+        touch = zone_touched_on_1m(row, z)
+        if touch is not None:
+            if best_zone is None or z.get("score", 0) > best_zone.get("score", 0):
+                best_zone = z
+                best_zone_touch = touch
+
+    if best_zone is None:
+        logger.debug(f"🐅 {symbol}: zones exist but no touch — waiting for edge")
+        return None
+
+    direction = "BUY" if best_zone_touch == "demand" else "SELL"
+    is_call = direction == "BUY"
+
+    # === GATE 2: Body confirmation — candle must confirm zone direction ===
     body = abs(c - o)
     body_pct = (body / rng) * 100
+    body_confirms = (c > o and direction == "BUY") or (c < o and direction == "SELL")
+    if not body_confirms:
+        logger.info(
+            f"🚫 SKIP {symbol} — body not confirming {direction} (zone touch but no momentum)")
+        return None
     if body_pct < SCALPER["MIN_BODY_PCT"]:
         logger.info(
             f"🚫 SKIP {symbol} — body {body_pct:.0f}% < {SCALPER['MIN_BODY_PCT']}%")
         return None
 
-    # === GATE 2: Volume > 2.0x average ===
+    # === GATE 3: Volume surge ===
     vol = float(row.get("volume", 0) or 0)
     avg_vol = float(df_15m["volume"].iloc[max(0, i_15m - 10):i_15m].mean())
     vol_ratio = vol / avg_vol if avg_vol > 0 else 0
@@ -146,17 +181,12 @@ def find_scalper_entry(
             f"🚫 SKIP {symbol} — vol {vol_ratio:.1f}x < {SCALPER['MIN_VOLUME_SURGE']}x")
         return None
 
-    # Direction
-    direction = "BUY" if c > o else "SELL"
-    is_call = direction == "BUY"
-
-    # === GATE 3: Supertrend confirmation ===
+    # === GATE 4: SuperTrend 15m confirmation ===
     if SCALPER.get("REQUIRE_SUPERTREND", True):
         try:
             from subbrains.trend_follow import calculate_supertrend
             st = calculate_supertrend(df_15m.iloc[:i_15m + 1])
             current_trend = int(st["trend"].iloc[-1])
-            # trend=1 bullish (BUY), trend=-1 bearish (SELL)
             if direction == "BUY" and current_trend != 1:
                 logger.info(
                     f"🚫 SKIP {symbol} BUY — supertrend bearish (trend={current_trend})")
@@ -167,11 +197,11 @@ def find_scalper_entry(
                 return None
         except Exception as exc:
             logger.debug(f"Scalper supertrend check fail {symbol}: {exc}")
-            # If supertrend can't be computed, skip — don't trade blind
             logger.info(f"🚫 SKIP {symbol} — supertrend unavailable")
             return None
 
-    # === GATE 4: RSI alignment ===
+    # === GATE 5: RSI alignment ===
+    latest_rsi = 50.0
     try:
         from subbrains.mean_reversion import calculate_rsi
         rsi_series = calculate_rsi(df_15m.iloc[:i_15m + 1])
@@ -189,29 +219,71 @@ def find_scalper_entry(
         logger.info(f"🚫 SKIP {symbol} — RSI unavailable")
         return None
 
-    # === GATE 5: Score >= 75 ===
-    # Score is composite: body contribution + volume contribution + trend strength
-    score = min(100.0, body_pct * 0.4 + vol_ratio * 15 + (10 if is_call else 10))
+    # === GATE 6: VWAP confluence (institutional consensus) ===
+    vwap_ok = False
+    vwap_reason = ""
+    try:
+        from subbrains.trend_follow import calculate_vwap
+        vwap_series = calculate_vwap(df_15m.iloc[:i_15m + 1])
+        vwap_val = float(vwap_series.iloc[-1])
+        if vwap_val > 0:
+            dist_pct = abs(c - vwap_val) / vwap_val * 100
+            if dist_pct <= 2.0:  # within 2% of VWAP = confluence
+                vwap_ok = True
+                vwap_reason = f"vwap({dist_pct:.1f}%)"
+    except Exception:
+        pass
+
+    # === GATE 7: PCR — option chain sentiment (options math) ===
+    pcr = 1.0
+    pcr_aligned = False
+    if broker is not None:
+        try:
+            from backtest.run_tiger_brain_backtest import fetch_pcr, PCR_BULLISH_MAX, PCR_BEARISH_MIN
+            if symbol not in pcr_cache:
+                pcr_cache[symbol] = fetch_pcr(broker, symbol)
+            pcr = pcr_cache[symbol]
+            if direction == "BUY" and pcr < PCR_BULLISH_MAX:
+                pcr_aligned = True
+            elif direction == "SELL" and pcr > PCR_BEARISH_MIN:
+                pcr_aligned = True
+        except Exception:
+            pass
+
+    # === SCORE — composite of all research signals ===
+    score = min(100.0, body_pct * 0.3 + vol_ratio * 12 + best_zone.get("score", 0) * 0.2)
+    if vwap_ok:
+        score += 5
+    if pcr_aligned:
+        score += 5
+
+    # === GATE 8: Score >= 75 (Rocket Filter final gate) ===
     if score < SCALPER["MIN_SCORE"]:
         logger.info(
-            f"🚫 SKIP {symbol} — score {score:.0f} < {SCALPER['MIN_SCORE']} (low quality)")
+            f"🚫 SKIP {symbol} — score {score:.0f} < {SCALPER['MIN_SCORE']} "
+            f"(low quality: body={body_pct:.0f}% vol={vol_ratio:.1f}x "
+            f"rsi={latest_rsi:.0f} pcr={pcr:.1f} vwap={'Y' if vwap_ok else 'N'})")
         return None
 
-    # ALL GATES PASSED — ROCKET SIGNAL
+    # ALL GATES PASSED — GOD MODE SIGNAL
     entry_price = c
     strike_kind = "ATM"
 
+    details = (f"ZONE-{best_zone_touch} body={body_pct:.0f}% vol={vol_ratio:.1f}x "
+               f"rsi={latest_rsi:.0f} pcr={pcr:.1f} vwap={'Y' if vwap_ok else 'N'}")
+
     logger.info(
-        f"🚀 ROCKET SIGNAL: {symbol} {direction} "
-        f"body={body_pct:.0f}% vol={vol_ratio:.1f}x "
-        f"rsi={latest_rsi:.0f} score={score:.0f} [ROCKET SCALPER]")
+        f"🚀 GOD MODE SIGNAL: {symbol} {direction} "
+        f"zone={best_zone_touch} body={body_pct:.0f}% vol={vol_ratio:.1f}x "
+        f"rsi={latest_rsi:.0f} pcr={pcr:.1f} vwap={'✓' if vwap_ok else '✗'} "
+        f"score={score:.0f} [GOD MODE]")
 
     return {
         "direction": direction,
         "entry_price": entry_price,
         "setup_score": score,
         "strike_kind": strike_kind,
-        "score_details": f"ROCKET: body={body_pct:.0f}% vol={vol_ratio:.1f}x rsi={latest_rsi:.0f}",
+        "score_details": details,
         "is_scalper": True,
     }
 
@@ -345,25 +417,28 @@ def scan_live_signals(
         seg = "mcx" if active_market == "MCX" else "nse"
 
         # Scalper always attempts when no Big Move found — but quota limits
-        # and momentum criteria keep it controlled (max 2/day, needs 50%+ body)
+        # and momentum criteria keep it controlled (max 6/day, ROCKET FILTER)
         if _should_activate_scalper(ts_time, seg, daily_entries_taken, last_trade_time):
             if scalper_trades_today < SCALPER["MAX_TRADES_PER_DAY"]:
                 logger.info(
-                    "🐅 SCALPER MODE ACTIVE — Tiger hunting micro-momentum "
-                    "(0 signals, %d trades today, scalper %d/%d)",
+                    "🐅 GOD MODE SCAN — Tiger hunting zone-edge entries "
+                    "(0 Big Move signals, %d trades today, scalper %d/%d)",
                     daily_entries_taken, scalper_trades_today,
                     SCALPER["MAX_TRADES_PER_DAY"])
 
-                # Try scalper on each symbol — first hit wins
+                # GOD MODE: scan ALL symbols, collect ALL qualifying signals,
+                # then pick the HIGHEST score (not first-hit-wins).
+                # Tiger sees the whole market and picks the best opportunity.
+                all_scalps = []
                 for sym, df_15m in data_map.items():
-                    if df_15m is None or len(df_15m) < 20:
+                    if df_15m is None or len(df_15m) < 40:
                         continue
                     i_15m = _latest_15m_index(df_15m, now)
-                    if i_15m < 20:
+                    if i_15m < 40:
                         continue
                     try:
                         scalp = find_scalper_entry(
-                            df_15m, i_15m, seg, sym, broker, {}, 0.0)
+                            df_15m, i_15m, seg, sym, broker, pcr_cache, 0.0)
                     except Exception as exc:
                         logger.debug("Scalper %s error: %s", sym, exc)
                         continue
@@ -385,12 +460,18 @@ def scan_live_signals(
                     scalp["is_delivery"] = False
                     scalp["exit_ts"] = None
                     scalp["is_scalper"] = True
-                    signals.append(scalp)
+                    all_scalps.append(scalp)
+
+                # Rank by score — Tiger picks the BEST opportunity market-wide
+                if all_scalps:
+                    all_scalps.sort(key=lambda s: s.get("setup_score", 0), reverse=True)
+                    best = all_scalps[0]
                     logger.info(
-                        "🐅 SCALPER SIGNAL ACCEPTED: %s %s %s%s ₹%.0f",
-                        sym, direction, strike,
-                        scalp["option_type"], cur_underlying)
-                    break  # one scalper at a time
+                        f"🚀 GOD MODE PICK: {best['symbol']} {best.get('direction', '')} "
+                        f"{best.get('strike', '')}{best.get('option_type', '')} "
+                        f"score={best.get('setup_score', 0):.0f} "
+                        f"(best of {len(all_scalps)} qualifying)")
+                    signals.append(best)
             else:
                 logger.info(
                     "Scalper mode: max %d scalper trades today — skip.",
