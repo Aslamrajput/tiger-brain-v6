@@ -24,10 +24,13 @@ Read flow:
   intraday_scan (every 1 min) -> get_symbol_stats() -> skip blacklisted symbols
 """
 
+from __future__ import annotations
+
 import json
 import os
 from datetime import datetime, timedelta
 from collections import defaultdict
+from typing import Optional
 
 try:
     from config.thresholds import REPLAY
@@ -359,7 +362,7 @@ def is_symbol_blacklisted(symbol: str) -> bool:
     return symbol in mem.get("blacklist", [])
 
 
-def get_symbol_stats(symbol: str) -> dict | None:
+def get_symbol_stats(symbol: str) -> Optional[dict]:
     """Get Tiger's memory stats for a specific symbol.
 
     Returns None if no history. Used by intraday_scan to decide
