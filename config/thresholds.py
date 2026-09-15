@@ -393,7 +393,7 @@ SCALPER = {
     # === EXIT RULES (tighter — protect capital) ===
     "TARGET_PCT": 10.0,           # +10% = exit (was 15 — take profit fast)
     "MAX_STOP_PCT": 5.0,          # -5% = hard stop (percentage-based)
-    "MAX_STOP_RUPEES": 600,       # -₹600 = hard stop (absolute cap)
+    "MAX_STOP_RUPEES": 800,       # -₹800 = hard stop (absolute cap — was ₹600)
     "MAX_TRADES_PER_DAY": 6,      # was 2 — allow up to 6 quality scalps
     # === ACTIVATION ===
     "ACTIVATION_IDLE_MINUTES": 30,   # 30 min idle → activate

@@ -462,16 +462,20 @@ def scan_live_signals(
                     scalp["is_scalper"] = True
                     all_scalps.append(scalp)
 
-                # Rank by score — Tiger picks the BEST opportunity market-wide
+                # Rank by score — Tiger picks the TOP 2 opportunities market-wide
                 if all_scalps:
                     all_scalps.sort(key=lambda s: s.get("setup_score", 0), reverse=True)
-                    best = all_scalps[0]
-                    logger.info(
-                        f"🚀 GOD MODE PICK: {best['symbol']} {best.get('direction', '')} "
-                        f"{best.get('strike', '')}{best.get('option_type', '')} "
-                        f"score={best.get('setup_score', 0):.0f} "
-                        f"(best of {len(all_scalps)} qualifying)")
-                    signals.append(best)
+                    top_n = min(2, len(all_scalps))
+                    for idx in range(top_n):
+                        best = all_scalps[idx]
+                        rank = idx + 1
+                        logger.info(
+                            f"🚀 GOD MODE PICK #{rank}: {best['symbol']} "
+                            f"{best.get('direction', '')} "
+                            f"{best.get('strike', '')}{best.get('option_type', '')} "
+                            f"score={best.get('setup_score', 0):.0f} "
+                            f"(rank {rank} of {len(all_scalps)} qualifying)")
+                        signals.append(best)
             else:
                 logger.info(
                     "Scalper mode: max %d scalper trades today — skip.",

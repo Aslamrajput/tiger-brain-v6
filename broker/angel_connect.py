@@ -327,6 +327,7 @@ class AngelBroker:
         product_type: str = "INTRADAY",
         order_type: str = "MARKET",
         price: float = 0.0,
+        is_exit: bool = False,
     ) -> dict:
         """Places a real option order via the Angel One SmartApi.
 
@@ -347,6 +348,17 @@ class AngelBroker:
         if transaction_type not in ("BUY", "SELL"):
             return {"success": False, "order_id": None,
                     "error": f"Invalid transaction_type: {transaction_type}"}
+
+        # === TIGER BUY-ONLY GUARD ===
+        # Tiger ONLY buys options (CE/PE). SELL is allowed ONLY for
+        # closing an existing bought position (intraday exit / square-off).
+        # A naked SELL as fresh entry is permanently BLOCKED.
+        if transaction_type == "SELL" and not is_exit:
+            logger.error(
+                f"🚫 BLOCKED naked SELL entry: {quantity} {tradingsymbol} — "
+                f"Tiger only buys options, never sells to open")
+            return {"success": False, "order_id": None,
+                    "error": "Naked SELL entry blocked — Tiger is buy-only"}
 
         params = {
             "variety": "NORMAL",
@@ -454,6 +466,7 @@ class AngelBroker:
                 tradingsymbol=sym, symboltoken=token, exchange=exch,
                 transaction_type=close_side, quantity=close_qty,
                 product_type=pos_product, order_type="MARKET",
+                is_exit=True,
             )
             if res["success"]:
                 closed += 1

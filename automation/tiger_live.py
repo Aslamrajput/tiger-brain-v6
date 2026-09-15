@@ -95,6 +95,11 @@ class TigerLiveRunner:
         self._daily_pnl: dict = {}  # date → total PnL
         self._trade_history: dict = {}  # date → list of {pnl, symbol, reason}
         self._load_risk_state()
+        # === DIRECTIONAL BLOCK — 1 symbol, 1 direction per 2 hours ===
+        # If CE_BUY taken on CRUDEOIL, PE_BUY blocked for 2 hours on CRUDEOIL.
+        # Prevents the Trade 2 & 3 bug (9900CE + 9900PE same day).
+        # {underlying: {"direction": "BUY"/"SELL", "time": datetime, "option_type": "CE"/"PE"}}
+        self._direction_blocks: dict[str, dict] = {}
         # Real account capital — fetched from Angel One pre-market
         self.account_capital: float = 0.0
         # Capital lifecycle: start → after_entry → after_exit
@@ -346,6 +351,39 @@ class TigerLiveRunner:
         return True
 
     # ============================================================
+    # DIRECTIONAL BLOCK — 1 symbol, 1 direction per 2 hours
+    # ============================================================
+    def _is_direction_blocked(self, symbol: str, option_type: str) -> bool:
+        """Check if opposite direction was taken on same symbol within 2 hours."""
+        block = self._direction_blocks.get(symbol)
+        if block is None:
+            return False
+        block_time = block.get("time")
+        if block_time is None:
+            return False
+        # 2-hour window
+        if (datetime.now() - block_time).total_seconds() < 2 * 3600:
+            blocked_type = block.get("option_type", "")
+            if blocked_type != option_type:
+                logger.info(
+                    f"🚫 DIRECTION BLOCK: {symbol} — {blocked_type} taken at "
+                    f"{block_time.strftime('%H:%M')}, opposite {option_type} blocked "
+                    f"for 2 hours")
+                return True
+        else:
+            # Block expired — clear it
+            del self._direction_blocks[symbol]
+        return False
+
+    def _record_direction_taken(self, symbol: str, option_type: str):
+        """Record that a direction was taken on a symbol."""
+        self._direction_blocks[symbol] = {
+            "option_type": option_type,
+            "time": datetime.now(),
+        }
+        logger.info(f"📋 Direction locked: {symbol} {option_type} for 2 hours")
+
+    # ============================================================
     # PRE-MARKET (09:00) — login + data load
     # ============================================================
     def pre_market_wake(self):
@@ -588,11 +626,12 @@ class TigerLiveRunner:
                 f"{'[target_booked]' if target_booked else ''}"
                 f"{' [SCALPER]' if tsym in self._scalper_positions else ''}")
 
-            # === SCALPER EXIT LOGIC (ROCKET FILTER edition) ===
-            # Tighter exits to protect capital:
-            #   - Target +10% → instant full exit
-            #   - Stop -5% OR -₹600 (whichever comes first) → instant full exit
-            #   - NO trail, NO partial booking, NO runaway — fast in, fast out
+            # === SCALPER EXIT LOGIC (GOD MODE edition) ===
+            # Tighter exits to protect capital + LOCK profit:
+            #   1. Target +10% → instant full exit
+            #   2. Stop -5% OR -₹800 (whichever comes first) → instant full exit
+            #   3. Breakeven lock: once +3% seen, stop moves to entry (no loss after profit)
+            #   4. Trail: once +3% seen, lock 70% of peak (give back only 30%)
             if tsym in self._scalper_positions:
                 from config.thresholds import SCALPER
                 exit_reason = None
@@ -600,16 +639,26 @@ class TigerLiveRunner:
 
                 loss_rupees = (entry_price - ltp) * qty
                 loss_pct = ((entry_price - ltp) / entry_price) * 100 if entry_price > 0 else 0
+                peak_gain_pct = ((peak - entry_price) / entry_price) * 100 if entry_price > 0 else 0
 
-                # Scalper target: +10% → full exit
+                # 1. Scalper target: +10% → full exit
                 if gain_pct >= SCALPER["TARGET_PCT"]:
                     exit_reason = f"scalper_target_{SCALPER['TARGET_PCT']:.0f}pct"
-                # Scalper stop: -5% percentage-based (primary)
+                # 2. Scalper stop: -5% percentage-based (primary)
                 elif loss_pct >= SCALPER["MAX_STOP_PCT"]:
                     exit_reason = f"scalper_stop_{SCALPER['MAX_STOP_PCT']:.0f}pct"
-                # Scalper stop: -₹600 absolute cap (secondary — catches low-premium options)
+                # 3. Scalper stop: -₹800 absolute cap (secondary)
                 elif loss_rupees >= SCALPER["MAX_STOP_RUPEES"]:
                     exit_reason = f"scalper_stop_₹{SCALPER['MAX_STOP_RUPEES']}"
+                # 4. Breakeven + Trail — LOCK profit once +3% seen
+                #    CRUDEOIL went +4.7% → fell to -2.7% = profit leak FIXED
+                elif peak_gain_pct >= 3.0:
+                    trail_floor = entry_price * (1 + peak_gain_pct * 0.70 / 100)
+                    if ltp <= trail_floor:
+                        if ltp >= entry_price:
+                            exit_reason = "scalper_trail_lock_70pct"
+                        else:
+                            exit_reason = "scalper_breakeven_exit"
 
                 if exit_reason:
                     pos_product = p.get("producttype", "INTRADAY")
@@ -618,7 +667,8 @@ class TigerLiveRunner:
                     result = self.broker.place_option_order(
                         tradingsymbol=tsym, symboltoken=token, exchange=exch,
                         transaction_type="SELL", quantity=exit_qty,
-                        product_type=pos_product, order_type="MARKET")
+                        product_type=pos_product, order_type="MARKET",
+                        is_exit=True)
                     if result.get("success"):
                         closed += 1
                         self._scalper_positions.discard(tsym)
@@ -656,18 +706,26 @@ class TigerLiveRunner:
 
             # === V19 EXIT LOGIC (on real broker data) ===
             # TIGHT EXIT — Tiger exits fast when wrong. No riding losers.
-            #   1. Hard stop: -20% (was -40% — too wide, bled to death)
+            #   1. Hard stop: -5% OR -₹800 max (whichever comes first)
             #   2. Breakeven lock: once +5% seen, stop moves to entry (no loss after profit)
             #   3. Trail: activates at +5%, locks 80% of peak (tighter than 70%)
             #   4. Fixed target: book 40% at +50%
             #   5. Runaway safety: exit at +250%
+            from config.thresholds import SCALPER as _SCALPER_CFG
             exit_reason = None
             exit_qty = qty
 
-            # 1. Hard stop-loss: -20% (premium drops 20% → exit immediately)
-            stop_threshold = entry_price * 0.80
+            # 1. Hard stop-loss: -5% OR -₹800 max (whichever comes first)
+            #    Tightened from -20% — BRITANNIA lost -₹2475 at -13% because
+            #    -20% was too wide. Now Tiger exits at -5% or -₹800 max.
+            stop_pct_threshold = entry_price * 0.95  # -5%
+            stop_rs_threshold = entry_price - (_SCALPER_CFG["MAX_STOP_RUPEES"] / qty)
+            stop_threshold = max(stop_pct_threshold, stop_rs_threshold)
             if ltp <= stop_threshold:
-                exit_reason = "stop_loss_20pct"
+                if stop_pct_threshold >= stop_rs_threshold:
+                    exit_reason = "stop_loss_5pct"
+                else:
+                    exit_reason = f"stop_loss_₹{_SCALPER_CFG['MAX_STOP_RUPEES']}"
 
             # 2. Breakeven lock — once position hit +5%, never take a loss on it
             elif gain_pct >= V19_TRAIL_ACTIVATE_PCT or target_booked:
@@ -705,7 +763,8 @@ class TigerLiveRunner:
                 result = self.broker.place_option_order(
                     tradingsymbol=tsym, symboltoken=token, exchange=exch,
                     transaction_type="SELL", quantity=exit_qty,
-                    product_type=pos_product, order_type="MARKET")
+                    product_type=pos_product, order_type="MARKET",
+                    is_exit=True)
                 if result.get("success"):
                     closed += 1
                     pnl = (ltp - entry_price) * exit_qty
@@ -1222,6 +1281,22 @@ class TigerLiveRunner:
             # Delivery = CARRYFORWARD (overnight), Intraday = INTRADAY
             transaction_type = "BUY"
             product_type = "CARRYFORWARD" if is_delivery else "INTRADAY"
+
+            # === DIRECTIONAL BLOCK — prevent CE+PE on same symbol within 2 hours ===
+            if self._is_direction_blocked(symbol, option_type):
+                logger.info(
+                    f"   🚫 SKIP {symbol} {option_type} — opposite direction "
+                    f"taken in last 2 hours")
+                self._order_log.append({
+                    "time": datetime.now().isoformat(),
+                    "symbol": symbol, "strike": strike,
+                    "option_type": option_type,
+                    "tradingsymbol": contract["tradingsymbol"],
+                    "success": False,
+                    "error": "direction_blocked_2h",
+                })
+                continue
+
             result = self.broker.place_option_order(
                 tradingsymbol=contract["tradingsymbol"],
                 symboltoken=contract["symboltoken"],
@@ -1265,6 +1340,9 @@ class TigerLiveRunner:
                 self._save_order_keys()  # save to disk — restart-safe
                 available_balance -= trade_cost
                 self.capital_after_entry = available_balance
+
+                # Record direction taken — blocks opposite direction for 2 hours
+                self._record_direction_taken(symbol, option_type)
 
                 # Track scalper positions for special exit rules
                 is_scalper = t.get("is_scalper", False)
@@ -1414,6 +1492,7 @@ class TigerLiveRunner:
                 quantity=qty,
                 product_type=pos_product,
                 order_type="MARKET",
+                is_exit=True,
             )
 
             if result.get("success"):
