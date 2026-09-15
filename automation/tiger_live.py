@@ -1446,11 +1446,12 @@ class TigerLiveRunner:
             setup_score = t.get("setup_score", 0.0)
             brain_alignment = count_aligned_brains(t)
             is_scalper = t.get("is_scalper", False)
+            is_momentum_hunter = t.get("is_momentum_hunter", False)
 
-            if is_scalper:
-                # SCALPER BYPASS — skips 7-brain conviction gate entirely.
-                # Scalper signals have score=50 which always fails conviction.
-                # Instead: just check affordability (cheap OTM option).
+            if is_scalper or is_momentum_hunter:
+                # SCALPER/MOMENTUM HUNTER BYPASS — skips 7-brain conviction gate.
+                # These signals have their own internal scoring + options math gate.
+                # Instead: just check affordability.
                 if trade_cost > available_balance:
                     logger.info(
                         f"   ❌ SKIP scalper {symbol} {strike}{option_type} — "
@@ -1468,8 +1469,9 @@ class TigerLiveRunner:
                     })
                     self._save_order_log()
                     continue
+                bypass_label = "MOMENTUM HUNTER" if is_momentum_hunter else "SCALPER"
                 logger.info(
-                    f"   🐅 SCALPER BYPASS — conviction gate skipped "
+                    f"   🐅 {bypass_label} BYPASS — conviction gate skipped "
                     f"(score={setup_score:.0f}, cost ₹{trade_cost:,.0f})")
                 # Scalper bypass skips cap_check — set a flag so the
                 # post-allocation logging knows to skip cap_check fields.
@@ -1604,10 +1606,15 @@ class TigerLiveRunner:
 
                 # Track scalper positions for special exit rules
                 is_scalper = t.get("is_scalper", False)
+                is_momentum_hunter = t.get("is_momentum_hunter", False)
                 if is_scalper:
                     self._scalper_positions.add(contract["tradingsymbol"])
                     self._save_scalper_positions()
                     logger.info(f"   🐅 SCALPER position tracked: {contract['tradingsymbol']}")
+                if is_momentum_hunter:
+                    self._scalper_positions.add(contract["tradingsymbol"])
+                    self._save_scalper_positions()
+                    logger.info(f"   🐅 MOMENTUM HUNTER position tracked: {contract['tradingsymbol']}")
 
                 logger.info(
                     f"   ✅ Order accepted: {order_status}")
@@ -1615,6 +1622,7 @@ class TigerLiveRunner:
                     f"   🔥 REAL ORDER: BUY {quantity} "
                     f"{contract['tradingsymbol']} ({option_type}) "
                     f"cost ₹{trade_cost:,.0f} → order_id={result['order_id']}"
+                    f"{' [MOMENTUM HUNTER]' if is_momentum_hunter else ''}"
                     f"{' [SCALPER]' if is_scalper else ''}")
                 logger.info(
                     f"   💰 Remaining balance: ₹{available_balance:,.0f}")

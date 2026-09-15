@@ -34,6 +34,7 @@ from backtest.tiger_session_brain import (
 )
 from universe.fno_universe import segment_of, is_expiry_day
 from config.thresholds import SCALPER
+from subbrains.momentum_hunter import hunt_momentum
 
 logger = logging.getLogger(__name__)
 
@@ -73,9 +74,17 @@ def _should_activate_scalper(
 
     Activates when:
       - 0 trades AND past zero-trade activation time (NSE 14:00 / MCX 21:00)
-      - OR idle 2+ hours since last trade
+      - OR idle since last trade:
+        * Morning golden window (9:15-11:30): 10 min idle → activate FAST
+        * Rest of day: 30 min idle → activate
+
+    Tiger doesn't wait in the golden window — that's when the biggest
+    moves happen. 10 minutes without a signal = activate scalper.
     """
-    idle_mins = SCALPER["ACTIVATION_IDLE_MINUTES"]
+    # Morning golden window = 10 min idle, otherwise 30 min
+    is_morning = time(9, 15) <= ts_time <= time(11, 30)
+    idle_mins = 10 if is_morning else SCALPER["ACTIVATION_IDLE_MINUTES"]
+
     # Try both cases (config uses 'MCX'/'NSE', caller may pass 'mcx'/'nse')
     zero_time_str = SCALPER["ACTIVATION_ZERO_TRADE_TIME"].get(
         segment) or SCALPER["ACTIVATION_ZERO_TRADE_TIME"].get(
@@ -95,6 +104,10 @@ def _should_activate_scalper(
         idle = (datetime.now() - last_trade_time).total_seconds() / 60
         if idle >= idle_mins and daily_trades < 5:
             return True
+
+    # Morning golden window with 0 trades: activate after just 10 min
+    if is_morning and daily_trades == 0:
+        return True
 
     return False
 
@@ -265,12 +278,31 @@ def find_scalper_entry(
             f"rsi={latest_rsi:.0f} pcr={pcr:.1f} vwap={'Y' if vwap_ok else 'N'})")
         return None
 
-    # ALL GATES PASSED — GOD MODE SIGNAL
+    # === GATE 9: OPTIONS MATH — IV percentile + delta band ===
+    # Tiger NEVER buys overpriced premium. This is Tiger's protection
+    # against the CRUDEOIL bug — ₹210 premium was overpriced, Tiger
+    # bought it anyway and lost. Now Tiger checks premium fairness.
     entry_price = c
+    strike = round(entry_price)
+    try:
+        from subbrains.momentum_hunter import options_math_gate
+        allowed, iv_bonus, math_detail = options_math_gate(
+            df_15m, i_15m, direction, strike, entry_price, vix_val, symbol)
+        if not allowed:
+            logger.info(
+                f"🚫 MATH GATE BLOCK scalper: {symbol} {direction} — {math_detail}")
+            return None
+        score += iv_bonus
+        score = min(100.0, score)
+    except Exception as exc:
+        logger.debug(f"Scalper options math fail {symbol}: {exc}")
+
+    # ALL GATES PASSED — GOD MODE SIGNAL
     strike_kind = "ATM"
 
     details = (f"ZONE-{best_zone_touch} body={body_pct:.0f}% vol={vol_ratio:.1f}x "
-               f"rsi={latest_rsi:.0f} pcr={pcr:.1f} vwap={'Y' if vwap_ok else 'N'}")
+               f"rsi={latest_rsi:.0f} pcr={pcr:.1f} vwap={'Y' if vwap_ok else 'N'} "
+               f"[{math_detail}]")
 
     logger.info(
         f"🚀 GOD MODE SIGNAL: {symbol} {direction} "
@@ -403,7 +435,71 @@ def scan_live_signals(
                     score, min_score, setup.get("score_details", ""))
         signals.append(setup)
 
-    logger.info("Live scan done @ %s: %d signal(s) from %d symbols",
+    logger.info("7-Brain scan done @ %s: %d signal(s) from %d symbols",
+                now.strftime("%H:%M"), len(signals), len(data_map))
+
+    # === 🐅 MOMENTUM HUNTER (Priority 1.5) ===
+    # Tiger ka naya dimaag — har symbol pe nazar. 7-brain ne agar signal
+    # nahi diya, Tiger MOMENTUM HUNTER chalata hai: ORB breakout, momentum
+    # spike, VWAP reclaim — with FULL OPTIONS MATH (IV + delta gate).
+    # Ye scalper se PEHLE chalta hai kyunki ye zyada powerful hai.
+    if len(signals) == 0:
+        vix_val = get_vix_for_date(now)
+        for sym, df_15m in data_map.items():
+            if df_15m is None or len(df_15m) < 40:
+                continue
+            seg = segment_of(sym)
+            session_thresh = get_session_score_threshold(ts_time, seg)
+            if session_thresh >= 999.0:
+                continue
+            i_15m = _latest_15m_index(df_15m, now)
+            if i_15m < 40:
+                continue
+            df_1m = data_map_1m.get(sym) if data_map_1m else None
+            try:
+                mh_signal = hunt_momentum(
+                    df_15m, i_15m, df_1m, seg, sym,
+                    broker, pcr_cache, vix_val, now)
+            except Exception as exc:
+                logger.debug("Momentum hunter %s error: %s", sym, exc)
+                continue
+            if mh_signal is None:
+                continue
+            # Build full signal structure
+            direction = mh_signal.get("direction", "BUY")
+            is_call = direction == "BUY"
+            cur_underlying = mh_signal.get("entry_price", 0.0)
+            strike = round(cur_underlying)
+            mh_signal["symbol"] = sym
+            mh_signal["segment"] = seg
+            mh_signal["scan_time"] = now.isoformat()
+            mh_signal["entry_ts"] = now
+            mh_signal["strike"] = strike
+            mh_signal["option_type"] = "CE" if is_call else "PE"
+            mh_signal["entry_premium"] = 0.0
+            mh_signal["is_delivery"] = False
+            mh_signal["exit_ts"] = None
+            signals.append(mh_signal)
+            logger.info(
+                f"🐅 MOMENTUM HUNTER SIGNAL: {sym} {direction} "
+                f"score={mh_signal.get('setup_score', 0):.0f} "
+                f"strat={mh_signal.get('strategy', '?')} "
+                f"[{mh_signal.get('options_math', '')}]")
+
+        if signals:
+            # Rank by score — Tiger picks the BEST momentum
+            signals.sort(key=lambda s: s.get("setup_score", 0), reverse=True)
+            top_n = min(2, len(signals))
+            for idx in range(top_n):
+                best = signals[idx]
+                logger.info(
+                    f"🐅 HUNTER PICK #{idx+1}: {best['symbol']} "
+                    f"{best.get('direction', '')} "
+                    f"score={best.get('setup_score', 0):.0f} "
+                    f"strat={best.get('strategy', '?')}")
+            signals = signals[:top_n]
+
+    logger.info("Full scan done @ %s: %d signal(s) from %d symbols",
                 now.strftime("%H:%M"), len(signals), len(data_map))
 
     # === TIGER FALLBACK SCALPER MODE (Priority 2) ===
