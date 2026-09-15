@@ -644,6 +644,19 @@ class TigerLiveRunner:
         The backtest engine generates strategy signals. Then _place_live_orders()
         converts those signals into REAL Angel One orders.
         """
+        # Prevent overlapping scans — heartbeat + scheduler can both fire.
+        # Without this lock, two concurrent scans can both pass the dedup
+        # check and place duplicate orders for the same signal.
+        if not self._scan_lock.acquire(blocking=False):
+            logger.debug("Scan already running — skip this cycle.")
+            return
+        try:
+            self._intraday_scan_inner()
+        finally:
+            self._scan_lock.release()
+
+    def _intraday_scan_inner(self):
+        """Actual scan logic — called under _scan_lock."""
         if get_day_mode() != "TRADING":
             return
         if not is_market_hours():
@@ -1542,13 +1555,9 @@ class TigerLiveRunner:
                 if mode == "TRADING" and is_market_hours() and not is_opening_range_period():
                     logger.info("❤️ Tiger heartbeat — TRADING mode (%s) — triggering scan",
                                 datetime.now().strftime("%H:%M"))
-                    if self._scan_lock.acquire(blocking=False):
-                        try:
-                            self.intraday_scan()
-                        finally:
-                            self._scan_lock.release()
-                    else:
-                        logger.debug("Scan already running (scheduler), skip manual trigger")
+                    # intraday_scan() now acquires _scan_lock internally —
+                    # if a scheduled scan is running, this call will skip.
+                    self.intraday_scan()
         except KeyboardInterrupt:
             self.stop()
 
