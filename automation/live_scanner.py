@@ -108,19 +108,17 @@ def find_scalper_entry(
     pcr_cache: dict,
     vix_val: float,
 ) -> dict | None:
-    """🐅 TIGER FALLBACK SCALPER — micro-momentum entry, NO zone required.
+    """🐅 TIGER FALLBACK SCALPER — ROCKET FILTER edition.
 
-    Tiger's "never go home empty-handed" — when no setup is found, it
-    catches a small momentum move and takes a quick entry.
+    No more relaxed junk signals. Only the highest-conviction momentum
+    candles pass ALL gates:
+      1. Body > 80% of range  (explosive candle)
+      2. Volume > 2.0x average (real volume surge)
+      3. Supertrend confirmed (trend agrees with direction)
+      4. RSI >= 60 for BUY/CE, RSI <= 40 for SELL/PE
+      5. Score >= 75
 
-    Criteria (very relaxed — NO zone touch, NO rocket gate):
-      1. Latest 15m candle body >= 50% of range (momentum candle)
-      2. Volume >= 1.1x average (small surge — not 1.3x)
-      3. Direction = candle direction (green → BUY/CE, red → SELL/PE)
-      4. Score = 50 (minimum — just momentum confirmed)
-
-    Returns:
-        dict: entry setup with is_scalper=True, or None.
+    If any gate fails → SKIP. No trade. Logs the rejection reason.
     """
     if df_15m is None or len(df_15m) < 20:
         return None
@@ -131,42 +129,89 @@ def find_scalper_entry(
     if rng <= 0:
         return None
 
+    # === GATE 1: Body > 80% of range ===
     body = abs(c - o)
     body_pct = (body / rng) * 100
     if body_pct < SCALPER["MIN_BODY_PCT"]:
+        logger.info(
+            f"🚫 SKIP {symbol} — body {body_pct:.0f}% < {SCALPER['MIN_BODY_PCT']}%")
         return None
 
-    # Volume check — 1.1x average of last 10 bars
+    # === GATE 2: Volume > 2.0x average ===
     vol = float(row.get("volume", 0) or 0)
     avg_vol = float(df_15m["volume"].iloc[max(0, i_15m - 10):i_15m].mean())
+    vol_ratio = vol / avg_vol if avg_vol > 0 else 0
     if avg_vol > 0 and vol < avg_vol * SCALPER["MIN_VOLUME_SURGE"]:
+        logger.info(
+            f"🚫 SKIP {symbol} — vol {vol_ratio:.1f}x < {SCALPER['MIN_VOLUME_SURGE']}x")
         return None
 
     # Direction
     direction = "BUY" if c > o else "SELL"
     is_call = direction == "BUY"
 
-    # Entry price = close of momentum candle
-    entry_price = c
+    # === GATE 3: Supertrend confirmation ===
+    if SCALPER.get("REQUIRE_SUPERTREND", True):
+        try:
+            from subbrains.trend_follow import calculate_supertrend
+            st = calculate_supertrend(df_15m.iloc[:i_15m + 1])
+            current_trend = int(st["trend"].iloc[-1])
+            # trend=1 bullish (BUY), trend=-1 bearish (SELL)
+            if direction == "BUY" and current_trend != 1:
+                logger.info(
+                    f"🚫 SKIP {symbol} BUY — supertrend bearish (trend={current_trend})")
+                return None
+            if direction == "SELL" and current_trend != -1:
+                logger.info(
+                    f"🚫 SKIP {symbol} SELL — supertrend bullish (trend={current_trend})")
+                return None
+        except Exception as exc:
+            logger.debug(f"Scalper supertrend check fail {symbol}: {exc}")
+            # If supertrend can't be computed, skip — don't trade blind
+            logger.info(f"🚫 SKIP {symbol} — supertrend unavailable")
+            return None
 
-    # Strike kind = ATM for scalper (quick in, quick out)
+    # === GATE 4: RSI alignment ===
+    try:
+        from subbrains.mean_reversion import calculate_rsi
+        rsi_series = calculate_rsi(df_15m.iloc[:i_15m + 1])
+        latest_rsi = float(rsi_series.iloc[-1])
+        if is_call and latest_rsi < SCALPER["MIN_RSI_BUY"]:
+            logger.info(
+                f"🚫 SKIP {symbol} BUY — RSI {latest_rsi:.0f} < {SCALPER['MIN_RSI_BUY']}")
+            return None
+        if not is_call and latest_rsi > SCALPER["MAX_RSI_SELL"]:
+            logger.info(
+                f"🚫 SKIP {symbol} SELL — RSI {latest_rsi:.0f} > {SCALPER['MAX_RSI_SELL']}")
+            return None
+    except Exception as exc:
+        logger.debug(f"Scalper RSI check fail {symbol}: {exc}")
+        logger.info(f"🚫 SKIP {symbol} — RSI unavailable")
+        return None
+
+    # === GATE 5: Score >= 75 ===
+    # Score is composite: body contribution + volume contribution + trend strength
+    score = min(100.0, body_pct * 0.4 + vol_ratio * 15 + (10 if is_call else 10))
+    if score < SCALPER["MIN_SCORE"]:
+        logger.info(
+            f"🚫 SKIP {symbol} — score {score:.0f} < {SCALPER['MIN_SCORE']} (low quality)")
+        return None
+
+    # ALL GATES PASSED — ROCKET SIGNAL
+    entry_price = c
     strike_kind = "ATM"
 
-    # Score — just 50 (momentum confirmed, that's enough for scalper)
-    score = SCALPER["MIN_SCORE"]
-
     logger.info(
-        f"🐅 SCALPER SIGNAL: {symbol} {direction} "
-        f"body={body_pct:.0f}% vol={vol / avg_vol if avg_vol > 0 else 0:.1f}x "
-        f"score={score:.0f} [FALLBACK SCALPER]"
-    )
+        f"🚀 ROCKET SIGNAL: {symbol} {direction} "
+        f"body={body_pct:.0f}% vol={vol_ratio:.1f}x "
+        f"rsi={latest_rsi:.0f} score={score:.0f} [ROCKET SCALPER]")
 
     return {
         "direction": direction,
         "entry_price": entry_price,
         "setup_score": score,
         "strike_kind": strike_kind,
-        "score_details": f"SCALPER: body={body_pct:.0f}% vol_surge={vol / avg_vol if avg_vol > 0 else 0:.1f}x",
+        "score_details": f"ROCKET: body={body_pct:.0f}% vol={vol_ratio:.1f}x rsi={latest_rsi:.0f}",
         "is_scalper": True,
     }
 

@@ -381,15 +381,33 @@ DRY_RUN = os.getenv("TIGER_BRAIN_DRY_RUN", "false").lower() == "true"
 # idle 2+ hours. Relaxes ALL gates — no zone touch required, just a
 # momentum candle with volume. Fast in, fast out.
 SCALPER = {
-    "MIN_SCORE": 50,              # very relaxed — any momentum will do
-    "MIN_BODY_PCT": 50,           # candle body >= 50% of range = momentum
-    "MIN_VOLUME_SURGE": 1.1,      # 1.1x volume (not 1.3x — relaxed)
-    "TARGET_PCT": 15.0,           # +15% = instant full exit
-    "MAX_STOP_RUPEES": 500,       # ₹500 hard stop (not ₹2000)
-    "MAX_TRADES_PER_DAY": 2,      # max 2 scalper trades/day
-    "ACTIVATION_IDLE_MINUTES": 30,   # 30 min idle → activate (was 120 — 1-min scan needs faster fallback)
+    # === ROCKET FILTER (was: relaxed 50/1.1 — took junk signals, lost money) ===
+    # Only the highest-conviction momentum candles pass. body>80%, vol>2.0x,
+    # supertrend confirmed, RSI aligned, score>=75. No more BRITANNIA-type losses.
+    "MIN_SCORE": 75,              # was 50 — only high-conviction scalps
+    "MIN_BODY_PCT": 80,           # was 50 — body must dominate the candle
+    "MIN_VOLUME_SURGE": 2.0,      # was 1.1 — need real volume explosion
+    "MIN_RSI_BUY": 60,            # CE: RSI >= 60 (bullish momentum)
+    "MAX_RSI_SELL": 40,           # PE: RSI <= 40 (bearish momentum)
+    "REQUIRE_SUPERTREND": True,   # supertrend must agree with direction
+    # === EXIT RULES (tighter — protect capital) ===
+    "TARGET_PCT": 10.0,           # +10% = exit (was 15 — take profit fast)
+    "MAX_STOP_PCT": 5.0,          # -5% = hard stop (percentage-based)
+    "MAX_STOP_RUPEES": 600,       # -₹600 = hard stop (absolute cap)
+    "MAX_TRADES_PER_DAY": 6,      # was 2 — allow up to 6 quality scalps
+    # === ACTIVATION ===
+    "ACTIVATION_IDLE_MINUTES": 30,   # 30 min idle → activate
     "ACTIVATION_ZERO_TRADE_TIME": {  # OR: 0 trades at these times
-        "NSE": "09:30",           # NSE: activate from 09:30 if 0 trades (was 14:00)
-        "MCX": "15:45",           # MCX: activate from 15:45 if 0 trades (was 21:00)
+        "NSE": "09:30",
+        "MCX": "15:45",
     },
+}
+
+# === RISK MANAGER — consecutive loss protection ===
+# Prevents death spirals: 2 losses → pause 30min, 3 losses → stop for day.
+RISK_MANAGER = {
+    "MAX_CONSECUTIVE_LOSSES": 3,       # 3 losses in a row → STOP for the day
+    "PAUSE_AFTER_LOSSES": 2,           # 2 losses → pause 30 min
+    "PAUSE_DURATION_MINUTES": 30,      # pause length
+    "MAX_TRADES_PER_DAY": 6,           # hard daily cap (all strategies combined)
 }

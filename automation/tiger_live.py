@@ -20,7 +20,7 @@ import logging
 import signal
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pandas as pd
 
@@ -89,6 +89,12 @@ class TigerLiveRunner:
         # Scalper tracking — per-day count + last trade time
         self._scalper_trades: dict = {}  # date → count
         self._last_trade_time: datetime | None = None
+        # === RISK MANAGER — consecutive loss tracking (restart-safe) ===
+        self._consecutive_losses: int = 0
+        self._pause_until: datetime | None = None
+        self._daily_pnl: dict = {}  # date → total PnL
+        self._trade_history: dict = {}  # date → list of {pnl, symbol, reason}
+        self._load_risk_state()
         # Real account capital — fetched from Angel One pre-market
         self.account_capital: float = 0.0
         # Capital lifecycle: start → after_entry → after_exit
@@ -230,6 +236,114 @@ class TigerLiveRunner:
                 json.dump(sorted(self._scalper_positions), f)
         except OSError as exc:
             logger.warning(f"Scalper positions save fail: {exc}")
+
+    # === RISK MANAGER STATE PERSISTENCE ===
+    _RISK_STATE_FILE = "/tmp/tiger_risk_state.json"
+
+    def _load_risk_state(self):
+        """Load consecutive loss count + pause state from disk (restart-safe)."""
+        import json
+        try:
+            with open(self._RISK_STATE_FILE) as f:
+                state = json.load(f)
+            self._consecutive_losses = int(state.get("consecutive_losses", 0))
+            pause_str = state.get("pause_until")
+            if pause_str:
+                self._pause_until = datetime.fromisoformat(pause_str)
+                # If pause has expired, reset
+                if self._pause_until < datetime.now():
+                    self._pause_until = None
+                    self._consecutive_losses = 0
+                    logger.info("🛡️ Risk pause expired — resuming trading.")
+            today = datetime.now().date().isoformat()
+            self._daily_pnl = {k: float(v) for k, v in state.get("daily_pnl", {}).items()}
+            self._trade_history = state.get("trade_history", {})
+        except (FileNotFoundError, json.JSONDecodeError, OSError, ValueError):
+            pass
+
+    def _save_risk_state(self):
+        """Save risk state to disk."""
+        import json
+        try:
+            state = {
+                "consecutive_losses": self._consecutive_losses,
+                "pause_until": self._pause_until.isoformat() if self._pause_until else None,
+                "daily_pnl": self._daily_pnl,
+                "trade_history": self._trade_history,
+            }
+            with open(self._RISK_STATE_FILE, "w") as f:
+                json.dump(state, f, default=str)
+        except OSError as exc:
+            logger.warning(f"Risk state save fail: {exc}")
+
+    def _record_trade_pnl(self, pnl: float, symbol: str, reason: str):
+        """Record a closed trade's PnL → update consecutive loss counter."""
+        today = datetime.now().date().isoformat()
+        self._daily_pnl[today] = self._daily_pnl.get(today, 0) + pnl
+        hist = self._trade_history.get(today, [])
+        hist.append({"pnl": pnl, "symbol": symbol, "reason": reason})
+        self._trade_history[today] = hist
+
+        if pnl < 0:
+            self._consecutive_losses += 1
+            logger.warning(
+                f"🛡️ LOSS recorded: {symbol} ₹{pnl:.0f} — "
+                f"consecutive losses: {self._consecutive_losses}")
+        else:
+            self._consecutive_losses = 0
+            logger.info(
+                f"🛡️ WIN recorded: {symbol} ₹{pnl:+.0f} — "
+                f"loss streak reset to 0")
+
+        # Check for pause/stop triggers
+        from config.thresholds import RISK_MANAGER
+        if self._consecutive_losses >= RISK_MANAGER["MAX_CONSECUTIVE_LOSSES"]:
+            logger.error(
+                f"🛑 STOP TRADING — {self._consecutive_losses} consecutive losses! "
+                f"Tiger stands down for the rest of the day.")
+            # Set pause until end of day (23:59)
+            self._pause_until = datetime.now().replace(
+                hour=23, minute=59, second=59)
+        elif self._consecutive_losses >= RISK_MANAGER["PAUSE_AFTER_LOSSES"]:
+            self._pause_until = datetime.now() + timedelta(
+                minutes=RISK_MANAGER["PAUSE_DURATION_MINUTES"])
+            logger.warning(
+                f"⏸️ PAUSE TRADING — {self._consecutive_losses} consecutive losses. "
+                f"Resuming at {self._pause_until.strftime('%H:%M')}.")
+
+        self._save_risk_state()
+
+    def _risk_manager_allows_trading(self) -> bool:
+        """Check if RiskManager allows new trades right now."""
+        # Check pause
+        if self._pause_until is not None:
+            if datetime.now() < self._pause_until:
+                remaining = (self._pause_until - datetime.now()).total_seconds() / 60
+                logger.info(
+                    f"🛡️ Risk pause active — {remaining:.0f} min remaining. "
+                    f"No new trades.")
+                return False
+            else:
+                # Pause expired — but only reset if we haven't hit the 3-loss STOP
+                from config.thresholds import RISK_MANAGER
+                if self._consecutive_losses < RISK_MANAGER["MAX_CONSECUTIVE_LOSSES"]:
+                    self._pause_until = None
+                    logger.info("🛡️ Risk pause expired — resuming trading.")
+                else:
+                    logger.info("🛡️ Daily loss STOP still active — no more trades today.")
+                    return False
+
+        # Check daily trade cap
+        from config.thresholds import RISK_MANAGER
+        today = datetime.now().date()
+        daily_count = self._daily_entries_taken.get(today, 0)
+        if daily_count >= RISK_MANAGER["MAX_TRADES_PER_DAY"]:
+            logger.info(
+                f"🛡️ Daily trade cap reached — {daily_count}/{RISK_MANAGER['MAX_TRADES_PER_DAY']}. "
+                f"No more trades today.")
+            return False
+
+        return True
 
     # ============================================================
     # PRE-MARKET (09:00) — login + data load
@@ -474,22 +588,26 @@ class TigerLiveRunner:
                 f"{'[target_booked]' if target_booked else ''}"
                 f"{' [SCALPER]' if tsym in self._scalper_positions else ''}")
 
-            # === SCALPER EXIT LOGIC (fast in, fast out) ===
-            # Scalper positions have different rules:
-            #   - Target +15% → instant full exit (no partial booking)
-            #   - Stop ₹500 loss → instant full exit
-            #   - NO trail, NO fixed target booking, NO runaway
+            # === SCALPER EXIT LOGIC (ROCKET FILTER edition) ===
+            # Tighter exits to protect capital:
+            #   - Target +10% → instant full exit
+            #   - Stop -5% OR -₹600 (whichever comes first) → instant full exit
+            #   - NO trail, NO partial booking, NO runaway — fast in, fast out
             if tsym in self._scalper_positions:
                 from config.thresholds import SCALPER
                 exit_reason = None
                 exit_qty = qty
 
-                # Scalper stop: ₹500 loss → full exit
                 loss_rupees = (entry_price - ltp) * qty
+                loss_pct = ((entry_price - ltp) / entry_price) * 100 if entry_price > 0 else 0
 
-                # Scalper target: +15% → full exit
+                # Scalper target: +10% → full exit
                 if gain_pct >= SCALPER["TARGET_PCT"]:
                     exit_reason = f"scalper_target_{SCALPER['TARGET_PCT']:.0f}pct"
+                # Scalper stop: -5% percentage-based (primary)
+                elif loss_pct >= SCALPER["MAX_STOP_PCT"]:
+                    exit_reason = f"scalper_stop_{SCALPER['MAX_STOP_PCT']:.0f}pct"
+                # Scalper stop: -₹600 absolute cap (secondary — catches low-premium options)
                 elif loss_rupees >= SCALPER["MAX_STOP_RUPEES"]:
                     exit_reason = f"scalper_stop_₹{SCALPER['MAX_STOP_RUPEES']}"
 
@@ -505,10 +623,13 @@ class TigerLiveRunner:
                         closed += 1
                         self._scalper_positions.discard(tsym)
                         self._save_scalper_positions()
+                        pnl = (ltp - entry_price) * exit_qty
                         logger.info(
                             f"📤 SCALPER EXIT {tsym}: {exit_reason} — "
                             f"SELL {exit_qty}/{qty} @ LTP ₹{ltp:.2f} "
-                            f"(gain {gain_pct:+.1f}%)")
+                            f"(gain {gain_pct:+.1f}%, PnL ₹{pnl:+.0f})")
+                        # Record PnL for RiskManager consecutive-loss tracking
+                        self._record_trade_pnl(pnl, tsym, exit_reason)
                         # Mark position as exited in order log (exposure fix)
                         for o in self._order_log:
                             if o.get("tradingsymbol") == tsym and o.get("success"):
@@ -516,7 +637,6 @@ class TigerLiveRunner:
                         # Trade log exit
                         try:
                             from replay.nightly_replay import append_trade_record
-                            pnl = (ltp - entry_price) * exit_qty
                             append_trade_record({
                                 "symbol": tsym,
                                 "tradingsymbol": tsym,
@@ -588,10 +708,13 @@ class TigerLiveRunner:
                     product_type=pos_product, order_type="MARKET")
                 if result.get("success"):
                     closed += 1
+                    pnl = (ltp - entry_price) * exit_qty
                     logger.info(
                         f"📤 EXIT {tsym}: {exit_reason} — "
                         f"SELL {exit_qty}/{qty} @ LTP ₹{ltp:.2f} "
-                        f"(gain {gain_pct:+.1f}%)")
+                        f"(gain {gain_pct:+.1f}%, PnL ₹{pnl:+.0f})")
+                    # Record PnL for RiskManager consecutive-loss tracking
+                    self._record_trade_pnl(pnl, tsym, exit_reason)
                     # Mark position as exited in order log (exposure fix)
                     for o in self._order_log:
                         if o.get("tradingsymbol") == tsym and o.get("success"):
@@ -599,7 +722,6 @@ class TigerLiveRunner:
                     # Trade log exit
                     try:
                         from replay.nightly_replay import append_trade_record
-                        pnl = (ltp - entry_price) * exit_qty
                         append_trade_record({
                             "symbol": tsym,
                             "tradingsymbol": tsym,
@@ -727,6 +849,13 @@ class TigerLiveRunner:
                 last_trade_time=self._last_trade_time,
                 scalper_trades_today=scalper_today,
             )
+
+            # === RISK MANAGER GATE — block new entries if paused/stopped ===
+            if signals and not self._risk_manager_allows_trading():
+                logger.info(
+                    "🛡️ RiskManager BLOCKED %d signals — no new trades this cycle.",
+                    len(signals))
+                signals = []  # wipe signals — monitor exits still run
 
             placed = self._place_live_orders(signals)
 
@@ -1491,6 +1620,13 @@ class TigerLiveRunner:
             run_daily_cleanup(broker=broker)
         except Exception as exc:
             logger.error("Daily cleanup error: %s", exc)
+
+        # === RISK MANAGER — daily reset ===
+        # New day → fresh slate for consecutive losses + trade cap.
+        self._consecutive_losses = 0
+        self._pause_until = None
+        self._save_risk_state()
+        logger.info("🛡️ RiskManager reset — consecutive losses cleared, pause lifted.")
 
     # ============================================================
     # START — wire all jobs + run scheduler
