@@ -36,7 +36,7 @@ from automation.scheduler import (
     TigerBrainScheduler, get_day_mode, get_active_market, is_market_hours, is_opening_range_period,
     is_mcx_hours,
 )
-from data.loader import resolve_option_contract, OPTION_INSTRUMENT_TYPE
+from data.loader import resolve_option_contract, OPTION_INSTRUMENT_TYPE, find_affordable_option
 from config.thresholds import AUTOMATION, MARKET_CATEGORIES
 from backtest.tiger_fund_brain import announce_fund_plan, size_trade_with_fund_brain
 from risk.capital_manager import CapitalManager
@@ -509,6 +509,10 @@ class TigerLiveRunner:
                             f"📤 SCALPER EXIT {tsym}: {exit_reason} — "
                             f"SELL {exit_qty}/{qty} @ LTP ₹{ltp:.2f} "
                             f"(gain {gain_pct:+.1f}%)")
+                        # Mark position as exited in order log (exposure fix)
+                        for o in self._order_log:
+                            if o.get("tradingsymbol") == tsym and o.get("success"):
+                                o["exited"] = True
                         # Trade log exit
                         try:
                             from replay.nightly_replay import append_trade_record
@@ -588,6 +592,10 @@ class TigerLiveRunner:
                         f"📤 EXIT {tsym}: {exit_reason} — "
                         f"SELL {exit_qty}/{qty} @ LTP ₹{ltp:.2f} "
                         f"(gain {gain_pct:+.1f}%)")
+                    # Mark position as exited in order log (exposure fix)
+                    for o in self._order_log:
+                        if o.get("tradingsymbol") == tsym and o.get("success"):
+                            o["exited"] = True
                     # Trade log exit
                     try:
                         from replay.nightly_replay import append_trade_record
@@ -885,10 +893,11 @@ class TigerLiveRunner:
 
             one_lot_cost = real_lot_size * real_ltp
 
-            # Current exposure: total deployed capital in open positions
+            # Current exposure: deployed capital in OPEN positions only.
+            # Closed/exited positions must NOT count (they no longer use margin).
             current_exposure = sum(
                 float(o.get("trade_cost", 0)) for o in self._order_log
-                if o.get("success")
+                if o.get("success") and not o.get("exited", False)
             )
 
             # MCX MINI fallback — if a full-size MCX contract is not affordable,
@@ -918,6 +927,40 @@ class TigerLiveRunner:
                         real_lot_size = mini_lot
                         real_ltp = mini_ltp
                         one_lot_cost = mini_one_lot
+
+            # === ZERO-TO-HERO OTM FALLBACK ===
+            # If ATM/ITM option is still unaffordable after MINI fallback,
+            # walk OTM strikes until we find one that fits the balance.
+            # This is how Tiger trades MCX with a small account.
+            if one_lot_cost > available_balance:
+                affordable = find_affordable_option(
+                    underlying=symbol,
+                    atm_strike=float(strike),
+                    option_type=option_type,
+                    balance=available_balance,
+                    broker=self.broker,
+                )
+                if affordable is not None:
+                    logger.info(
+                        f"   🚀 ZERO-TO-HERO: {symbol} {strike}{option_type} "
+                        f"→ strike {affordable['strike']}{option_type} "
+                        f"(premium ₹{affordable['ltp']:.2f}, "
+                        f"1 lot ₹{affordable['one_lot_cost']:,.0f})")
+                    contract = {
+                        "tradingsymbol": affordable["tradingsymbol"],
+                        "symboltoken": affordable["symboltoken"],
+                        "exchange": affordable["exchange"],
+                        "lotsize": affordable["lotsize"],
+                    }
+                    real_lot_size = affordable["lotsize"]
+                    real_ltp = affordable["ltp"]
+                    one_lot_cost = affordable["one_lot_cost"]
+                    strike = affordable["strike"]
+                else:
+                    logger.info(
+                        f"   ❌ NO AFFORDABLE STRIKE — {symbol} {strike}{option_type} "
+                        f"min 1 lot ₹{one_lot_cost:,.0f} > balance ₹{available_balance:,.0f}, "
+                        f"no OTM strike affordable within 15 steps")
 
             # 🔥 FUND BRAIN LIVE SIZING — real balance + real LTP + real lot
             re_size = self._live_re_size(
@@ -1323,6 +1366,10 @@ class TigerLiveRunner:
             logger.info("✅ NSE square-off: %d positions closed.", closed)
         except Exception as exc:
             logger.error("❌ NSE square-off error: %s", exc)
+        # Mark ALL NFO positions as exited in order log (exposure fix)
+        for o in self._order_log:
+            if o.get("success") and "NFO" in str(o.get("exchange", "")):
+                o["exited"] = True
         # Update capital after exits
         self._log_capital_after_exit("NSE square-off")
 
@@ -1343,6 +1390,10 @@ class TigerLiveRunner:
             logger.info("✅ MCX square-off: %d positions closed.", closed)
         except Exception as exc:
             logger.error("❌ MCX square-off error: %s", exc)
+        # Mark ALL MCX positions as exited in order log (exposure fix)
+        for o in self._order_log:
+            if o.get("success") and "MCX" in str(o.get("exchange", "")):
+                o["exited"] = True
         # Update capital after exits + logout
         self._log_capital_after_exit("MCX square-off")
         try:

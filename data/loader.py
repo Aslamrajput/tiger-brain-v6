@@ -840,6 +840,85 @@ def resolve_option_contract(
     }
 
 
+def find_affordable_option(
+    underlying: str,
+    atm_strike: float,
+    option_type: str,
+    balance: float,
+    broker=None,
+    max_otm_steps: int = 15,
+) -> dict | None:
+    """Find an affordable option strike — walks OTM until 1 lot fits balance.
+
+    Tries ATM first. If unaffordable, steps further OTM (cheaper premium)
+    until a single lot costs <= balance. This is Tiger's zero-to-hero mode:
+    buy cheap OTM options when ATM is too expensive for small accounts.
+
+    Args:
+        underlying: 'NIFTY', 'SILVERM', 'CRUDEOIL', etc.
+        atm_strike: ATM strike price (underlying close)
+        option_type: 'CE' or 'PE'
+        balance: available capital (₹)
+        broker: broker instance for LTP fetch (optional — estimates from
+                strike distance if None)
+        max_otm_steps: max OTM strikes to try before giving up
+
+    Returns:
+        {'tradingsymbol', 'symboltoken', 'exchange', 'lotsize', 'strike',
+         'ltp', 'one_lot_cost'} or None if nothing affordable found.
+    """
+    chain = get_option_chain_instruments(underlying)
+    if chain is None or chain.empty:
+        return None
+
+    matches = chain[chain["option_type"] == option_type].copy()
+    if matches.empty:
+        return None
+
+    # Sort by distance from ATM — CE: ascending (higher strike = OTM)
+    # PE: descending (lower strike = OTM)
+    if option_type == "CE":
+        matches = matches[matches["strike"] >= atm_strike].sort_values("strike")
+    else:
+        matches = matches[matches["strike"] <= atm_strike].sort_values(
+            "strike", ascending=False)
+
+    for _, row in matches.head(max_otm_steps).iterrows():
+        strike = float(row["strike"])
+        lot = int(row["lotsize"])
+
+        # Get real LTP if broker available
+        ltp = 0.0
+        if broker is not None:
+            try:
+                ltp = broker.ws_get_ltp(
+                    row["symbol"], str(row["token"]),
+                    OPTION_INSTRUMENT_TYPE.get(underlying, ("OPTSTK", "NFO"))[1],
+                )
+            except Exception:
+                ltp = 0.0
+
+        # Rough OTM premium estimate if LTP unavailable
+        if ltp <= 0:
+            otm_distance = abs(strike - atm_strike) / atm_strike
+            ltp = max(5.0, atm_strike * 0.005 * (1 - otm_distance * 5))
+
+        one_lot_cost = lot * ltp
+        if one_lot_cost <= balance and one_lot_cost > 0:
+            _, exchange = OPTION_INSTRUMENT_TYPE.get(underlying, ("OPTSTK", "NFO"))
+            return {
+                "tradingsymbol": row["symbol"],
+                "symboltoken": str(row["token"]),
+                "exchange": exchange,
+                "lotsize": lot,
+                "strike": strike,
+                "ltp": ltp,
+                "one_lot_cost": one_lot_cost,
+            }
+
+    return None
+
+
 def fetch_option_chain_oi(
     broker, underlying: str = "NIFTY", expiry_date: str = None, strikes_around_atm: int = 10
 ) -> pd.DataFrame:
