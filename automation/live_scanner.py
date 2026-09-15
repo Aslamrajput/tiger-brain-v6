@@ -76,17 +76,24 @@ def _should_activate_scalper(
       - OR idle 2+ hours since last trade
     """
     idle_mins = SCALPER["ACTIVATION_IDLE_MINUTES"]
+    # Try both cases (config uses 'MCX'/'NSE', caller may pass 'mcx'/'nse')
     zero_time_str = SCALPER["ACTIVATION_ZERO_TRADE_TIME"].get(
-        segment, "21:00" if segment == "mcx" else "14:00")
+        segment) or SCALPER["ACTIVATION_ZERO_TRADE_TIME"].get(
+        segment.upper()) or SCALPER["ACTIVATION_ZERO_TRADE_TIME"].get(
+        segment.lower()) or ("21:00" if segment.lower() == "mcx" else "14:00")
     zh, zm = map(int, zero_time_str.split(":"))
     zero_activate = time(zh, zm) <= ts_time
 
     if daily_trades == 0 and zero_activate:
         return True
 
+    # Idle activation: if Tiger has been idle for idle_mins and hasn't
+    # hit the daily trade cap, activate scalper to keep hunting.
+    # This works even when last_trade_time is None (fresh start past
+    # zero_time) — zero_activate already covers that case above.
     if last_trade_time is not None:
         idle = (datetime.now() - last_trade_time).total_seconds() / 60
-        if idle >= idle_mins and daily_trades < 3:
+        if idle >= idle_mins and daily_trades < 5:
             return True
 
     return False
