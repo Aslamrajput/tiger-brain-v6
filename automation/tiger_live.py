@@ -1037,6 +1037,9 @@ class TigerLiveRunner:
                 logger.info(
                     f"   🐅 SCALPER BYPASS — conviction gate skipped "
                     f"(score={setup_score:.0f}, cost ₹{trade_cost:,.0f})")
+                # Scalper bypass skips cap_check — set a flag so the
+                # post-allocation logging knows to skip cap_check fields.
+                cap_check = None
             else:
                 cap_check = CapitalManager(self.broker).check_and_allocate(
                     setup_score=setup_score,
@@ -1067,10 +1070,11 @@ class TigerLiveRunner:
                 })
                 continue
 
-            logger.info(
-                f"   💰 Capital tier: {cap_check.conviction_tier} "
-                f"({cap_check.conviction_multiplier:.0%} of margin) | "
-                f"Allocated: ₹{cap_check.allocated_capital:,.0f}")
+            if cap_check is not None:
+                logger.info(
+                    f"   💰 Capital tier: {cap_check.conviction_tier} "
+                    f"({cap_check.conviction_multiplier:.0%} of margin) | "
+                    f"Allocated: ₹{cap_check.allocated_capital:,.0f}")
 
             # Step 6: Place REAL BUY order (Tiger always buys options)
             # Delivery = CARRYFORWARD (overnight), Intraday = INTRADAY
