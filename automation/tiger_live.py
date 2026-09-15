@@ -509,6 +509,22 @@ class TigerLiveRunner:
                             f"📤 SCALPER EXIT {tsym}: {exit_reason} — "
                             f"SELL {exit_qty}/{qty} @ LTP ₹{ltp:.2f} "
                             f"(gain {gain_pct:+.1f}%)")
+                        # Trade log exit
+                        try:
+                            from replay.nightly_replay import append_trade_record
+                            pnl = (ltp - entry_price) * exit_qty
+                            append_trade_record({
+                                "symbol": tsym,
+                                "tradingsymbol": tsym,
+                                "exit_time": datetime.now().isoformat(),
+                                "exit_price": ltp,
+                                "exit_reason": exit_reason,
+                                "pnl": pnl,
+                                "status": "CLOSED",
+                                "is_scalper": True,
+                            })
+                        except Exception:
+                            pass
                     else:
                         logger.error(
                             f"❌ SCALPER EXIT FAIL {tsym}: {exit_reason} — {result.get('error')}")
@@ -572,6 +588,22 @@ class TigerLiveRunner:
                         f"📤 EXIT {tsym}: {exit_reason} — "
                         f"SELL {exit_qty}/{qty} @ LTP ₹{ltp:.2f} "
                         f"(gain {gain_pct:+.1f}%)")
+                    # Trade log exit
+                    try:
+                        from replay.nightly_replay import append_trade_record
+                        pnl = (ltp - entry_price) * exit_qty
+                        append_trade_record({
+                            "symbol": tsym,
+                            "tradingsymbol": tsym,
+                            "exit_time": datetime.now().isoformat(),
+                            "exit_price": ltp,
+                            "exit_reason": exit_reason,
+                            "pnl": pnl,
+                            "status": "CLOSED",
+                            "is_scalper": False,
+                        })
+                    except Exception:
+                        pass
                 else:
                     logger.error(
                         f"❌ EXIT FAIL {tsym}: {exit_reason} — {result.get('error')}")
@@ -938,26 +970,50 @@ class TigerLiveRunner:
             # alignment. Prevents margin rejection before order hits RMS.
             setup_score = t.get("setup_score", 0.0)
             brain_alignment = count_aligned_brains(t)
+            is_scalper = t.get("is_scalper", False)
 
-            cap_check = CapitalManager(self.broker).check_and_allocate(
-                setup_score=setup_score,
-                brain_alignment=brain_alignment,
-                trade_cost_estimate=trade_cost,
-                open_positions_cost=current_exposure,
-                min_allocation=one_lot_cost,
-            )
-            if not cap_check.allowed:
+            if is_scalper:
+                # SCALPER BYPASS — skips 7-brain conviction gate entirely.
+                # Scalper signals have score=50 which always fails conviction.
+                # Instead: just check affordability (cheap OTM option).
+                if trade_cost > available_balance:
+                    logger.info(
+                        f"   ❌ SKIP scalper {symbol} {strike}{option_type} — "
+                        f"cost ₹{trade_cost:,.0f} > balance ₹{available_balance:,.0f}")
+                    self._order_log.append({
+                        "time": datetime.now().isoformat(),
+                        "symbol": symbol, "strike": strike,
+                        "option_type": option_type,
+                        "tradingsymbol": contract["tradingsymbol"],
+                        "real_ltp": real_ltp,
+                        "balance": available_balance,
+                        "success": False, "error": "scalper_unaffordable",
+                        "is_scalper": True,
+                    })
+                    continue
                 logger.info(
-                    f"   🛑 CAPITAL BLOCK: {symbol} {strike}{option_type} — "
-                    f"{cap_check.reason}")
-                logger.info(
-                    f"      Available: ₹{cap_check.available_funds:,.0f} | "
-                    f"Deployed: ₹{cap_check.deployed_capital:,.0f} | "
-                    f"Free: ₹{cap_check.free_disposable:,.0f}")
-                self._order_log.append({
-                    "time": datetime.now().isoformat(),
-                    "symbol": symbol, "strike": strike,
-                    "option_type": option_type,
+                    f"   🐅 SCALPER BYPASS — conviction gate skipped "
+                    f"(score={setup_score:.0f}, cost ₹{trade_cost:,.0f})")
+            else:
+                cap_check = CapitalManager(self.broker).check_and_allocate(
+                    setup_score=setup_score,
+                    brain_alignment=brain_alignment,
+                    trade_cost_estimate=trade_cost,
+                    open_positions_cost=current_exposure,
+                    min_allocation=one_lot_cost,
+                )
+                if not cap_check.allowed:
+                    logger.info(
+                        f"   🛑 CAPITAL BLOCK: {symbol} {strike}{option_type} — "
+                        f"{cap_check.reason}")
+                    logger.info(
+                        f"      Available: ₹{cap_check.available_funds:,.0f} | "
+                        f"Deployed: ₹{cap_check.deployed_capital:,.0f} | "
+                        f"Free: ₹{cap_check.free_disposable:,.0f}")
+                    self._order_log.append({
+                        "time": datetime.now().isoformat(),
+                        "symbol": symbol, "strike": strike,
+                        "option_type": option_type,
                     "tradingsymbol": contract["tradingsymbol"],
                     "quantity": quantity, "real_ltp": real_ltp,
                     "trade_cost": trade_cost,
@@ -1037,6 +1093,27 @@ class TigerLiveRunner:
                     f"{' [SCALPER]' if is_scalper else ''}")
                 logger.info(
                     f"   💰 Remaining balance: ₹{available_balance:,.0f}")
+
+                # === TRADE LOG (Fix 4 — Night Replay needs this) ===
+                try:
+                    from replay.nightly_replay import append_trade_record
+                    append_trade_record({
+                        "symbol": symbol,
+                        "tradingsymbol": contract["tradingsymbol"],
+                        "direction": direction,
+                        "option_type": option_type,
+                        "entry_time": datetime.now().isoformat(),
+                        "entry_price": real_ltp,
+                        "quantity": quantity,
+                        "trade_cost": trade_cost,
+                        "setup_score": setup_score,
+                        "brain_alignment": brain_alignment,
+                        "is_scalper": is_scalper,
+                        "order_id": result.get("order_id"),
+                        "status": "OPEN",
+                    })
+                except Exception as exc:
+                    logger.warning(f"Trade log save fail: {exc}")
             else:
                 logger.error(
                     f"   ❌ Order fail: BUY {quantity} "

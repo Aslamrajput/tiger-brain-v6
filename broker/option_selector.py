@@ -154,16 +154,31 @@ def select_option(chain_snapshot: dict, direction: str) -> dict:
 
     # --- Step 2: delta band filter (ATM/slightly-ITM preference) ---
     # PE deltas are negative — check magnitude, not sign.
+    # Two-tier band: try ITM/ATM first (0.45-0.75), fall back to OTM (0.15-0.45)
+    # if no ITM/ATM candidate found. OTM = cheaper premium = affordable
+    # for small accounts (zero-to-hero mode).
     in_band = []
+    otm_fallback = []
     for c in candidates:
         delta = estimate_delta(c, underlying, option_type)
-        if BRAIN3["MIN_DELTA"] <= abs(delta) <= BRAIN3["MAX_DELTA"]:
-            in_band.append((c, abs(delta)))
+        abs_delta = abs(delta)
+        if BRAIN3["MIN_DELTA"] <= abs_delta <= BRAIN3["MAX_DELTA"]:
+            in_band.append((c, abs_delta))
+        elif 0.15 <= abs_delta < BRAIN3["MIN_DELTA"]:
+            # OTM fallback — cheaper premium, still tradeable
+            otm_fallback.append((c, abs_delta))
         else:
             reasons.append(
                 f"strike {c.get('strike')} — delta {delta:.2f} outside "
                 f"band [{BRAIN3['MIN_DELTA']}, {BRAIN3['MAX_DELTA']}]"
             )
+
+    if not in_band and otm_fallback:
+        in_band = otm_fallback
+        reasons.append(
+            f"OTM fallback activated — {len(otm_fallback)} cheap strikes "
+            f"(delta 0.15-{BRAIN3['MIN_DELTA']}) selected for affordability"
+        )
 
     if not in_band:
         reasons.append("no contract found within the delta band")
