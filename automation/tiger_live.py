@@ -86,6 +86,7 @@ class TigerLiveRunner:
         self.instrument_master = None
         self._running = False
         self._scan_lock = __import__("threading").Lock()  # prevent overlapping scans
+        self._batch_keys: set = set()  # per-scan dedup — cleared each scan
         # Track placed order keys — load from disk, restart-safe
         self._placed_order_keys: set[str] = self._load_order_keys()
         self._order_log: list[dict] = self._load_order_log()
@@ -784,27 +785,41 @@ class TigerLiveRunner:
 
             gain_pct = (ltp - entry_price) / entry_price * 100
 
-            # Position tracker load (peak + target_booked)
+            # Position tracker load (peak + target_booked + entry_time)
             tracker = self._position_peaks.get(tsym, {})
             peak = max(float(tracker.get("peak", 0) or 0), ltp, entry_price)
             target_booked = bool(tracker.get("target_booked", False))
+            entry_time = tracker.get("entry_time")
+            if not entry_time:
+                entry_time = datetime.now().isoformat()
             self._position_peaks[tsym] = {
                 "peak": peak, "target_booked": target_booked,
                 "entry": entry_price,
+                "entry_time": entry_time,
             }
 
+            # Calculate hold time once — used by both log and scalper exit
+            hold_seconds = 9999  # default: no min hold restriction
+            try:
+                hold_seconds = (datetime.now() - datetime.fromisoformat(entry_time)).total_seconds()
+            except (ValueError, TypeError):
+                pass
+
+            hold_str = f"{hold_seconds/60:.0f}m" if hold_seconds < 9999 else "?"
             logger.info(
                 f"👁️ {tsym}: entry=₹{entry_price:.2f} ltp=₹{ltp:.2f} "
                 f"gain={gain_pct:+.1f}% peak=₹{peak:.2f} "
-                f"{'[target_booked]' if target_booked else ''}"
+                f"held={hold_str}"
+                f"{' [target_booked]' if target_booked else ''}"
                 f"{' [SCALPER]' if tsym in self._scalper_positions else ''}")
 
-            # === SCALPER EXIT LOGIC (GOD MODE edition) ===
-            # Tighter exits to protect capital + LOCK profit:
-            #   1. Target +10% → instant full exit
-            #   2. Stop -5% OR -₹800 (whichever comes first) → instant full exit
-            #   3. Breakeven lock: once +3% seen, stop moves to entry (no loss after profit)
-            #   4. Trail: once +3% seen, lock 70% of peak (give back only 30%)
+            # === SCALPER EXIT LOGIC (MOMENTUM-AWARE edition) ===
+            # Give trades room to breathe — momentum needs time to develop.
+            #   1. Target +15% → instant full exit (let profit run higher)
+            #   2. Catastrophic -12% → instant exit (black swan, no hold time)
+            #   3. After 3-min min hold: -7% OR -₹1500 → exit
+            #   4. Breakeven lock: once +3% seen, stop moves to entry
+            #   5. Trail: once +3% seen, lock 70% of peak
             if tsym in self._scalper_positions:
                 from config.thresholds import SCALPER
                 exit_reason = None
@@ -814,14 +829,19 @@ class TigerLiveRunner:
                 loss_pct = ((entry_price - ltp) / entry_price) * 100 if entry_price > 0 else 0
                 peak_gain_pct = ((peak - entry_price) / entry_price) * 100 if entry_price > 0 else 0
 
-                # 1. Scalper target: +10% → full exit
+                min_hold = SCALPER.get("MIN_HOLD_SECONDS", 180)
+                past_min_hold = hold_seconds >= min_hold
+
+                # 1. Scalper target: +15% → full exit (let momentum run to 15%)
                 if gain_pct >= SCALPER["TARGET_PCT"]:
                     exit_reason = f"scalper_target_{SCALPER['TARGET_PCT']:.0f}pct"
-                # 2. Scalper stop: -5% percentage-based (primary)
-                elif loss_pct >= SCALPER["MAX_STOP_PCT"]:
+                # 2. Catastrophic stop: -12% → instant exit (black swan, no hold time)
+                elif loss_pct >= SCALPER.get("CATASTROPHIC_STOP_PCT", 12.0):
+                    exit_reason = f"scalper_catastrophic_{SCALPER.get('CATASTROPHIC_STOP_PCT', 12.0):.0f}pct"
+                # 3. Normal stop: -7% OR -₹1500 — ONLY after min hold time
+                elif past_min_hold and loss_pct >= SCALPER["MAX_STOP_PCT"]:
                     exit_reason = f"scalper_stop_{SCALPER['MAX_STOP_PCT']:.0f}pct"
-                # 3. Scalper stop: -₹800 absolute cap (secondary)
-                elif loss_rupees >= SCALPER["MAX_STOP_RUPEES"]:
+                elif past_min_hold and loss_rupees >= SCALPER["MAX_STOP_RUPEES"]:
                     exit_reason = f"scalper_stop_₹{SCALPER['MAX_STOP_RUPEES']}"
                 # 4. Breakeven + Trail — LOCK profit once +3% seen
                 #    CRUDEOIL went +4.7% → fell to -2.7% = profit leak FIXED
@@ -847,10 +867,12 @@ class TigerLiveRunner:
                         self._scalper_positions.discard(tsym)
                         self._save_scalper_positions()
                         pnl = (ltp - entry_price) * exit_qty
+                        hold_str = f"{hold_seconds/60:.1f}min" if hold_seconds < 9999 else "?"
                         logger.info(
                             f"📤 SCALPER EXIT {tsym}: {exit_reason} — "
                             f"SELL {exit_qty}/{qty} @ LTP ₹{ltp:.2f} "
-                            f"(gain {gain_pct:+.1f}%, PnL ₹{pnl:+.0f})")
+                            f"(held {hold_str}, gain {gain_pct:+.1f}%, "
+                            f"PnL ₹{pnl:+.0f})")
                         # Record PnL for RiskManager consecutive-loss tracking
                         self._record_trade_pnl(pnl, tsym, exit_reason)
                         # Mark position as exited in order log (exposure fix)
@@ -1135,6 +1157,7 @@ class TigerLiveRunner:
         today = datetime.now().date()
         placed_count = 0
         now = datetime.now()
+        self._batch_keys.clear()  # fresh dedup for this scan batch
 
         # === TIGER MEMORY — bad time slot warning ===
         try:
@@ -1259,10 +1282,17 @@ class TigerLiveRunner:
                     f"NSE intraday blocked after 3PM, only delivery/MCX")
                 continue
 
-            # Duplicate check
+            # Duplicate check — two-tier protection:
+            # 1. _placed_order_keys: permanent (survives restart) — prevents
+            #    re-entering a trade that was already placed today.
+            # 2. _batch_keys: per-scan only — prevents two identical trades
+            #    in the SAME scan batch from both getting placed.
             order_key = f"{symbol}_{strike}_{option_type}_{trade_date}"
             if order_key in self._placed_order_keys:
                 continue
+            if order_key in self._batch_keys:
+                continue
+            self._batch_keys.add(order_key)
 
             # Step 2: Resolve contract with real lot_size
             contract = resolve_option_contract(symbol, strike, option_type)
@@ -1565,7 +1595,7 @@ class TigerLiveRunner:
                 # Order accepted!
                 placed_count += 1
                 self._placed_order_keys.add(order_key)
-                self._save_order_keys()  # save to disk — restart-safe
+                self._save_order_keys()  # permanent — survives restart
                 available_balance -= trade_cost
                 self.capital_after_entry = available_balance
 

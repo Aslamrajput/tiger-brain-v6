@@ -391,11 +391,16 @@ SCALPER = {
     "MIN_RSI_BUY": 60,            # CE: RSI >= 60 (bullish momentum)
     "MAX_RSI_SELL": 40,           # PE: RSI <= 40 (bearish momentum)
     "REQUIRE_SUPERTREND": True,   # supertrend must agree with direction
-    # === EXIT RULES (tighter — protect capital) ===
-    "TARGET_PCT": 10.0,           # +10% = exit (was 15 — take profit fast)
-    "MAX_STOP_PCT": 5.0,          # -5% = hard stop (percentage-based)
-    "MAX_STOP_RUPEES": 800,       # -₹800 = hard stop (absolute cap — protects ₹28,769 equity)
+    # === EXIT RULES (momentum-aware — give trades room to breathe) ===
+    "TARGET_PCT": 15.0,           # +15% = exit (let momentum run, don't exit too early)
+    "MAX_STOP_PCT": 7.0,          # -7% = hard stop (premium-aware: 7% of ₹210 = ₹14.7 × 100 = ₹1,470)
+    "MAX_STOP_RUPEES": 1500,      # -₹1500 = absolute cap (protects capital, but gives room)
+    "MIN_HOLD_SECONDS": 180,      # 3-min minimum hold before SL triggers (momentum needs time)
+    "CATASTROPHIC_STOP_PCT": 12.0, # -12% = instant exit even during min hold (black swan protection)
     "MAX_TRADES_PER_DAY": 6,      # was 2 — allow up to 6 quality scalps
+    # === RE-ENTRY (Tiger doesn't give up on a fish) ===
+    "REENTRY_COOLDOWN_MINUTES": 5,  # after SL, wait 5 min before re-entering SAME symbol+direction
+    "REENTRY_MAX_PER_SYMBOL": 2,    # max 2 re-entries per symbol per day (don't chase losses)
     # === ACTIVATION ===
     "ACTIVATION_IDLE_MINUTES": 30,   # 30 min idle → activate
     "ACTIVATION_ZERO_TRADE_TIME": {  # OR: 0 trades at these times
