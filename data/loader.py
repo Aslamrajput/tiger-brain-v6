@@ -827,8 +827,14 @@ def resolve_option_contract(
         & (chain["strike"] == float(strike))
     ]
     if matches.empty:
-        nearest_idx = (chain["strike"] - float(strike)).abs().idxmin()
-        matches = chain.loc[[nearest_idx]]
+        # BUGFIX: filter by option_type BEFORE finding nearest strike.
+        # Previously searched the ENTIRE chain (CE+PE), so a BUY (CE) signal
+        # could resolve to a PE contract — Tiger bought puts instead of calls!
+        typed = chain[chain["option_type"] == option_type]
+        if typed.empty:
+            return None
+        nearest_idx = (typed["strike"] - float(strike)).abs().idxmin()
+        matches = typed.loc[[nearest_idx]]
 
     row = matches.iloc[0]
     _, exchange = OPTION_INSTRUMENT_TYPE.get(underlying, ("OPTSTK", "NFO"))
