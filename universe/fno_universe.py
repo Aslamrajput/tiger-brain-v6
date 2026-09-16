@@ -284,10 +284,14 @@ def mcx_scan_symbols() -> dict:
 def get_active_scan_symbols(now=None) -> tuple[dict, str]:
     """Return (symbols_dict, market_label) for the currently active session.
 
+    MCX commodities (CRUDEOIL, GOLDM, SILVERM, NATURALGAS) trade from
+    09:00 AM. Tiger scans NSE + MCX SIMULTANEOUSLY during NSE hours so
+    no commodity opportunity is missed (e.g. morning crude oil spikes).
+
     Returns:
-        (dict, "NSE")   during 09:15-15:15
-        (dict, "MCX")   during 15:30-23:15
-        ({}, "CLOSED")  otherwise
+        (dict, "NSE+MCX")  during 09:15-15:15 (both markets scanned)
+        (dict, "MCX")      during 15:15-23:15 (MCX only, NSE closed)
+        ({}, "CLOSED")     otherwise
     """
     from datetime import datetime, time
     from config.thresholds import AUTOMATION
@@ -301,15 +305,25 @@ def get_active_scan_symbols(now=None) -> tuple[dict, str]:
     mcx_open_h, mcx_open_m = map(int, AUTOMATION["MCX_OPEN_TIME"].split(":"))
     mcx_close_h, mcx_close_m = map(int, AUTOMATION["MCX_CLOSE_TIME"].split(":"))
 
-    nse_open = time(nse_open_h, nse_open_m)
-    nse_close = time(nse_off_h, nse_off_m)  # 15:15 square-off
-    mcx_open = time(mcx_open_h, mcx_open_m)  # 15:30
+    nse_open = time(nse_open_h, nse_open_m)     # 09:15
+    nse_close = time(nse_off_h, nse_off_m)      # 15:15
+    mcx_open = time(mcx_open_h, mcx_open_m)     # 09:00 (MCX opens early)
     mcx_close = time(mcx_close_h, mcx_close_m)  # 23:15
 
+    mcx_active = mcx_open <= current <= mcx_close
+
     if nse_open <= current <= nse_close:
-        return nse_scan_symbols(), "NSE"
-    if mcx_open <= current <= mcx_close:
+        # NSE session — scan NSE + MCX simultaneously (MCX already open)
+        combined = nse_scan_symbols()
+        if mcx_active:
+            combined.update(mcx_scan_symbols())
+            return combined, "NSE+MCX"
+        return combined, "NSE"
+
+    if mcx_active:
+        # NSE closed — MCX only
         return mcx_scan_symbols(), "MCX"
+
     return {}, "CLOSED"
 
 

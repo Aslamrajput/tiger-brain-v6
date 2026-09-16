@@ -67,24 +67,19 @@ def is_trading_day(check_date: datetime = None) -> bool:
 
 
 def is_market_hours(check_time: datetime = None) -> bool:
-    """Market open hai ya nahi — NSE (09:15-15:15) YA MCX (15:30-23:15).
+    """Market open hai ya nahi — NSE (09:15-15:15) YA MCX (09:00-23:15).
 
-    Two markets NEVER overlap:
-      NSE: 09:15 - 15:15 (square-off at 15:15)
-      MCX: 15:30 - 23:15 (square-off at 23:15)
-
-    15:15-15:30 = transition gap (no scanning).
+    MCX opens at 09:00 (before NSE). Both markets overlap during
+    09:15-15:15 — Tiger scans NSE + MCX simultaneously.
     """
     check_time = check_time or datetime.now()
     current = check_time.time()
 
-    # NSE session: 09:15 - 15:15 (square-off time = end of NSE scanning)
     nse_open_h, nse_open_m = map(int, AUTOMATION["MARKET_OPEN_TIME"].split(":"))
     nse_off_h, nse_off_m = map(int, AUTOMATION["NSE_SQUARE_OFF_TIME"].split(":"))
     nse_open = time(nse_open_h, nse_open_m)
     nse_close = time(nse_off_h, nse_off_m)
 
-    # MCX session: 15:30 - 23:15
     mcx_open_h, mcx_open_m = map(int, AUTOMATION["MCX_OPEN_TIME"].split(":"))
     mcx_close_h, mcx_close_m = map(int, AUTOMATION["MCX_CLOSE_TIME"].split(":"))
     mcx_open = time(mcx_open_h, mcx_open_m)
@@ -96,11 +91,12 @@ def is_market_hours(check_time: datetime = None) -> bool:
 
 
 def get_active_market(check_time: datetime = None) -> str:
-    """Return 'NSE', 'MCX', or 'CLOSED' for the current time.
+    """Return 'NSE+MCX', 'NSE', 'MCX', or 'CLOSED' for the current time.
 
-    NSE:  09:15 - 15:15
-    MCX:  15:30 - 23:15
-    Else: CLOSED (transition gap 15:15-15:30, or night/morning)
+    NSE+MCX:  09:15 - 15:15 (both markets active, simultaneous scan)
+    MCX:      09:00 - 09:15 (MCX only, before NSE opens)
+    MCX:      15:15 - 23:15 (MCX only, after NSE square-off)
+    Else:     CLOSED
     """
     check_time = check_time or datetime.now()
     current = check_time.time()
@@ -110,29 +106,37 @@ def get_active_market(check_time: datetime = None) -> str:
     mcx_open_h, mcx_open_m = map(int, AUTOMATION["MCX_OPEN_TIME"].split(":"))
     mcx_close_h, mcx_close_m = map(int, AUTOMATION["MCX_CLOSE_TIME"].split(":"))
 
-    if time(nse_open_h, nse_open_m) <= current <= time(nse_off_h, nse_off_m):
+    nse_active = time(nse_open_h, nse_open_m) <= current <= time(nse_off_h, nse_off_m)
+    mcx_active = time(mcx_open_h, mcx_open_m) <= current <= time(mcx_close_h, mcx_close_m)
+
+    if nse_active and mcx_active:
+        return "NSE+MCX"
+    if nse_active:
         return "NSE"
-    if time(mcx_open_h, mcx_open_m) <= current <= time(mcx_close_h, mcx_close_m):
+    if mcx_active:
         return "MCX"
     return "CLOSED"
 
 
 def is_nse_hours(check_time: datetime = None) -> bool:
     """NSE session active? (09:15-15:15)."""
-    return get_active_market(check_time) == "NSE"
+    market = get_active_market(check_time)
+    return market in ("NSE", "NSE+MCX")
 
 
 def is_mcx_hours(check_time: datetime = None) -> bool:
-    """MCX commodity session active hai? (15:30-23:15)."""
-    return get_active_market(check_time) == "MCX"
+    """MCX commodity session active hai? (09:00-23:15)."""
+    market = get_active_market(check_time)
+    return market in ("MCX", "NSE+MCX")
 
 
 def is_opening_range_period(check_time: datetime = None) -> bool:
     """Opening Range Wait — market open ke pehle N minutes no trade.
 
     Handles BOTH market opens:
+      MCX opens at 09:00 → wait N minutes (09:00-09:15)
       NSE opens at 09:15 → wait N minutes (09:15-09:30)
-      MCX opens at 15:30 → wait N minutes (15:30-15:45)
+    Combined: no trades until 09:30 (both opening ranges cleared).
     """
     check_time = check_time or datetime.now()
     wait = AUTOMATION["OPENING_RANGE_WAIT_MINUTES"]
@@ -267,11 +271,14 @@ class TigerBrainScheduler:
                 hour=deliv_h, minute=deliv_m, id="delivery_snapshot",
             )
 
-        # MCX market open at 15:30 — Tiger switches to commodity scanning
+        # MCX-only mode starts at NSE square-off (15:15) — Tiger switches
+        # from NSE+MCX simultaneous scan to MCX-only.
+        # (MCX has been scanned since 09:00 alongside NSE; this handler
+        #  ensures broker session + refreshes MCX data after NSE close.)
         if mcx_market_open_fn:
             self.scheduler.add_job(
                 self._guarded(mcx_market_open_fn), "cron",
-                hour=mcx_open_h, minute=mcx_open_m, id="mcx_market_open",
+                hour=nse_h, minute=nse_m, id="mcx_market_open",
             )
 
         # NSE square-off at 15:15 (NSE scanning ends)

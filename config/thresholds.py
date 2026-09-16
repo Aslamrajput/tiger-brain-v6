@@ -221,11 +221,12 @@ AUTOMATION = {
     "MARKET_OPEN_TIME": "09:15",
     "OPENING_RANGE_WAIT_MINUTES": VOLUME["OPENING_RANGE_MINUTES"],
     "MARKET_CLOSE_TIME": "15:30",   # NSE market close (NSE session ends)
-    # MCX (commodity) session — 15:30 to 23:15.
-    # Tiger trades MCX ONLY after NSE closes — two markets NEVER overlap.
-    # NSE: 09:15-15:15 (square-off 15:15), MCX: 15:30-23:15 (square-off 23:15).
-    "MCX_OPEN_TIME": "15:30",         # MCX trading starts AFTER NSE square-off
-    "MCX_CLOSE_TIME": "23:15",        # MCX trading ends (square-off at 23:15)
+    # MCX (commodity) session — 09:00 to 23:15.
+    # MCX opens at 09:00 AM (before NSE). Tiger scans NSE + MCX
+    # SIMULTANEOUSLY during 09:15-15:15 so commodity opportunities
+    # (morning crude/gold spikes) are never missed.
+    "MCX_OPEN_TIME": "09:00",          # MCX opens at 9 AM (simultaneous with NSE)
+    "MCX_CLOSE_TIME": "23:15",         # MCX trading ends (square-off at 23:15)
     "NIGHTLY_REPLAY_TIME": "00:00",
     # Intraday entry cutoff — after 3:00 PM NO new NSE/equity intraday
     # orders, only profit booking (exits). MCX session starts at 15:30.
