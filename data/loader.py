@@ -888,6 +888,37 @@ def resolve_option_contract(
     }
 
 
+class _GreeksFailCache:
+    """Throttle optionGreek API calls per underlying.
+
+    If the API returns no data (common for MCX commodity options), we
+    skip retries for a cooldown period to prevent log flooding and wasted
+    latency. Delta estimate fallback is used instead during cooldown.
+    """
+    _COOLDOWN_SECONDS = 15 * 60  # 15 minutes
+
+    def __init__(self):
+        self._fails: dict[str, float] = {}
+
+    def mark_fail(self, underlying: str):
+        from time import time
+        self._fails[underlying] = time()
+
+    def is_cooled(self, underlying: str) -> bool:
+        """True if underlying is in cooldown (skip API call)."""
+        from time import time
+        last = self._fails.get(underlying)
+        if last is None:
+            return False
+        if time() - last < self._COOLDOWN_SECONDS:
+            return True
+        del self._fails[underlying]
+        return False
+
+
+_greeks_fail_cache = _GreeksFailCache()
+
+
 def find_affordable_option(
     underlying: str,
     atm_strike: float,
@@ -943,9 +974,12 @@ def find_affordable_option(
             "strike", ascending=False)
 
     # === FETCH LIVE GREEKS (IV + Delta) from optionGreek API ===
+    # Throttled: if optionGreek returns "No Data" for an underlying (common for
+    # MCX commodity options), skip API calls for 15 min — prevents log flood
+    # + wasted latency. Delta estimate fallback is used instead.
     greeks_df = None
     atm_iv = None
-    if broker is not None:
+    if broker is not None and not _greeks_fail_cache.is_cooled(underlying):
         try:
             from data.iv_series import fetch_live_greeks, live_atm_iv
             from datetime import datetime as _dt
@@ -961,8 +995,11 @@ def find_affordable_option(
                         logger.warning(
                             f"⚠️ IV CRUSH RISK: ATM IV={atm_iv:.1f}% > "
                             f"{iv_crush_warning_pct}% — high IV crush risk on {underlying}")
+                else:
+                    _greeks_fail_cache.mark_fail(underlying)
         except Exception as exc:
             logger.debug(f"Greeks fetch fail (will use delta estimate): {exc}")
+            _greeks_fail_cache.mark_fail(underlying)
             greeks_df = None
 
     for _, row in matches.head(max_otm_steps).iterrows():
