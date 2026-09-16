@@ -56,6 +56,12 @@ class AngelBroker:
         self.session_data = None
         self.login_time = None
 
+        # Track real token health — Angel One JWT can expire mid-session
+        # (server-side) even if < 20 hours since login. This flag is set
+        # to False the moment any API returns "Token missing" / AG8003.
+        self._token_healthy = False
+        self._last_relogin_attempt = None
+
         # Tiger WebSocket V2 — real-time tick stream (zero rate limits)
         # Initialized lazily on first use (after login)
         self.websocket = None
@@ -138,6 +144,7 @@ class AngelBroker:
 
                 self.session_data = session
                 self.login_time = datetime.now()
+                self._token_healthy = True  # fresh token = healthy
 
                 logger.info(
                     f"✅ Angel One login successful — {self.login_time.strftime('%Y-%m-%d %H:%M:%S')}"
@@ -208,28 +215,85 @@ class AngelBroker:
     def is_session_valid(self) -> bool:
         """
         Checks whether the session is still valid. Angel One sessions are
-        usually valid for one trading day — if more than 24 hours have
+        usually valid for one trading day — if more than 20 hours have
         passed since login_time, the session is treated as expired
         (safe default; exact expiry should be confirmed from Angel One
         documentation).
+
+        Also checks _token_healthy — if a recent API call returned
+        "Token missing" / AG8003, the token is marked unhealthy even
+        if < 20 hours have passed (Angel One JWT can expire mid-session).
         """
         if self.session_data is None or self.login_time is None:
+            return False
+
+        if not self._token_healthy:
             return False
 
         elapsed = datetime.now() - self.login_time
         return elapsed < timedelta(hours=20)  # conservative — refresh before 24h
 
-    def ensure_logged_in(self):
+    @staticmethod
+    def _is_token_error(response_or_exception) -> bool:
+        """Detect if an API response/exception indicates token expiry.
+
+        Angel One returns these when the JWT token has expired:
+          - errorCode AG8003, message "Token missing"
+          - errorCode AG8002, message "Invalid Token"
+          - "session expired", "token expired", "unauthorized"
+        """
+        text = str(response_or_exception).lower()
+        markers = (
+            "ag8003", "token missing", "ag8002", "invalid token",
+            "session expired", "token expired", "unauthorized",
+            "token not found", "jwt",
+        )
+        return any(m in text for m in markers)
+
+    def _auto_relogin(self) -> bool:
+        """Perform an immediate fresh login when the token is detected
+        as expired mid-session. Rate-limited to 1 attempt per 30 seconds
+        to avoid hammering Angel One if login itself is failing.
+
+        Returns True if re-login succeeded (token healthy again).
+        """
+        now = datetime.now()
+        if self._last_relogin_attempt is not None:
+            since = (now - self._last_relogin_attempt).total_seconds()
+            if since < 30:
+                logger.warning(
+                    "Token expired but relogin attempted %ds ago — skipping "
+                    "(30s cooldown)", int(since))
+                return False
+
+        self._last_relogin_attempt = now
+        logger.warning("🔄 Token expired mid-session — auto re-login starting...")
+        try:
+            self.login()
+            logger.info("✅ Auto re-login successful — token healthy again")
+            return True
+        except Exception as exc:
+            logger.error("❌ Auto re-login FAILED: %s", exc)
+            return False
+
+    def ensure_logged_in(self, force: bool = False):
         """
         Performs a fresh login if the session is not valid. This function
         is called from automation/scheduler.py's pre-market-wakeup job
-        each trading day.
+        each trading day, and at the start of every API call.
+
+        Args:
+            force: if True, always re-login regardless of session state
+                   (used after a token error is detected).
         """
-        if not self.is_session_valid():
-            logger.info("Session invalid/expired — performing fresh login...")
+        if force or not self.is_session_valid():
+            if force:
+                logger.info("Forced re-login requested (token error detected)")
+            else:
+                logger.info("Session invalid/expired — performing fresh login...")
             self.login()
         else:
-            logger.info("Session already valid, no fresh login needed.")
+            logger.debug("Session valid, no fresh login needed.")
 
     def logout(self):
         """Closes the session — should be called after market close
@@ -270,14 +334,36 @@ class AngelBroker:
             resp = self.smart_api.ltpData(
                 exchange, tradingsymbol, str(symboltoken))
             if not resp or not resp.get("data"):
-                logger.warning(f"ltpData() fail for {tradingsymbol}")
-                return 0.0
+                # Check if this is a token expiry error
+                if resp and self._is_token_error(resp):
+                    logger.warning("LTP fetch got token error — auto re-login...")
+                    self._token_healthy = False
+                    if self._auto_relogin():
+                        resp = self.smart_api.ltpData(
+                            exchange, tradingsymbol, str(symboltoken))
+                if not resp or not resp.get("data"):
+                    logger.warning(f"ltpData() fail for {tradingsymbol}")
+                    return 0.0
             data = resp["data"]
             ltp = float(data.get("ltp", 0) or 0)
             if ltp <= 0:
                 ltp = float(data.get("close", 0) or 0)
             return ltp
         except Exception as exc:
+            # Token errors can come as exceptions too
+            if self._is_token_error(exc):
+                logger.warning("LTP exception is token error — auto re-login...")
+                self._token_healthy = False
+                if self._auto_relogin():
+                    try:
+                        resp = self.smart_api.ltpData(
+                            exchange, tradingsymbol, str(symboltoken))
+                        if resp and resp.get("data"):
+                            ltp = float(resp["data"].get("ltp", 0) or 0)
+                            return ltp if ltp > 0 else float(
+                                resp["data"].get("close", 0) or 0)
+                    except Exception as exc2:
+                        logger.error(f"LTP retry fail {tradingsymbol}: {exc2}")
             logger.error(f"LTP fetch fail {tradingsymbol}: {exc}")
             return 0.0
 
@@ -297,6 +383,12 @@ class AngelBroker:
             try:
                 rms = self.smart_api.rmsLimit()
                 if not rms or not rms.get("data"):
+                    # Token error? → auto relogin
+                    if rms and self._is_token_error(rms):
+                        logger.warning("Balance fetch got token error — auto re-login...")
+                        self._token_healthy = False
+                        self._auto_relogin()
+                        continue  # retry with fresh token
                     logger.warning("rmsLimit() returned no data (attempt %d/2).", attempt)
                 else:
                     data = rms["data"]
@@ -304,6 +396,11 @@ class AngelBroker:
                     logger.info(f"💰 Angel One balance: ₹{avail:,.2f}")
                     return avail
             except Exception as exc:
+                if self._is_token_error(exc):
+                    logger.warning("Balance exception is token error — auto re-login...")
+                    self._token_healthy = False
+                    self._auto_relogin()
+                    continue
                 logger.error(f"Balance fetch fail (attempt %d/2): %s", attempt, exc)
 
             # Attempt 1 failed — fresh login then retry
@@ -382,6 +479,25 @@ class AngelBroker:
             )
             return {"success": True, "order_id": str(order_id), "error": None}
         except Exception as exc:
+            # Token error? → auto relogin + retry once
+            if self._is_token_error(exc):
+                logger.warning("Order fail is token error — auto re-login + retry...")
+                self._token_healthy = False
+                if self._auto_relogin():
+                    try:
+                        order_id = self.smart_api.placeOrder(params)
+                        logger.info(
+                            f"✅ Order placed (after re-login): {transaction_type} "
+                            f"{quantity} {tradingsymbol} → order_id={order_id}"
+                        )
+                        return {"success": True, "order_id": str(order_id),
+                                "error": None}
+                    except Exception as exc2:
+                        logger.error(
+                            f"❌ Order retry fail: {transaction_type} "
+                            f"{quantity} {tradingsymbol} — {exc2}")
+                        return {"success": False, "order_id": None,
+                                "error": str(exc2)}
             logger.error(
                 f"❌ Order fail: {transaction_type} {quantity} {tradingsymbol} — {exc}"
             )
@@ -402,8 +518,14 @@ class AngelBroker:
         try:
             book = self.smart_api.orderBook()
             if not book or not book.get("data"):
-                return {"status": "UNKNOWN", "filled_qty": 0,
-                        "avg_price": 0.0, "reject_reason": None}
+                if book and self._is_token_error(book):
+                    logger.warning("Order book got token error — auto re-login...")
+                    self._token_healthy = False
+                    if self._auto_relogin():
+                        book = self.smart_api.orderBook()
+                if not book or not book.get("data"):
+                    return {"status": "UNKNOWN", "filled_qty": 0,
+                            "avg_price": 0.0, "reject_reason": None}
             for o in book["data"]:
                 if str(o.get("orderid")) == str(order_id):
                     return {
@@ -416,6 +538,24 @@ class AngelBroker:
             return {"status": "UNKNOWN", "filled_qty": 0,
                     "avg_price": 0.0, "reject_reason": None}
         except Exception as exc:
+            if self._is_token_error(exc):
+                logger.warning("Order status exception is token error — auto re-login...")
+                self._token_healthy = False
+                if self._auto_relogin():
+                    try:
+                        book = self.smart_api.orderBook()
+                        if book and book.get("data"):
+                            for o in book["data"]:
+                                if str(o.get("orderid")) == str(order_id):
+                                    return {
+                                        "status": o.get("status", "UNKNOWN"),
+                                        "filled_qty": int(o.get("filledquantity", 0) or 0),
+                                        "avg_price": float(o.get("averageprice", 0) or 0),
+                                        "reject_reason": o.get("text", None) or
+                                                         o.get("rejectreason", None),
+                                    }
+                    except Exception as exc2:
+                        logger.warning(f"Order status retry fail: {exc2}")
             logger.warning(f"Order status fetch fail: {exc}")
             return {"status": "UNKNOWN", "filled_qty": 0,
                     "avg_price": 0.0, "reject_reason": None}
@@ -425,8 +565,22 @@ class AngelBroker:
         self.ensure_logged_in()
         try:
             pos = self.smart_api.position()
+            if not pos and self._is_token_error(pos):
+                logger.warning("Positions got token error — auto re-login...")
+                self._token_healthy = False
+                if self._auto_relogin():
+                    pos = self.smart_api.position()
             return pos.get("data", []) if pos else []
         except Exception as exc:
+            if self._is_token_error(exc):
+                logger.warning("Positions exception is token error — auto re-login...")
+                self._token_healthy = False
+                if self._auto_relogin():
+                    try:
+                        pos = self.smart_api.position()
+                        return pos.get("data", []) if pos else []
+                    except Exception as exc2:
+                        logger.warning(f"Positions retry fail: {exc2}")
             logger.warning(f"Position fetch fail: {exc}")
             return []
 

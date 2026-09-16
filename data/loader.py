@@ -460,13 +460,39 @@ def fetch_candle_chunk(
     session expire) retry karne se theek nahi honge, isliye wo turant
     raise ho jaate hain aur caller unhe log karta hai.
 
+    TOKEN EXPIRY HANDLING: agar Angel One "Token missing" / AG8003 return
+    kare, to broker._auto_relogin() call hota hai (fresh TOTP + session),
+    aur candle fetch ek baar retry hota hai. Tiger ko data nahi dena
+    = missed trades, isliye token error pe auto-recovery critical hai.
+
     Returns:
         Raw candle rows ki list (khali list agar data hi na ho).
     """
+    _TOKEN_ERROR_MARKERS = (
+        "ag8003", "token missing", "ag8002", "invalid token",
+        "session expired", "token expired", "unauthorized",
+    )
+
+    def _is_token_err(msg: str) -> bool:
+        lowered = str(msg).lower()
+        return any(m in lowered for m in _TOKEN_ERROR_MARKERS)
+
     for attempt in range(max_retries):
         try:
             response = broker.smart_api.getCandleData(params)
         except Exception as exc:
+            # Token error as exception → auto relogin + retry
+            if _is_token_err(str(exc)) and hasattr(broker, "_auto_relogin"):
+                logger.warning("Candle fetch token error — auto re-login + retry...")
+                broker._token_healthy = False
+                if broker._auto_relogin():
+                    try:
+                        response = broker.smart_api.getCandleData(params)
+                        if response.get("status") and response.get("data"):
+                            return response["data"]
+                    except Exception:
+                        pass
+                return []
             # SmartAPI rate-limit ka jawab JSON nahi hota, isliye SDK
             # exception phenkta hai — usme bhi wahi message hota hai.
             if not is_rate_limit_error(exc) or attempt == max_retries - 1:
@@ -477,6 +503,22 @@ def fetch_candle_chunk(
             return response["data"]
 
         message = response.get("message", "unknown")
+
+        # Token error in response → auto relogin + retry
+        if _is_token_err(message) and hasattr(broker, "_auto_relogin"):
+            logger.warning("Candle response token error (%s) — auto re-login...",
+                           message)
+            broker._token_healthy = False
+            if broker._auto_relogin():
+                try:
+                    response = broker.smart_api.getCandleData(params)
+                    if response.get("status") and response.get("data"):
+                        return response["data"]
+                except Exception:
+                    pass
+            logger.warning("Candle fetch failed after token re-login attempt.")
+            return []
+
         if not is_rate_limit_error(message) or attempt == max_retries - 1:
             logger.warning(
                 f"Candle chunk {params['fromdate']}-{params['todate']} "
