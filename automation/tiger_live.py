@@ -619,14 +619,17 @@ class TigerLiveRunner:
             if not syms:
                 syms = nse_scan_symbols()
                 market = "NSE (pre-market)"
+
+            # Subscribe WS FIRST — so ticks start flowing during data fetch
+            self._subscribe_ws_symbols(list(syms.keys()))
+
+            # Startup: fetch 15m historical (zones) + 1m historical (momentum).
+            # Live refresh later skips 1m REST (uses WS live 1m candles).
             self.data_map, self.data_map_1m, failed = fetch_angel_data(
                 self.broker, days_15m=30, days_1m=7, fetch_1m=True,
                 symbols=syms)
             logger.info("✅ Data fetched [%s]: %d symbols (15m), %d (1m). Failed: %d",
                         market, len(self.data_map), len(self.data_map_1m), len(failed))
-
-            # 3b. Subscribe scan symbols to WebSocket for live tick stream
-            self._subscribe_ws_symbols(list(syms.keys()))
         except Exception as exc:
             logger.error("❌ Data fetch fail: %s", exc)
             self.data_map, self.data_map_1m = {}, {}

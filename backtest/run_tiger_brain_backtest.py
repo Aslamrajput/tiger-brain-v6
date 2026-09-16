@@ -1563,12 +1563,12 @@ def fetch_angel_data(broker, days_15m=365, days_1m=90, use_scan_universe=False, 
         # PRIMARY: Angel One se real historical candles
         if broker is not None and broker.smart_api is not None:
             try:
-                time.sleep(0.5)  # reduced from 3.0s — 42-symbol universe can't afford 252s sleep
+                time.sleep(1.0)  # 1s delay — avoids Angel rate limit during market hours
                 d15 = fetch_angel_underlying_candles(
                     broker, sym, "FIFTEEN_MINUTE", days=days_15m)
                 d1 = None
                 if fetch_1m:
-                    time.sleep(0.5)  # reduced from 3.0s — keep scan under 60s total
+                    time.sleep(1.0)  # 1s delay between 15m and 1m fetch
                     d1 = fetch_angel_underlying_candles(
                         broker, sym, "ONE_MINUTE", days=days_1m)
                 if d15 is not None and not d15.empty:
