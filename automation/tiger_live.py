@@ -260,8 +260,8 @@ class TigerLiveRunner:
                     f"{s} {b['option_type']}" for s, b in blocks.items())
                 logger.info(f"📋 Direction locks restored: {active}")
             return blocks
-        except (FileNotFoundError, json.JSONDecodeError, OSError):
-            return []
+        except (FileNotFoundError, json.JSONDecodeError, OSError, AttributeError):
+            return {}
 
     def _save_direction_blocks(self):
         """Save direction blocks to disk — 2-hour lockout survives restart."""

@@ -57,6 +57,44 @@ class TestTokenErrorDetection:
         assert not AngelBroker._is_token_error("Connection reset by peer")
 
 
+class TestDirectionBlocksTypeSafety:
+    """Verify _direction_blocks is always a dict, never a list.
+
+    Bug: _load_direction_blocks() returned [] (list) when file was
+    missing, but _is_direction_blocked() calls .get() on it (dict method).
+    This caused AttributeError crash on every trade attempt.
+    """
+
+    def test_load_returns_dict_when_file_missing(self, tmp_path):
+        """When /tmp/tiger_direction_blocks.json doesn't exist, must return {}."""
+        from automation.tiger_live import TigerLiveRunner
+        trader = TigerLiveRunner.__new__(TigerLiveRunner)
+        trader._DIRECTION_BLOCKS_FILE = str(tmp_path / "nonexistent.json")
+        result = trader._load_direction_blocks()
+        assert isinstance(result, dict)
+        assert result == {}
+
+    def test_load_returns_dict_when_file_invalid(self, tmp_path):
+        """When file contains invalid JSON, must return {}."""
+        from automation.tiger_live import TigerLiveRunner
+        bad_file = tmp_path / "bad_blocks.json"
+        bad_file.write_text("not valid json {{{")
+        trader = TigerLiveRunner.__new__(TigerLiveRunner)
+        trader._DIRECTION_BLOCKS_FILE = str(bad_file)
+        result = trader._load_direction_blocks()
+        assert isinstance(result, dict)
+
+    def test_load_returns_dict_when_file_has_list(self, tmp_path):
+        """When file contains a JSON list (corruption), must return {}."""
+        from automation.tiger_live import TigerLiveRunner
+        list_file = tmp_path / "list_blocks.json"
+        list_file.write_text('["unexpected", "list"]')
+        trader = TigerLiveRunner.__new__(TigerLiveRunner)
+        trader._DIRECTION_BLOCKS_FILE = str(list_file)
+        result = trader._load_direction_blocks()
+        assert isinstance(result, dict)
+
+
 # ============================================================
 # SESSION VALIDITY WITH TOKEN HEALTH
 # ============================================================
