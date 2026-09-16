@@ -69,6 +69,15 @@ class TickCandleBuilder:
       - If current minute candle exists → update H/L/C + add volume
       - If new minute → close previous candle, create new one
 
+    Volume handling:
+      Angel One WS sends CUMULATIVE day volume (total since market open).
+      REST historical candles have PER-BAR volume (that 1-minute's volume).
+      To keep WS candles compatible with REST data, we compute per-bar
+      volume by diffing consecutive cumulative volumes:
+        bar_volume += max(current_cum - prev_cum, 0)
+      First tick of a bar: delta is 0 (no previous reference), so we
+      carry forward from the last tick of the previous bar.
+
     This gives Tiger real 1m candles from LIVE ticks — no REST
     historical fetch needed for scanning during the session.
     """
@@ -76,6 +85,7 @@ class TickCandleBuilder:
     def __init__(self):
         self._candles: dict[str, list[dict]] = defaultdict(list)
         self._current_bar: dict[str, dict] = {}
+        self._prev_cum_vol: dict[str, int] = {}
 
     def add_tick(self, token: str, ltp: float, volume: int,
                  timestamp: datetime):
@@ -88,34 +98,32 @@ class TickCandleBuilder:
             timestamp = datetime.now()
         bar_key = timestamp.replace(second=0, microsecond=0)
 
+        # Compute per-bar volume delta from cumulative WS volume
+        prev_cum = self._prev_cum_vol.get(token, volume)
+        delta_vol = max(volume - prev_cum, 0)
+        self._prev_cum_vol[token] = volume
+
         cur = self._current_bar.get(token)
         if cur is None or cur["ts"] != bar_key:
-            # New minute bar — previous bar (if any) is already in list
-            # (we append on close). Create new open bar.
+            # New minute bar — previous bar (if any) is already in list.
             new_bar = {
                 "ts": bar_key,
                 "open": ltp,
                 "high": ltp,
                 "low": ltp,
                 "close": ltp,
-                "volume": volume,
+                "volume": delta_vol,
             }
             self._current_bar[token] = new_bar
-            # Add to completed list immediately (updated in-place until
-            # next minute arrives — get_1m_candles reads from list)
             self._candles[token].append(new_bar)
-            # Keep last 500 bars per token (enough for 15m aggregation)
             if len(self._candles[token]) > 500:
                 self._candles[token] = self._candles[token][-500:]
         else:
-            # Same minute — update OHLC
+            # Same minute — update OHLC + add per-tick volume delta
             cur["high"] = max(cur["high"], ltp)
             cur["low"] = min(cur["low"], ltp)
             cur["close"] = ltp
-            # Volume: WS sends cumulative day volume. We track the diff
-            # to get per-tick volume, but for candle we just store the
-            # latest cumulative (caller can diff if needed).
-            cur["volume"] = max(cur["volume"], volume)
+            cur["volume"] += delta_vol
 
     def get_1m_dataframe(self, token: str, min_bars: int = 5) -> Optional[pd.DataFrame]:
         """Return 1m candles as a DataFrame for a token.
