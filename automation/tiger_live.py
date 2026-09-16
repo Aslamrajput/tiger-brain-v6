@@ -657,6 +657,10 @@ class TigerLiveRunner:
           MCX (15:30-23:15): fetch 4 MCX symbols (GOLDM, SILVERM, CRUDEOIL, NATURALGAS)
 
         INDEX scanned first (priority), STOCKS after. Options buying only.
+
+        RATE LIMIT FIX: Only fetch 15m candles from REST (needed for 30-day
+        zone analysis). 1m candles come from WebSocket TickCandleBuilder
+        (live ticks → zero rate limits). This cuts REST calls by 50%.
         """
         if self.broker is None:
             return
@@ -669,20 +673,60 @@ class TigerLiveRunner:
                 logger.info("Live data refresh: market CLOSED, skip fetch.")
                 return
 
-            fresh_15m, fresh_1m, failed = fetch_angel_data(
-                self.broker, days_15m=10, days_1m=3, fetch_1m=True,
+            # Only fetch 15m from REST — 1m comes from WebSocket (zero rate limits)
+            fresh_15m, _fresh_1m, failed = fetch_angel_data(
+                self.broker, days_15m=10, days_1m=3, fetch_1m=False,
                 symbols=symbols)
             if fresh_15m:
                 self.data_map = fresh_15m
-            if fresh_1m:
-                self.data_map_1m = fresh_1m
-            logger.info("Live data refresh [%s]: %d symbols (15m), %d (1m). Failed: %d",
-                        market, len(fresh_15m), len(fresh_1m), len(failed))
+            logger.info("Live data refresh [%s]: %d symbols (15m REST), "
+                        "1m from WS. Failed: %d",
+                        market, len(fresh_15m), len(failed))
+
+            # Append live WS 1m candles to existing 1m data
+            self._merge_ws_1m_candles()
 
             # Re-subscribe to WebSocket for new market symbols
             self._subscribe_ws_symbols(list(symbols.keys()))
         except Exception as exc:
             logger.warning("Live data refresh fail — continuing with stale data: %s", exc)
+
+    def _merge_ws_1m_candles(self):
+        """Merge live WebSocket 1m candles into data_map_1m.
+
+        WebSocket TickCandleBuilder produces real-time 1m OHLCV bars from
+        live ticks. This appends them to the historical 1m data so the
+        scanner has up-to-date 1m candles without any REST calls.
+        """
+        if self.broker is None or self.broker.websocket is None:
+            return
+        if not self.broker.websocket.is_healthy():
+            return
+        ws = self.broker.websocket
+        merged = 0
+        for sym in list(self.data_map_1m.keys()):
+            token = ws._resolve_symbol_token(sym)
+            if token is None:
+                continue
+            ws_df = ws.get_1m_candles(token, min_bars=1)
+            if ws_df is None or ws_df.empty:
+                continue
+            # Append WS live candles to historical 1m data
+            hist_df = self.data_map_1m[sym]
+            # Avoid duplicate timestamps — only add bars newer than last historical
+            if not hist_df.empty:
+                last_hist_ts = hist_df.index[-1]
+                new_bars = ws_df[ws_df.index > last_hist_ts]
+            else:
+                new_bars = ws_df
+            if not new_bars.empty:
+                self.data_map_1m[sym] = pd.concat([hist_df, new_bars])
+                # Keep last 1000 bars (enough for scalper/momentum)
+                if len(self.data_map_1m[sym]) > 1000:
+                    self.data_map_1m[sym] = self.data_map_1m[sym].tail(1000)
+                merged += 1
+        if merged:
+            logger.debug("WS 1m merge: %d symbols updated with live ticks", merged)
 
     # ============================================================
     # MARKET OPEN (09:15) — ready signal
