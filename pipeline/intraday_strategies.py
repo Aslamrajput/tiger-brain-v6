@@ -142,6 +142,137 @@ def detect_zones(df: pd.DataFrame, i: int, lookback: int = 40,
 
 
 # ============================================================
+# V6.7 — INSTITUTIONAL VOLUME PROFILE (VAH / VAL / POC)
+# ============================================================
+def compute_volume_profile(
+    df: pd.DataFrame,
+    i: int,
+    lookback: int = 50,
+    n_bins: int = 20,
+    value_area_pct: float = 70.0,
+) -> dict:
+    """Compute institutional Volume Profile — POC, VAH, VAL.
+
+    Builds a volume histogram over `lookback` bars by binning price into
+    `n_bins` horizontal slices. The bin with the highest volume is the
+    Point of Control (POC). The Value Area (VA) is the price range
+    containing `value_area_pct` of total volume, centered on POC.
+
+    This is the institutional footprint — where smart money accumulated
+    or distributed. Zones coinciding with POC/VA edges are the strongest.
+
+    Args:
+        df: OHLCV dataframe.
+        i: current bar index (no lookahead — uses df.iloc[:i+1]).
+        lookback: number of bars to include in the profile.
+        n_bins: histogram resolution (more bins = more precise POC).
+        value_area_pct: % of volume defining the Value Area (standard 70%).
+
+    Returns:
+        {poc, vah, val, total_volume, va_volume, va_pct, bins}
+        or empty dict if insufficient data.
+    """
+    if i < 5:
+        return {}
+    window = df.iloc[max(0, i - lookback):i + 1]
+    if len(window) < 5:
+        return {}
+
+    highs = window["high"].astype(float).values
+    lows = window["low"].astype(float).values
+    vols = window["volume"].astype(float).values
+
+    price_min = float(np.min(lows))
+    price_max = float(np.max(highs))
+    if price_max <= price_min:
+        return {}
+
+    bin_width = (price_max - price_min) / n_bins
+    if bin_width <= 0:
+        return {}
+
+    # Distribute each bar's volume across the price bins it spans
+    bin_volumes = np.zeros(n_bins)
+    for k in range(len(window)):
+        bar_low = max(lows[k], price_min)
+        bar_high = min(highs[k], price_max)
+        if bar_high <= bar_low:
+            bar_high = bar_low + bin_width * 0.01
+        lo_bin = int((bar_low - price_min) / bin_width)
+        hi_bin = int((bar_high - price_min) / bin_width)
+        lo_bin = max(0, min(n_bins - 1, lo_bin))
+        hi_bin = max(0, min(n_bins - 1, hi_bin))
+        span = max(hi_bin - lo_bin, 1)
+        vol_per_bin = vols[k] / span
+        for b in range(lo_bin, hi_bin + 1):
+            bin_volumes[b] += vol_per_bin
+
+    total_volume = float(bin_volumes.sum())
+    if total_volume <= 0:
+        return {}
+
+    # POC = bin with highest volume
+    poc_bin = int(np.argmax(bin_volumes))
+    poc = price_min + (poc_bin + 0.5) * bin_width
+
+    # Value Area: expand outward from POC until value_area_pct captured
+    target_va = total_volume * (value_area_pct / 100.0)
+    va_volume = bin_volumes[poc_bin]
+    lo, hi = poc_bin, poc_bin
+    while va_volume < target_va and (lo > 0 or hi < n_bins - 1):
+        # Expand to whichever side has more volume (standard VA method)
+        below = bin_volumes[lo - 1] if lo > 0 else -1
+        above = bin_volumes[hi + 1] if hi < n_bins - 1 else -1
+        if above >= below and hi < n_bins - 1:
+            hi += 1
+            va_volume += bin_volumes[hi]
+        elif lo > 0:
+            lo -= 1
+            va_volume += bin_volumes[lo]
+        else:
+            break
+
+    vah = price_min + (hi + 1) * bin_width
+    val = price_min + lo * bin_width
+
+    return {
+        "poc": round(poc, 2),
+        "vah": round(vah, 2),
+        "val": round(val, 2),
+        "total_volume": total_volume,
+        "va_volume": round(va_volume, 2),
+        "va_pct": round(va_volume / total_volume * 100, 1),
+        "price_min": round(price_min, 2),
+        "price_max": round(price_max, 2),
+    }
+
+
+def zone_at_vp_edge(zone: dict, vp: dict, tolerance_pct: float = 0.5) -> bool:
+    """Check if a demand/supply zone coincides with a Volume Profile edge.
+
+    Zones at VAH/VAL/POC are institutional order blocks — the strongest
+    reversals happen there. This is the "ALERT readiness" trigger.
+
+    Args:
+        zone: {type, top, bottom, ...}
+        vp: {poc, vah, val, ...} from compute_volume_profile
+        tolerance_pct: how close (in % of price) zone must be to VP edge
+
+    Returns:
+        True if zone edge is within tolerance of POC, VAH, or VAL.
+    """
+    if not vp or not zone:
+        return False
+    ref = vp.get("poc", 0) or vp.get("vah", 0) or vp.get("val", 0)
+    if ref <= 0:
+        return False
+    tol = ref * tolerance_pct / 100
+    zone_edge = zone.get("bottom", 0) if zone.get("type") == "demand" else zone.get("top", 0)
+    edges = [vp.get("poc", 0), vp.get("vah", 0), vp.get("val", 0)]
+    return any(abs(zone_edge - e) <= tol for e in edges if e > 0)
+
+
+# ============================================================
 # V6.6 — INSTITUTIONAL ZONE QUALITY (explosive rejection filter)
 # ============================================================
 def zone_explosive_quality(df: pd.DataFrame, base_bar_idx: int,
