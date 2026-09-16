@@ -180,6 +180,28 @@ def find_scalper_entry(
         logger.info(
             f"🚫 SKIP {symbol} — body not confirming {direction} (zone touch but no momentum)")
         return None
+
+    # === GATE 2b: BOTTOM CONFIRMATION — price tested zone, bounced (zero-to-hero) ===
+    # Tiger must NOT enter at the top of a bar that never tested the bottom.
+    # Bottom confirmed if: bar's LOW reached into the zone AND close bounced
+    # back above zone midpoint (sellers tried, buyers won).
+    #   BUY (demand): low <= zone_top (tested zone) AND close > zone_mid (bounced)
+    #   SELL (supply): high >= zone_bottom AND close < zone_mid
+    # This prevents premature entry → SL hit → rocket missed (CRUDEOIL bug fix).
+    zb = float(best_zone.get("bottom", 0))
+    zt = float(best_zone.get("top", 0))
+    zone_mid = (zb + zt) / 2 if zt > zb else zb
+    if direction == "BUY":
+        bottom_tested = l <= zt * 1.001  # low reached into demand zone
+        bounced = c > zone_mid  # close above zone mid = buyers won
+    else:
+        bottom_tested = h >= zb * 0.999  # high reached into supply zone
+        bounced = c < zone_mid  # close below zone mid = sellers won
+    if not (bottom_tested and bounced):
+        logger.info(
+            f"🚫 SKIP {symbol} — zone not properly tested/bounced "
+            f"(entering without bottom confirm = SL bait)")
+        return None
     if body_pct < SCALPER["MIN_BODY_PCT"]:
         logger.info(
             f"🚫 SKIP {symbol} — body {body_pct:.0f}% < {SCALPER['MIN_BODY_PCT']}%")
@@ -297,17 +319,30 @@ def find_scalper_entry(
     except Exception as exc:
         logger.debug(f"Scalper options math fail {symbol}: {exc}")
 
+    # === STRUCTURAL STOP — zone-based SL (not fixed -7%) ===
+    # CRUDEOIL fix: if demand zone bottom is ₹185 and entry is ₹210,
+    # structural SL = ₹185 (below zone) not ₹195 (-7%). This gives room
+    # for pullback before rocket. Tiger survives the dip, catches the move.
+    zone_bottom = float(best_zone.get("bottom", 0))
+    zone_top = float(best_zone.get("top", 0))
+    if best_zone_touch == "demand":
+        structural_stop_underlying = zone_bottom * 0.98  # 2% below zone bottom
+    else:
+        structural_stop_underlying = zone_top * 1.02  # 2% above zone top
+
     # ALL GATES PASSED — GOD MODE SIGNAL
     strike_kind = "ATM"
 
     details = (f"ZONE-{best_zone_touch} body={body_pct:.0f}% vol={vol_ratio:.1f}x "
                f"rsi={latest_rsi:.0f} pcr={pcr:.1f} vwap={'Y' if vwap_ok else 'N'} "
+               f"wick={'Y' if wick_confirmed else 'N'} "
                f"[{math_detail}]")
 
     logger.info(
         f"🚀 GOD MODE SIGNAL: {symbol} {direction} "
         f"zone={best_zone_touch} body={body_pct:.0f}% vol={vol_ratio:.1f}x "
         f"rsi={latest_rsi:.0f} pcr={pcr:.1f} vwap={'✓' if vwap_ok else '✗'} "
+        f"wick={'✓' if wick_confirmed else '✗'} "
         f"score={score:.0f} [GOD MODE]")
 
     return {
@@ -317,6 +352,10 @@ def find_scalper_entry(
         "strike_kind": strike_kind,
         "score_details": details,
         "is_scalper": True,
+        "zone_type": best_zone_touch,
+        "zone_bottom": zone_bottom,
+        "zone_top": zone_top,
+        "structural_stop": structural_stop_underlying,
     }
 
 

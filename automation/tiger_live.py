@@ -838,11 +838,26 @@ class TigerLiveRunner:
                 # 2. Catastrophic stop: -12% → instant exit (black swan, no hold time)
                 elif loss_pct >= SCALPER.get("CATASTROPHIC_STOP_PCT", 12.0):
                     exit_reason = f"scalper_catastrophic_{SCALPER.get('CATASTROPHIC_STOP_PCT', 12.0):.0f}pct"
-                # 3. Normal stop: -7% OR -₹1500 — ONLY after min hold time
-                elif past_min_hold and loss_pct >= SCALPER["MAX_STOP_PCT"]:
-                    exit_reason = f"scalper_stop_{SCALPER['MAX_STOP_PCT']:.0f}pct"
-                elif past_min_hold and loss_rupees >= SCALPER["MAX_STOP_RUPEES"]:
-                    exit_reason = f"scalper_stop_₹{SCALPER['MAX_STOP_RUPEES']}"
+                # 3. Normal stop: structural (zone-based) OR fixed -7%, whichever wider
+                #    CRUDEOIL fix: if structural stop is -10% (zone bottom), Tiger
+                #    uses -10% not -7%. Survives pullback before rocket.
+                #    ONLY after min hold time (momentum needs time to develop).
+                elif past_min_hold:
+                    # Check for structural stop (zone-based) first
+                    structural_stop_pct = tracker.get("structural_stop_pct", 0)
+                    effective_stop_pct = SCALPER["MAX_STOP_PCT"]  # default -7%
+                    if structural_stop_pct > 0:
+                        # Use the WIDER of structural vs fixed (give room for rocket)
+                        effective_stop_pct = max(structural_stop_pct, SCALPER["MAX_STOP_PCT"])
+                        # But cap at catastrophic (12%) — no unlimited risk
+                        effective_stop_pct = min(effective_stop_pct, SCALPER.get("CATASTROPHIC_STOP_PCT", 12.0))
+                    if loss_pct >= effective_stop_pct:
+                        if structural_stop_pct > 0 and effective_stop_pct > SCALPER["MAX_STOP_PCT"]:
+                            exit_reason = f"scalper_structural_stop_{effective_stop_pct:.0f}pct"
+                        else:
+                            exit_reason = f"scalper_stop_{SCALPER['MAX_STOP_PCT']:.0f}pct"
+                    elif loss_rupees >= SCALPER["MAX_STOP_RUPEES"]:
+                        exit_reason = f"scalper_stop_₹{SCALPER['MAX_STOP_RUPEES']}"
                 # 4. Breakeven + Trail — LOCK profit once +3% seen
                 #    CRUDEOIL went +4.7% → fell to -2.7% = profit leak FIXED
                 elif peak_gain_pct >= 3.0:
@@ -1615,6 +1630,33 @@ class TigerLiveRunner:
                     self._scalper_positions.add(contract["tradingsymbol"])
                     self._save_scalper_positions()
                     logger.info(f"   🐅 MOMENTUM HUNTER position tracked: {contract['tradingsymbol']}")
+
+                # === STRUCTURAL STOP — save zone-based SL for exit system ===
+                # Instead of fixed -7%, exit system uses zone bottom (demand)
+                # or zone top (supply) as SL. CRUDEOIL fix: survives pullback
+                # before rocket, doesn't get stopped out prematurely.
+                structural_stop = t.get("structural_stop", 0.0)
+                if structural_stop > 0:
+                    tsym = contract["tradingsymbol"]
+                    entry_price = real_ltp
+                    # Convert structural stop (underlying price) to premium stop
+                    # using delta approximation: premium_stop ≈ entry * (stop_pct_of_underlying)
+                    stop_pct = abs(entry_price - structural_stop) / entry_price * 100 if entry_price > 0 else 7.0
+                    # Cap at 12% max (don't give unlimited room)
+                    stop_pct = min(stop_pct, 12.0)
+                    # If structural stop is too tight (< 4%), use fixed 7% (safety)
+                    stop_pct = max(stop_pct, 4.0)
+                    existing = self._position_peaks.get(tsym, {})
+                    existing["structural_stop_pct"] = stop_pct
+                    existing["entry"] = entry_price
+                    existing["entry_time"] = datetime.now().isoformat()
+                    existing.setdefault("peak", entry_price)
+                    existing.setdefault("target_booked", False)
+                    self._position_peaks[tsym] = existing
+                    self._save_position_peaks()
+                    logger.info(
+                        f"   🛡️ Structural SL: {tsym} stop=-{stop_pct:.1f}% "
+                        f"(zone-based, not fixed -7%)")
 
                 logger.info(
                     f"   ✅ Order accepted: {order_status}")

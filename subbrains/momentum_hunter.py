@@ -117,6 +117,8 @@ def detect_orb_breakout(
     if h > orb_high and c > orb_high and body_pct >= ORB_MIN_BODY_PCT:
         if vol_mult >= ORB_BREAKOUT_VOL_MULT:
             score = min(100.0, body_pct * 0.4 + vol_mult * 15 + 30)
+            # Structural stop: below ORB low (the bottom of the opening range)
+            structural_stop = orb_low * 0.98
             logger.info(
                 f"🚀 ORB BREAKOUT UP: high ₹{h:.2f} > ORB ₹{orb_high:.2f} "
                 f"body={body_pct:.0f}% vol={vol_mult:.1f}x score={score:.0f}")
@@ -127,12 +129,14 @@ def detect_orb_breakout(
                 "strike_kind": "ATM",
                 "score_details": f"ORB-UP body={body_pct:.0f}% vol={vol_mult:.1f}x",
                 "strategy": "ORB_BREAKOUT",
+                "structural_stop": structural_stop,
             }
 
     # Breakout BELOW opening range low → SELL
     if l < orb_low and c < orb_low and body_pct >= ORB_MIN_BODY_PCT:
         if vol_mult >= ORB_BREAKOUT_VOL_MULT:
             score = min(100.0, body_pct * 0.4 + vol_mult * 15 + 30)
+            structural_stop = orb_high * 1.02
             logger.info(
                 f"🚀 ORB BREAKOUT DOWN: low ₹{l:.2f} < ORB ₹{orb_low:.2f} "
                 f"body={body_pct:.0f}% vol={vol_mult:.1f}x score={score:.0f}")
@@ -143,6 +147,7 @@ def detect_orb_breakout(
                 "strike_kind": "ATM",
                 "score_details": f"ORB-DOWN body={body_pct:.0f}% vol={vol_mult:.1f}x",
                 "strategy": "ORB_BREAKOUT",
+                "structural_stop": structural_stop,
             }
 
     return None
@@ -214,6 +219,16 @@ def detect_momentum_spike(
     body_pct = abs(closes[-1] - opens[-1]) / max(ranges[-1], 0.001) * 100
     score = min(100.0, body_pct * 0.3 + vol_mult * 10 + 25 + vol_bonus)
 
+    # === STRUCTURAL STOP — swing low/high of spike, not fixed -7% ===
+    # For BUY: stop below the lowest low of the 3 spike bars (the bottom)
+    # For SELL: stop above the highest high of the 3 spike bars
+    if direction == "BUY":
+        spike_low = float(min(lows))
+        structural_stop = spike_low * 0.98  # 2% below spike bottom
+    else:
+        spike_high = float(max(highs))
+        structural_stop = spike_high * 1.02  # 2% above spike top
+
     logger.info(
         f"🚀 MOMENTUM SPIKE {direction}: 3-bar accel "
         f"vol={vol_mult:.1f}x body={body_pct:.0f}% "
@@ -226,6 +241,7 @@ def detect_momentum_spike(
         "strike_kind": "ATM",
         "score_details": f"SPIKE-{direction} vol={vol_mult:.1f}x body={body_pct:.0f}%",
         "strategy": "MOMENTUM_SPIKE",
+        "structural_stop": structural_stop,
     }
 
 
@@ -274,6 +290,8 @@ def detect_vwap_reclaim(
         dist_pct = abs(c - vwap_val) / vwap_val * 100
         if dist_pct <= VWAP_RECLAIM_MAX_DIST_PCT and vol_mult >= VWAP_RECLAIM_MIN_VOL_MULT:
             score = min(100.0, body_pct * 0.3 + vol_mult * 12 + 25)
+            # Structural stop: below the bar's low (the dip before reclaim)
+            structural_stop = l * 0.98
             logger.info(
                 f"🚀 VWAP RECLAIM UP: close ₹{c:.2f} > VWAP ₹{vwap_val:.2f} "
                 f"vol={vol_mult:.1f}x score={score:.0f}")
@@ -284,6 +302,7 @@ def detect_vwap_reclaim(
                 "strike_kind": "ATM",
                 "score_details": f"VWAP-RECLAIM vol={vol_mult:.1f}x body={body_pct:.0f}%",
                 "strategy": "VWAP_RECLAIM",
+                "structural_stop": structural_stop,
             }
 
     # BEARISH VWAP rejection: prev close above VWAP, current close below
@@ -291,6 +310,7 @@ def detect_vwap_reclaim(
         dist_pct = abs(c - vwap_val) / vwap_val * 100
         if dist_pct <= VWAP_RECLAIM_MAX_DIST_PCT and vol_mult >= VWAP_RECLAIM_MIN_VOL_MULT:
             score = min(100.0, body_pct * 0.3 + vol_mult * 12 + 25)
+            structural_stop = h * 1.02
             logger.info(
                 f"🚀 VWAP REJECT DOWN: close ₹{c:.2f} < VWAP ₹{vwap_val:.2f} "
                 f"vol={vol_mult:.1f}x score={score:.0f}")
@@ -301,6 +321,7 @@ def detect_vwap_reclaim(
                 "strike_kind": "ATM",
                 "score_details": f"VWAP-REJECT vol={vol_mult:.1f}x body={body_pct:.0f}%",
                 "strategy": "VWAP_RECLAIM",
+                "structural_stop": structural_stop,
             }
 
     return None
