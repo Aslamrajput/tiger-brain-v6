@@ -393,20 +393,12 @@ SCALPER = {
     "REQUIRE_SUPERTREND": True,   # supertrend must agree with direction
     # === EXIT RULES (momentum-aware — give trades room to breathe) ===
     "TARGET_PCT": 15.0,           # +15% = exit (let momentum run, don't exit too early)
-    "MAX_STOP_PCT": 5.0,          # -5% = hard stop ceiling (secures capital)
-    "MAX_STOP_RUPEES": 800,       # -₹800 = absolute rupee cap per trade
+    "MAX_STOP_PCT": 7.0,          # -7% = hard stop (premium-aware: gives pullback room)
+    "MAX_STOP_RUPEES": 1500,      # -₹1500 = absolute cap (protects capital, but gives room)
     "MIN_HOLD_SECONDS": 180,      # 3-min minimum hold before SL triggers (momentum needs time)
     "CATASTROPHIC_STOP_PCT": 12.0, # -12% = instant exit even during min hold (black swan protection)
     "MAX_TRADES_PER_DAY": 6,      # was 2 — allow up to 6 quality scalps
-    # === 1-MINUTE VELOCITY (instantaneous momentum acceleration) ===
-    "VELOCITY_VOL_MIN": 1.3,      # 1m vol >= 1.3x rolling avg (lower band of 1.3-1.5x)
-    "VELOCITY_VOL_MAX": 1.5,      # 1m vol upper band (above this = climax, still valid)
-    "VELOCITY_BODY_PCT": 65,      # 1m real body >= 65% of range
-    "VELOCITY_RSI_BUY": 60,       # 1m RSI >= 60 for CE entries
-    "VELOCITY_RSI_SELL": 40,      # 1m RSI <= 40 for PE entries
-    # === OTM FALLBACK (zero-to-hero protection) ===
-    "MAX_OTM_STEPS": 3,           # max 3 OTM strikes from ATM — deep OTM forbidden
-    # === VOLUME PROFILE (institutional order blocks) ===
+    # === VOLUME PROFILE (institutional intelligence — informational only) ===
     "VP_LOOKBACK": 50,            # bars for volume histogram
     "VP_BINS": 20,                # histogram resolution
     "VP_VALUE_AREA_PCT": 70.0,    # standard 70% Value Area

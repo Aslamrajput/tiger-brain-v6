@@ -125,18 +125,16 @@ def find_scalper_entry(
     """🐅 TIGER GOD MODE SCALPER — full options math + zone research.
 
     Tiger is a 55-year senior options-buying algo. It NEVER enters bich
-    (middle). It enters at zone edges with full confluence research:
+    (middle). It enters at zone edges with full confluence research.
 
     RESEARCH STACK (all must align):
       1. Supply/Demand zone — entry at zone edge ONLY (detect_zones)
-      2. Volume Profile — POC/VAH/VAL institutional order blocks
-      3. Option chain math — PCR sentiment (fetch_pcr)
-      4. VWAP confluence — institutional consensus level
-      5. SuperTrend 15m — trend confirmation (MTF: 15m)
-      6. RSI alignment — >=60 for BUY/CE, <=40 for SELL/PE
-      7. Body + Volume — momentum confirmation (Rocket Filter final gate)
-      8. 1-Minute Velocity — instantaneous acceleration (if df_1m available)
-      9. Score >= 75
+      2. Option chain math — PCR sentiment (fetch_pcr)
+      3. VWAP confluence — institutional consensus level
+      4. SuperTrend 15m — trend confirmation (MTF: 15m)
+      5. RSI alignment — >=60 for BUY/CE, <=40 for SELL/PE
+      6. Body + Volume — momentum confirmation (Rocket Filter final gate)
+      7. Score >= 75
 
     Tiger only BUYs CE/PE. Never sells options.
     """
@@ -151,34 +149,32 @@ def find_scalper_entry(
 
     # === GATE 1: Supply/Demand Zone — entry at zone edge ONLY ===
     # Tiger never enters in the middle. It waits for price to touch a zone.
-    from pipeline.intraday_strategies import (
-        detect_zones, zone_touched_on_1m, compute_volume_profile, zone_at_vp_edge)
+    from pipeline.intraday_strategies import detect_zones, zone_touched_on_1m
     zone_idx = max(0, i_15m - 1)
     zones = detect_zones(df_15m, zone_idx, lookback=zone_idx)
     if not zones:
         logger.info(f"🚫 SKIP {symbol} — no supply/demand zones detected")
         return None
 
-    # === VOLUME PROFILE — institutional POC/VAH/VAL order blocks ===
-    # Compute VP and boost zone scores that coincide with VP edges.
-    # This is the "ALERT readiness" layer — zones at POC/VAH/VAL are the
-    # strongest institutional order blocks.
-    vp = compute_volume_profile(
-        df_15m, zone_idx,
-        lookback=SCALPER.get("VP_LOOKBACK", 50),
-        n_bins=SCALPER.get("VP_BINS", 20),
-        value_area_pct=SCALPER.get("VP_VALUE_AREA_PCT", 70.0),
-    )
-    vp_edge_bonus = 0
-    if vp:
-        for z in zones:
-            if zone_at_vp_edge(z, vp):
-                z["score"] = z.get("score", 0) + 10  # VP confluence boost
-                z["vp_edge"] = True
-        vp_str = f"POC={vp['poc']:.1f} VAH={vp['vah']:.1f} VAL={vp['val']:.1f}"
-        logger.info(f"📊 VP {symbol}: {vp_str} VA={vp['va_pct']:.0f}%")
-    else:
-        vp_str = "N/A"
+    # === VOLUME PROFILE (informational — Tiger sees, doesn't override) ===
+    # VP is pure intelligence: Tiger logs POC/VAH/VAL for awareness but
+    # does NOT boost zone scores or block entries. Zone research is the
+    # primary driver — VP is supplementary context only.
+    try:
+        from pipeline.intraday_strategies import compute_volume_profile
+        vp = compute_volume_profile(
+            df_15m, zone_idx,
+            lookback=SCALPER.get("VP_LOOKBACK", 50),
+            n_bins=SCALPER.get("VP_BINS", 20),
+            value_area_pct=SCALPER.get("VP_VALUE_AREA_PCT", 70.0),
+        )
+        if vp:
+            logger.info(
+                f"📊 VP {symbol}: POC={vp['poc']:.1f} VAH={vp['vah']:.1f} "
+                f"VAL={vp['val']:.1f} VA={vp['va_pct']:.0f}%")
+    except Exception:
+        pass
+    vp = {}
 
     # Find the best zone touch
     best_zone = None
@@ -196,9 +192,6 @@ def find_scalper_entry(
 
     direction = "BUY" if best_zone_touch == "demand" else "SELL"
     is_call = direction == "BUY"
-    vp_edge = best_zone.get("vp_edge", False)
-    if vp_edge:
-        logger.info(f"🎯 ALERT {symbol} — zone at VP edge (institutional order block)")
 
     # === GATE 2: Body confirmation — candle must confirm zone direction ===
     body = abs(c - o)
@@ -282,69 +275,6 @@ def find_scalper_entry(
         logger.info(f"🚫 SKIP {symbol} — RSI unavailable")
         return None
 
-    # === GATE 5b: 1-MINUTE VELOCITY ACCELERATION (instantaneous confirmation) ===
-    # Once price touches the dynamic zone edge, the 1m frame must confirm
-    # acceleration BEFORE entry. Tiger never chases mid-market or guesses.
-    #   - Volume Multiplier >= 1.3x-1.5x of trailing rolling average
-    #   - Candle Real Body >= 65% (bottom sweeps + sharp wick turnarounds)
-    #   - RSI bursts: >= 60 for CE, <= 40 for PE
-    # If df_1m is unavailable, this gate is skipped (downstream
-    # _verify_1m_velocity in the order-placement flow is the backstop).
-    velocity_confirmed = False
-    velocity_detail = ""
-    if df_1m is not None and not df_1m.empty:
-        try:
-            row_1m = df_1m.iloc[-1]
-            o1 = float(row_1m.get("open", 0) or 0)
-            h1 = float(row_1m.get("high", 0) or 0)
-            l1 = float(row_1m.get("low", 0) or 0)
-            c1 = float(row_1m.get("close", 0) or 0)
-            v1 = float(row_1m.get("volume", 0) or 0)
-            rng1 = h1 - l1
-            if rng1 > 0:
-                body1 = abs(c1 - o1)
-                body1_pct = (body1 / rng1) * 100
-                lookback1 = min(10, len(df_1m) - 1)
-                if lookback1 >= 3:
-                    avg_vol1 = float(df_1m["volume"].iloc[-(lookback1 + 1):-1].mean())
-                    vol1_ratio = v1 / avg_vol1 if avg_vol1 > 0 else 0
-                    # 1m RSI burst
-                    rsi1_val = 50.0
-                    try:
-                        from subbrains.mean_reversion import calculate_rsi
-                        rsi1_series = calculate_rsi(df_1m)
-                        rsi1_val = float(rsi1_series.iloc[-1])
-                    except Exception:
-                        pass
-                    vol_min = SCALPER.get("VELOCITY_VOL_MIN", 1.3)
-                    body_min = SCALPER.get("VELOCITY_BODY_PCT", 65)
-                    rsi_buy = SCALPER.get("VELOCITY_RSI_BUY", 60)
-                    rsi_sell = SCALPER.get("VELOCITY_RSI_SELL", 40)
-                    vol_ok = vol1_ratio >= vol_min
-                    body_ok = body1_pct >= body_min
-                    rsi_ok = (is_call and rsi1_val >= rsi_buy) or (not is_call and rsi1_val <= rsi_sell)
-                    velocity_confirmed = vol_ok and body_ok and rsi_ok
-                    velocity_detail = (f"1m body={body1_pct:.0f}% vol={vol1_ratio:.1f}x "
-                                       f"rsi={rsi1_val:.0f}")
-                    if not velocity_confirmed:
-                        fails = []
-                        if not vol_ok:
-                            fails.append(f"vol {vol1_ratio:.1f}x<{vol_min}x")
-                        if not body_ok:
-                            fails.append(f"body {body1_pct:.0f}%<{body_min}%")
-                        if not rsi_ok:
-                            fails.append(f"rsi {rsi1_val:.0f}")
-                        logger.info(
-                            f"🚫 SKIP {symbol} {direction} — 1m velocity not confirmed: "
-                            f"{', '.join(fails)}")
-                        return None
-                    logger.info(
-                        f"⚡ VELOCITY CONFIRMED {symbol} {direction} — {velocity_detail}")
-        except Exception as exc:
-            logger.debug(f"Scalper 1m velocity check fail {symbol}: {exc}")
-    else:
-        velocity_confirmed = True  # no 1m data → defer to downstream gate
-
     # === GATE 6: VWAP confluence (institutional consensus) ===
     vwap_ok = False
     vwap_reason = ""
@@ -426,16 +356,12 @@ def find_scalper_entry(
 
     details = (f"ZONE-{best_zone_touch} body={body_pct:.0f}% vol={vol_ratio:.1f}x "
                f"rsi={latest_rsi:.0f} pcr={pcr:.1f} vwap={'Y' if vwap_ok else 'N'} "
-               f"vp={'Y' if vp_edge else 'N'} "
-               f"vel={'Y' if velocity_confirmed else 'N'} "
                f"[{math_detail}]")
 
     logger.info(
         f"🚀 GOD MODE SIGNAL: {symbol} {direction} "
         f"zone={best_zone_touch} body={body_pct:.0f}% vol={vol_ratio:.1f}x "
         f"rsi={latest_rsi:.0f} pcr={pcr:.1f} vwap={'✓' if vwap_ok else '✗'} "
-        f"vp={'✓' if vp_edge else '✗'} "
-        f"vel={'✓' if velocity_confirmed else '✗'} "
         f"score={score:.0f} [GOD MODE]")
 
     return {
@@ -449,11 +375,6 @@ def find_scalper_entry(
         "zone_bottom": zone_bottom,
         "zone_top": zone_top,
         "structural_stop": structural_stop_underlying,
-        "vp_edge": vp_edge,
-        "velocity_confirmed": velocity_confirmed,
-        "vp_poc": vp.get("poc", 0) if vp else 0,
-        "vp_vah": vp.get("vah", 0) if vp else 0,
-        "vp_val": vp.get("val", 0) if vp else 0,
     }
 
 

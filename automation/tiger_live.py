@@ -519,20 +519,18 @@ class TigerLiveRunner:
         direction_ok = (is_ce and candle_green) or (not is_ce and candle_red)
 
         # Gate 1: Body >= 65% (dynamic — captures impulse + wick turnarounds)
-        body_min = SCALPER.get("VELOCITY_BODY_PCT", SCALPER["MIN_BODY_PCT"])
-        if body_pct < body_min:
+        if body_pct < SCALPER["MIN_BODY_PCT"]:
             logger.info(
                 f"🚫 VELOCITY BLOCK {symbol} {option_type} — "
-                f"1m body {body_pct:.0f}% < {body_min}% "
+                f"1m body {body_pct:.0f}% < {SCALPER['MIN_BODY_PCT']}% "
                 f"(no impulse confirmation)")
             return False
 
-        # Gate 2: Volume >= 1.3x (sensitive — anti-freeze, 1.3x-1.5x band)
-        vol_min = SCALPER.get("VELOCITY_VOL_MIN", SCALPER["MIN_VOLUME_SURGE"])
-        if vol_ratio < vol_min:
+        # Gate 2: Volume >= 1.4x (sensitive — anti-freeze, 1.3x-1.5x band)
+        if vol_ratio < SCALPER["MIN_VOLUME_SURGE"]:
             logger.info(
                 f"🚫 VELOCITY BLOCK {symbol} {option_type} — "
-                f"1m vol {vol_ratio:.1f}x < {vol_min}x "
+                f"1m vol {vol_ratio:.1f}x < {SCALPER['MIN_VOLUME_SURGE']}x "
                 f"(no micro-momentum surge)")
             return False
 
@@ -544,30 +542,9 @@ class TigerLiveRunner:
                 f"but need {'green' if is_ce else 'red'} for {option_type}")
             return False
 
-        # Gate 4: RSI burst — >= 60 for CE, <= 40 for PE (velocity boundary)
-        rsi_1m = 50.0
-        try:
-            from subbrains.mean_reversion import calculate_rsi
-            rsi_1m = float(calculate_rsi(df_1m).iloc[-1])
-            rsi_buy = SCALPER.get("VELOCITY_RSI_BUY", 60)
-            rsi_sell = SCALPER.get("VELOCITY_RSI_SELL", 40)
-            if is_ce and rsi_1m < rsi_buy:
-                logger.info(
-                    f"🚫 VELOCITY BLOCK {symbol} {option_type} — "
-                    f"1m RSI {rsi_1m:.0f} < {rsi_buy} (no bullish velocity)")
-                return False
-            if not is_ce and rsi_1m > rsi_sell:
-                logger.info(
-                    f"🚫 VELOCITY BLOCK {symbol} {option_type} — "
-                    f"1m RSI {rsi_1m:.0f} > {rsi_sell} (no bearish velocity)")
-                return False
-        except Exception:
-            pass  # RSI unavailable — don't block (other gates sufficient)
-
         logger.info(
             f"✅ VELOCITY CONFIRMED {symbol} {option_type} — "
             f"1m body={body_pct:.0f}% vol={vol_ratio:.1f}x "
-            f"rsi={rsi_1m:.0f} "
             f"{'green' if candle_green else 'red'} candle")
         return True
 
@@ -1399,17 +1376,15 @@ class TigerLiveRunner:
             # === ZERO-TO-HERO OTM FALLBACK ===
             # If ATM/ITM option is still unaffordable after MINI fallback,
             # walk OTM strikes until we find one that fits the balance.
-            # MAX 3 steps from ATM — deep OTM buying is FORBIDDEN.
-            # This is how Tiger trades MCX with a small account.
+            # This is how Tiger trades MCX with a small account — and how
+            # it catches CHEAP strikes that rocket (₹36 → ₹160).
             if one_lot_cost > available_balance:
-                from config.thresholds import SCALPER as _SCALPER_CFG
                 affordable = find_affordable_option(
                     underlying=symbol,
                     atm_strike=float(strike),
                     option_type=option_type,
                     balance=available_balance,
                     broker=self.broker,
-                    max_otm_steps=_SCALPER_CFG.get("MAX_OTM_STEPS", 3),
                 )
                 if affordable is not None:
                     logger.info(
@@ -1431,8 +1406,7 @@ class TigerLiveRunner:
                     logger.info(
                         f"   ❌ NO AFFORDABLE STRIKE — {symbol} {strike}{option_type} "
                         f"min 1 lot ₹{one_lot_cost:,.0f} > balance ₹{available_balance:,.0f}, "
-                        f"no OTM strike affordable within {_SCALPER_CFG.get('MAX_OTM_STEPS', 3)} steps "
-                        f"(deep OTM forbidden)")
+                        f"no OTM strike affordable within 15 steps")
 
             # 🔥 FUND BRAIN LIVE SIZING — real balance + real LTP + real lot
             re_size = self._live_re_size(
