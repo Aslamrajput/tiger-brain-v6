@@ -121,6 +121,7 @@ class TigerLiveRunner:
         # Data refresh throttle — with 1-min scans, only refresh REST candles
         # every 5 min. SmartWebSocketV2 live ticks fill the gap between refreshes.
         self._last_data_refresh: datetime | None = None
+        self._last_15m_fetch: datetime | None = None
 
     def _live_re_size(
         self, real_balance: float, real_ltp: float, real_lot_size: int,
@@ -674,12 +675,14 @@ class TigerLiveRunner:
                 logger.info("Live data refresh: market CLOSED, skip fetch.")
                 return
 
-            # 15m refresh throttle — only fetch every 30 min
+            # 15m refresh throttle — separate timestamp (not _last_data_refresh
+            # which updates every 2 min for WS merge). This ensures 15m REST
+            # fetch actually happens every 30 min, not skipped forever.
             now_dt = datetime.now()
             need_15m_fetch = True
-            if self._last_data_refresh is not None:
-                mins_since = (now_dt - self._last_data_refresh).total_seconds() / 60
-                if mins_since < self._15M_REFRESH_INTERVAL_MIN:
+            if self._last_15m_fetch is not None:
+                mins_since_15m = (now_dt - self._last_15m_fetch).total_seconds() / 60
+                if mins_since_15m < self._15M_REFRESH_INTERVAL_MIN:
                     need_15m_fetch = False
 
             if need_15m_fetch:
@@ -692,6 +695,7 @@ class TigerLiveRunner:
                     # Don't lose symbols that failed this fetch (keep old data)
                     for sym, df in fresh_15m.items():
                         self.data_map[sym] = df
+                    self._last_15m_fetch = datetime.now()
                     logger.info("15m refresh [%s]: %d symbols fetched, "
                                 "%d failed (kept cached). Failed: %s",
                                 market, len(fresh_15m),
@@ -701,7 +705,7 @@ class TigerLiveRunner:
                     logger.warning("15m refresh fail — using cached data")
             else:
                 logger.debug("15m refresh skipped (last %.0f min ago) — "
-                             "using cached + WS live", mins_since)
+                             "using cached + WS live", mins_since_15m)
 
             # Always merge WS 1m candles (zero REST calls)
             self._merge_ws_1m_candles()
