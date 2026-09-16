@@ -244,18 +244,30 @@ def nse_scan_symbols() -> dict:
 def _fallback_stock_symbols() -> list[str]:
     """Return the fallback stock list when Bhavcopy is unavailable.
 
-    Self-contained (does not import stock_filter, which needs pandas).
+    19 most liquid F&O stock options — carefully selected for:
+    - High option volume (tight bid-ask spreads)
+    - High open interest (institutional participation)
+    - Consistent intraday momentum (Tiger needs movement)
+
+    Total NSE scan = 4 index + 19 stocks = 23 symbols.
+    This keeps REST candle fetch under 23 calls/refresh — well within
+    Angel One rate limits even during market open.
     """
     return [
+        # Banks (highest option liquidity)
         "HDFCBANK", "ICICIBANK", "SBIN", "AXISBANK", "KOTAKBANK",
+        # Financials
         "BAJFINANCE", "BAJAJFINSV",
-        "RELIANCE", "TCS", "INFY", "HCLTECH", "WIPRO", "TECHM",
-        "TATASTEEL", "HINDALCO", "JSWSTEEL", "ONGC", "COALINDIA",
-        "NTPC", "POWERGRID", "LT",
-        "ITC", "HINDUNILVR", "NESTLEIND", "BRITANNIA", "DABUR",
-        "SUNPHARMA", "CIPLA", "DRREDDY", "DIVISLAB", "GRASIM",
-        "MARUTI", "TITAN", "ASIANPAINT", "ULTRACEMCO",
-        "BHARTIARTL", "TATACONSUM", "ADANIENT",
+        # IT
+        "RELIANCE", "TCS", "INFY", "HCLTECH",
+        # Metals/Energy
+        "TATASTEEL", "HINDALCO", "ONGC",
+        # FMCG
+        "ITC", "HINDUNILVR",
+        # Pharma
+        "SUNPHARMA", "CIPLA",
+        # Infra/Auto
+        "LT", "MARUTI",
     ]
 
 

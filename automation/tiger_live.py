@@ -1134,7 +1134,7 @@ class TigerLiveRunner:
         need_refresh = True
         if self._last_data_refresh is not None:
             mins_since = (now_dt - self._last_data_refresh).total_seconds() / 60
-            if mins_since < 5.0:
+            if mins_since < 10.0:
                 need_refresh = False
         if need_refresh:
             self._refresh_live_data()

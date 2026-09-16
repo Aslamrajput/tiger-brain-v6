@@ -194,12 +194,10 @@ REPLAY = {
 
 UNIVERSE = {
     "TOP_N_SYMBOLS": 5,
-    # Live NSE scan: how many liquid stock options to scan after indexes.
-    # SmartWebSocketV2 has zero rate limits — no reason to cap at 11.
-    # Bhavcopy liquidity pipeline ranks all F&O stocks; we take the top N.
-    # 50 = full liquid F&O stock options universe (index options scanned
-    # separately + first, on top of this count).
-    "TOP_N_LIQUID_STOCKS": 50,
+    # Live NSE scan: 4 index + 19 stocks = 23 total symbols.
+    # 23 symbols × 1s delay = 23s per refresh — well within Angel rate limits.
+    # WebSocket streams live ticks for all 23 (zero rate limits on LTP/1m).
+    "TOP_N_LIQUID_STOCKS": 19,
     "RESCAN_INTERVAL_MINUTES": 1,
     "SCORE_WEIGHTS": {
         "volume_rank": 0.35,
