@@ -64,3 +64,25 @@ Morning golden window scalper activation reduced to 10 min (was 30).
 ## HDFCBANK Baseline (must be preserved)
 +6.92% return, 3 wins, 100% win rate, +73%/+62%/+58% premium captures.
 All 3 HDFCBANK explosive captures preserved in the bugfix commit.
+
+
+## MASTER BRAIN OVERRIDE (commit 9087c74) — 5-module SMC + Greeks engine
+- Module 1: SMC Zone Calculator — detect_fvg() + detect_absorption_pivots() in
+  pipeline/intraday_strategies.py. Zone enrichment via _enrich_zones_with_smc().
+  FVG confluence + absorption pivot boost zone score. Strict 0.3% entry gate tolerance
+  in zone_touched_on_1m() — break-through = instant reject.
+- Module 2: Options Greeks Layer — find_affordable_option() in data/loader.py now
+  fetches live IV + Delta from Angel One optionGreek API. Delta >= 0.35 gate rejects
+  dead zero-delta junk. ATM IV crush risk detection (>50% = warning). Max 15 OTM steps,
+  balance-aware. Falls back to moneyness delta estimate if greeks unavailable.
+- Module 3: 1m Rocket Filter — _verify_1m_velocity() in tiger_live.py now has 4 gates:
+  body>=65%, vol>=1.4x, direction match, RSI>=60 (CE) / <=40 (PE).
+- Module 4: Anti-loop State Tracking — state_lock.json disk-backed daily_trade_count
+  ledger in tiger_live.py. Hard cap 6 trades/day — permanent lock at 6 until session
+  reset. Restart-safe. 2-hour directional cooldown per symbol (existing, verified).
+- Module 5: Fixed 1:2 RR + Risk Ceiling — Scalper exit in monitor_open_positions()
+  now uses dynamic 1:2 RR target = 2 x effective_stop_pct. SL cap 7% or Rs 1500 max.
+  +3% breakeven lock. Catastrophic -12% instant exit.
+- Deploy: EC2 (3.108.53.100), commit 9087c74, service active, PID running.
+  Fresh log at 16:51 confirms optionGreek API calls (Module 2 live).
+- Tests: 543 passed, 0 failed.
