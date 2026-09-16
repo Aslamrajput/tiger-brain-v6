@@ -228,9 +228,18 @@ def find_scalper_entry(
             f"🚫 SKIP {symbol} — body {body_pct:.0f}% < {SCALPER['MIN_BODY_PCT']}%")
         return None
 
-    # === GATE 3: Volume surge ===
-    vol = float(row.get("volume", 0) or 0)
-    avg_vol = float(df_15m["volume"].iloc[max(0, i_15m - 10):i_15m].mean())
+    # === GATE 3: Volume surge — 1m volume vs 1m average (apples to apples) ===
+    # Compare latest 1m candle volume to rolling 1m average.
+    # NOT 15m volume — 15m latest bar is incomplete (forming), giving
+    # artificially low ratio (0.2x). 1m bars from WS are complete each minute.
+    if df_1m is not None and len(df_1m) >= 10:
+        row_1m = df_1m.iloc[-1]
+        vol = float(row_1m.get("volume", 0) or 0)
+        avg_vol = float(df_1m["volume"].iloc[-11:-1].mean())
+    else:
+        # Fallback: 15m volume (last COMPLETE bar, not forming bar)
+        vol = float(df_15m["volume"].iloc[i_15m - 1] if i_15m > 0 else row.get("volume", 0))
+        avg_vol = float(df_15m["volume"].iloc[max(0, i_15m - 11):max(1, i_15m - 1)].mean())
     vol_ratio = vol / avg_vol if avg_vol > 0 else 0
     if avg_vol > 0 and vol < avg_vol * SCALPER["MIN_VOLUME_SURGE"]:
         logger.info(
