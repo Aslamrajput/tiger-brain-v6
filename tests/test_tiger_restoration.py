@@ -193,3 +193,182 @@ class TestVolumeProfileConfig:
     def test_vp_value_area_pct_is_70(self):
         from config.thresholds import SCALPER
         assert SCALPER["VP_VALUE_AREA_PCT"] == 70.0
+
+
+class TestRealZoneIntegrity:
+    """Verify Tiger only detects REAL zones — no fake zones."""
+
+    def test_cluster_min_is_4(self):
+        """4+ bars consolidation required, not 3 (prevents noise bases)."""
+        from pipeline.intraday_strategies import detect_zones
+        import inspect
+        sig = inspect.signature(detect_zones)
+        assert sig.parameters["cluster_min"].default == 4
+
+    def test_impulse_min_pct_is_06(self):
+        """0.6% impulse required, not 0.4% (prevents normal-bar fake zones)."""
+        from pipeline.intraday_strategies import detect_zones
+        import inspect
+        sig = inspect.signature(detect_zones)
+        assert sig.parameters["impulse_min_pct"].default == 0.6
+
+    def test_3_bar_cluster_rejected(self):
+        """3-bar cluster should NOT form a zone (too short = noise)."""
+        from pipeline.intraday_strategies import detect_zones
+        idx = pd.date_range("2026-09-08 09:15", periods=50, freq="15min")
+        opens, highs, lows, closes, vols = [], [], [], [], []
+        px = 100.0
+        for i in range(50):
+            o = px
+            if i == 10:  # impulse — large body/range so NOT counted as cluster bar
+                c = o * 1.01; h, l, v = c + 0.3, o - 0.1, 2000
+            elif 11 <= i <= 13:  # 3-bar cluster (too short)
+                c = o + 0.5; h, l, v = o + 3, o - 1, 800
+            elif i == 14:  # explosive move
+                c = o + 20; h, l, v = o + 22, o - 1, 4000
+            else:
+                # Trending bars with large bodies (body/range > 0.5)
+                c = o + 2.0; h, l, v = c + 0.5, o - 0.5, 1200
+            opens.append(o); highs.append(h); lows.append(l); closes.append(c); vols.append(v)
+            px = c
+        df = pd.DataFrame({"open": opens, "high": highs, "low": lows,
+                           "close": closes, "volume": vols}, index=idx)
+        zones = detect_zones(df, 49, lookback=40)
+        assert len(zones) == 0, "3-bar cluster should be rejected (noise, not real base)"
+
+    def test_4_bar_cluster_accepted(self):
+        """4-bar cluster should form a zone (real institutional base)."""
+        from pipeline.intraday_strategies import detect_zones
+        idx = pd.date_range("2026-09-08 09:15", periods=50, freq="15min")
+        opens, highs, lows, closes, vols = [], [], [], [], []
+        px = 100.0
+        for i in range(50):
+            o = px
+            if i == 10:  # impulse — large body/range
+                c = o * 1.01; h, l, v = c + 0.3, o - 0.1, 2000
+            elif 11 <= i <= 14:  # 4-bar cluster (real base)
+                c = o + 0.5; h, l, v = o + 3, o - 1, 800
+            elif i == 15:  # explosive move
+                c = o + 20; h, l, v = o + 22, o - 1, 4000
+            else:
+                c = o + 2.0; h, l, v = c + 0.5, o - 0.5, 1200
+            opens.append(o); highs.append(h); lows.append(l); closes.append(c); vols.append(v)
+            px = c
+        df = pd.DataFrame({"open": opens, "high": highs, "low": lows,
+                           "close": closes, "volume": vols}, index=idx)
+        zones = detect_zones(df, 49, lookback=40)
+        assert len(zones) >= 1, "4-bar cluster should be accepted as real zone"
+
+    def test_zone_touch_tolerance_is_03pct(self):
+        """Zone touch tolerance must be 0.3%, not 2% (2% = zone break = fake)."""
+        from pipeline.intraday_strategies import zone_touched_on_1m
+        # Demand zone at 100-101
+        zone = {"type": "demand", "top": 101.0, "bottom": 100.0}
+        # Price drops to 99.0 (1% below bottom) — should NOT touch (was 2% before)
+        bar = {"open": 102, "high": 103, "low": 99.0, "close": 101}
+        result = zone_touched_on_1m(bar, zone)
+        assert result is None, "1% penetration should NOT count as touch (was 2% = fake)"
+
+    def test_real_zone_touch_accepted(self):
+        """Price at zone edge should count as real touch."""
+        from pipeline.intraday_strategies import zone_touched_on_1m
+        zone = {"type": "demand", "top": 101.0, "bottom": 100.0}
+        # Price low touches zone top (real touch)
+        bar = {"open": 102, "high": 103, "low": 100.5, "close": 101}
+        result = zone_touched_on_1m(bar, zone)
+        assert result == "demand"
+
+    def test_dedup_merges_overlapping_zones(self):
+        """Overlapping zones should be merged (keep strongest)."""
+        from pipeline.intraday_strategies import detect_zones
+        idx = pd.date_range("2026-09-08 09:15", periods=60, freq="15min")
+        opens, highs, lows, closes, vols = [], [], [], [], []
+        px = 100.0
+        for i in range(60):
+            o = px
+            if i == 10:  # first impulse
+                c = o * 1.01
+                h, l, v = c + 2, o - 1, 2000
+            elif 11 <= i <= 14:  # first base
+                c = o + 0.5
+                h, l, v = o + 3, o - 1, 800
+            elif i == 15:  # explosive
+                c = o + 30
+                h, l, v = o + 32, o - 1, 4000
+            elif i == 20:  # second impulse (overlapping zone nearby)
+                c = o * 1.008
+                h, l, v = c + 2, o - 1, 1800
+            elif 21 <= i <= 24:  # second base (slightly higher)
+                c = o + 0.5
+                h, l, v = o + 3, o - 1, 800
+            elif i == 25:  # explosive
+                c = o + 25
+                h, l, v = o + 27, o - 1, 3500
+            else:
+                c = o + 0.3
+                h, l, v = max(o, c) + 2, min(o, c) - 2, 1200
+            opens.append(o); highs.append(h); lows.append(l); closes.append(c); vols.append(v)
+            px = c
+        df = pd.DataFrame({"open": opens, "high": highs, "low": lows,
+                           "close": closes, "volume": vols}, index=idx)
+        zones = detect_zones(df, 59, lookback=50)
+        # Check no overlapping zones of same type
+        for a in range(len(zones)):
+            for b in range(a + 1, len(zones)):
+                if zones[a]["type"] == zones[b]["type"]:
+                    overlap_top = min(zones[a]["top"], zones[b]["top"])
+                    overlap_bot = max(zones[a]["bottom"], zones[b]["bottom"])
+                    if overlap_top > overlap_bot:
+                        z_area = zones[a]["top"] - zones[a]["bottom"]
+                        d_area = zones[b]["top"] - zones[b]["bottom"]
+                        overlap_area = overlap_top - overlap_bot
+                        assert overlap_area / min(z_area, d_area) <= 0.5, \
+                            "Overlapping zones should be deduped"
+
+    def test_weak_impulse_rejected(self):
+        """0.4% impulse should NOT create a zone (too weak = normal bar)."""
+        from pipeline.intraday_strategies import detect_zones
+        idx = pd.date_range("2026-09-08 09:15", periods=50, freq="15min")
+        opens, highs, lows, closes, vols = [], [], [], [], []
+        px = 100.0
+        for i in range(50):
+            o = px
+            if i == 10:  # weak impulse — large body/range, 0.4% move
+                c = o * 1.004; h, l, v = c + 0.2, o, 1500
+            elif 11 <= i <= 14:  # 4-bar base
+                c = o + 0.5; h, l, v = o + 3, o - 1, 800
+            elif i == 15:  # explosive
+                c = o + 20; h, l, v = o + 22, o - 1, 4000
+            else:
+                # Gentle drift (< 0.6% per bar) with large body/ratio
+                c = o + 0.3; h, l, v = c + 0.1, o - 0.1, 1200
+            opens.append(o); highs.append(h); lows.append(l); closes.append(c); vols.append(v)
+            px = c
+        df = pd.DataFrame({"open": opens, "high": highs, "low": lows,
+                           "close": closes, "volume": vols}, index=idx)
+        zones = detect_zones(df, 49, lookback=40)
+        assert len(zones) == 0, "0.4% impulse should be rejected (normal bar, not institutional)"
+
+    def test_strong_impulse_accepted(self):
+        """0.8% impulse should create a zone (real institutional move)."""
+        from pipeline.intraday_strategies import detect_zones
+        idx = pd.date_range("2026-09-08 09:15", periods=50, freq="15min")
+        opens, highs, lows, closes, vols = [], [], [], [], []
+        px = 100.0
+        for i in range(50):
+            o = px
+            if i == 10:  # strong impulse — large body/range, 0.8% move
+                c = o * 1.008; h, l, v = c + 0.3, o - 0.1, 2000
+            elif 11 <= i <= 14:  # 4-bar base
+                c = o + 0.5; h, l, v = o + 3, o - 1, 800
+            elif i == 15:  # explosive
+                c = o + 20; h, l, v = o + 22, o - 1, 4000
+            else:
+                # Gentle drift (< 0.6% per bar) with large body/ratio
+                c = o + 0.3; h, l, v = c + 0.1, o - 0.1, 1200
+            opens.append(o); highs.append(h); lows.append(l); closes.append(c); vols.append(v)
+            px = c
+        df = pd.DataFrame({"open": opens, "high": highs, "low": lows,
+                           "close": closes, "volume": vols}, index=idx)
+        zones = detect_zones(df, 49, lookback=40)
+        assert len(zones) >= 1, "0.8% impulse should be accepted as real institutional move"

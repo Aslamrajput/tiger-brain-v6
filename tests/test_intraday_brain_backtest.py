@@ -520,7 +520,7 @@ def test_run_backtest_sniper_mode_produces_trades_with_1m():
 # V6.6 — EXPLOSIVE ZONE QUALITY, LIQUIDITY SWEEP, DYNAMIC TRAIL
 # ============================================================
 def _explosive_demand_df(start=22000, n_bars=60, base_idx=20):
-    """15m df with a clear demand base (3-bar tight cluster) at base_idx
+    """15m df with a clear demand base (4-bar tight cluster) at base_idx
     preceded by a strong up impulse leg and followed by an explosive up-move
     on rising volume (institutional rejection)."""
     idx = pd.date_range("2026-08-27 09:15", periods=n_bars, freq="15min",
@@ -530,15 +530,15 @@ def _explosive_demand_df(start=22000, n_bars=60, base_idx=20):
     for i in range(n_bars):
         o = px
         if i == base_idx - 1:  # impulse leg: strong UP bar before the base
-            c = o * 1.01  # +1% up move (>= impulse_min_pct 0.4%)
+            c = o * 1.01  # +1% up move (>= impulse_min_pct 0.6%)
             h, l, v = c + 5, o - 2, 2000
-        elif base_idx <= i <= base_idx + 2:  # 3-bar tight base cluster
+        elif base_idx <= i <= base_idx + 3:  # 4-bar tight base cluster
             c = o + 1
             h, l, v = o + 4, o - 1, 1000  # small bodies, overlapping
-        elif i == base_idx + 3:  # explosive up-move on volume
+        elif i == base_idx + 4:  # explosive up-move on volume
             c = o + 80
             h, l, v = o + 90, o - 2, 5000
-        elif i == base_idx + 4:
+        elif i == base_idx + 5:
             c = o + 60
             h, l, v = o + 70, o - 5, 4500
         else:
@@ -564,13 +564,13 @@ def _weak_demand_df(start=22000, n_bars=60, base_idx=20):
         if i == base_idx - 1:  # impulse leg: strong UP bar before the base
             c = o * 1.01
             h, l, v = c + 5, o - 2, 2000
-        elif base_idx <= i <= base_idx + 2:  # 3-bar tight base cluster
+        elif base_idx <= i <= base_idx + 3:  # 4-bar tight base cluster
             c = o + 1
             h, l, v = o + 4, o - 1, 1000
-        elif i == base_idx + 3:  # WEAK move: tiny range, normal volume
+        elif i == base_idx + 4:  # WEAK move: tiny range, normal volume
             c = o + 5
             h, l, v = o + 8, o - 1, 1400
-        elif i == base_idx + 4:
+        elif i == base_idx + 5:
             c = o + 3
             h, l, v = o + 6, o - 1, 1400
         else:

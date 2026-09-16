@@ -16,11 +16,11 @@ def _make_zone_df(n=50, zone_touch=True):
     opens, closes, highs, lows, vols = [], [], [], [], []
     # Bar 0: up impulse
     opens.append(99.0); closes.append(101.0); highs.append(101.2); lows.append(98.8); vols.append(2000)
-    # Bars 1-3: tight cluster (demand zone base)
-    for _ in range(3):
+    # Bars 1-4: tight cluster (demand zone base) — 4 bars for real institutional base
+    for _ in range(4):
         opens.append(100.5); closes.append(100.6); highs.append(100.8); lows.append(100.3); vols.append(800)
-    # Bars 4-44: price up and away
-    for i in range(4, 45):
+    # Bars 5-44: price up and away
+    for i in range(5, 45):
         opens.append(100 + i * 0.4); closes.append(100 + (i + 1) * 0.4)
         highs.append(100 + (i + 1) * 0.4 + 0.2); lows.append(100 + i * 0.4 - 0.1)
         vols.append(1200)

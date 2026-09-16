@@ -45,7 +45,7 @@ def _bar_body_ratio(c: pd.Series) -> float:
 
 
 def detect_zones(df: pd.DataFrame, i: int, lookback: int = 40,
-                 cluster_min: int = 3, impulse_min_pct: float = 0.4) -> list[dict]:
+                 cluster_min: int = 4, impulse_min_pct: float = 0.6) -> list[dict]:
     """
     Detect major Supply & Demand zones up to bar i (no lookahead).
 
@@ -59,6 +59,13 @@ def detect_zones(df: pd.DataFrame, i: int, lookback: int = 40,
       3. DEMAND zone = base BEFORE an up-move (institutions bought).
       4. SUPPLY zone = base BEFORE a down-move (institutions sold).
       Zone bounds = base's wick high & low.
+
+    REAL ZONE GATES (anti-fake):
+      - cluster_min=4: 4+ bars consolidation (not 3-bar noise)
+      - impulse_min_pct=0.6: real institutional move (not normal bar)
+      - impulse checked over 1-2 bars before base (not just 1)
+      - freshness: zone must NOT be broken since formation
+      - dedup: overlapping zones merged, strongest kept
 
     Returns list of zones: {type: 'demand'|'supply', top, bottom, score, bar}
     """
@@ -98,13 +105,23 @@ def detect_zones(df: pd.DataFrame, i: int, lookback: int = 40,
         base_low = min(lows[j:j + cluster_min])
         base_mid = (base_high + base_low) / 2
 
-        # Look at the bar BEFORE the base (impulsive leg)
+        # Look at the bar(s) BEFORE the base (impulsive leg)
+        # Real institutional impulse can be 1-2 bars. Check both.
         if j == 0:
             j += 1
             continue
-        prev_close = closes[j - 1]
-        prev_open = opens[j - 1]
-        leg_move = (prev_close - prev_open) / max(prev_open, 1e-9)
+        # Check last 1-2 bars before base for strongest impulse
+        prev_close_1 = closes[j - 1]
+        prev_open_1 = opens[j - 1]
+        leg_move_1 = (prev_close_1 - prev_open_1) / max(prev_open_1, 1e-9)
+        # Also check 2-bar impulse if available
+        leg_move_2 = 0.0
+        if j >= 2:
+            prev_close_2 = closes[j - 2]
+            prev_open_2 = opens[j - 2]
+            leg_move_2 = (prev_close_2 - prev_open_2) / max(prev_open_2, 1e-9)
+        # Use the strongest impulse (1-bar or 2-bar)
+        leg_move = leg_move_1 if abs(leg_move_1) >= abs(leg_move_2) else leg_move_2
 
         # Skip if base is too recent (we want mature zones, not current chop)
         bars_since_base = n - (j + cluster_min)
@@ -137,8 +154,30 @@ def detect_zones(df: pd.DataFrame, i: int, lookback: int = 40,
                 })
         j += cluster_min  # skip past this cluster
 
-    # Dedupe: keep strongest zone per type within 0.5% of price
-    return zones
+    # === DEDUP: merge overlapping zones, keep strongest per type ===
+    # Real institutional zones don't overlap. If two zones of the same
+    # type overlap (>50% area overlap), keep the one with higher score.
+    if len(zones) <= 1:
+        return zones
+    deduped = []
+    for z in sorted(zones, key=lambda x: x["score"], reverse=True):
+        overlap_found = False
+        for d in deduped:
+            if d["type"] != z["type"]:
+                continue
+            # Check area overlap
+            overlap_top = min(d["top"], z["top"])
+            overlap_bot = max(d["bottom"], z["bottom"])
+            if overlap_top > overlap_bot:
+                z_area = z["top"] - z["bottom"]
+                d_area = d["top"] - d["bottom"]
+                overlap_area = overlap_top - overlap_bot
+                if overlap_area / min(z_area, d_area) > 0.5:
+                    overlap_found = True
+                    break
+        if not overlap_found:
+            deduped.append(z)
+    return deduped
 
 
 # ============================================================
@@ -330,7 +369,7 @@ def zone_explosive_quality(df: pd.DataFrame, base_bar_idx: int,
 
 
 def detect_zones_explosive(df: pd.DataFrame, i: int, lookback: int = 40,
-                           cluster_min: int = 3, impulse_min_pct: float = 0.4,
+                           cluster_min: int = 4, impulse_min_pct: float = 0.6,
                            require_explosive: bool = True,
                            expansion_lookback: int = 3,
                            min_expansion_atr: float = 1.5) -> list[dict]:
@@ -631,14 +670,19 @@ def delta_spike_confirms(df_1m, i, zone_type, lookback: int = 5) -> tuple[bool, 
 def zone_touched_on_1m(bar, zone) -> str | None:
     """
     Did a 1m bar TOUCH a 15m zone? Returns 'demand' / 'supply' / None.
-      demand touch: 1m low <= zone top  AND 1m low >= zone bottom*0.98
-      supply touch: 1m high >= zone bottom AND 1m high <= zone top*1.02
+
+    REAL TOUCH — no fake tolerance:
+      demand touch: 1m low <= zone top  AND 1m low >= zone bottom * 0.997
+      supply touch: 1m high >= zone bottom AND 1m high <= zone top * 1.003
+
+    Tolerance is only 0.3% (not 2%) — a 2% penetration is a ZONE BREAK,
+    not a touch. Tiger only trades real touches, not broken zones.
     """
     low = float(bar["low"])
     high = float(bar["high"])
-    if zone["type"] == "demand" and low <= zone["top"] and low >= zone["bottom"] * 0.98:
+    if zone["type"] == "demand" and low <= zone["top"] and low >= zone["bottom"] * 0.997:
         return "demand"
-    if zone["type"] == "supply" and high >= zone["bottom"] and high <= zone["top"] * 1.02:
+    if zone["type"] == "supply" and high >= zone["bottom"] and high <= zone["top"] * 1.003:
         return "supply"
     return None
 
