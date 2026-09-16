@@ -650,25 +650,23 @@ class TigerLiveRunner:
             logger.warning(f"WS subscribe fail (REST fallback): {exc}")
 
     # ============================================================
-    # LIVE DATA REFRESH — fetch FRESH data every 5 min (throttled)
+    # LIVE DATA REFRESH — 15m cached 30 min, 1m from WebSocket
     # ============================================================
+    _15M_REFRESH_INTERVAL_MIN = 30
+
     def _refresh_live_data(self):
-        """Fetch FRESH 15m data on every intraday scan — ACTIVE market only.
+        """Refresh 15m data (cached 30 min) + merge WS 1m candles.
 
-        Two-market session:
-          NSE (09:15-15:15): fetch 4 INDEX + up to 50 liquid STOCKS (Bhavcopy filter)
-          MCX (15:30-23:15): fetch 4 MCX symbols (GOLDM, SILVERM, CRUDEOIL, NATURALGAS)
+        15m historical candles (zone detection) barely change in 30 min.
+        Fetching them every 10 min wastes REST calls and hits rate limits.
+        Instead: fetch 15m every 30 min, update latest bars from WS live
+        ticks between refreshes. 1m always from WebSocket (zero rate limits).
 
-        INDEX scanned first (priority), STOCKS after. Options buying only.
-
-        RATE LIMIT FIX: Only fetch 15m candles from REST (needed for 30-day
-        zone analysis). 1m candles come from WebSocket TickCandleBuilder
-        (live ticks → zero rate limits). This cuts REST calls by 50%.
+        REST calls per 30 min: 27 (was 27 every 10 min = 81).
         """
         if self.broker is None:
             return
         try:
-            from backtest.run_tiger_brain_backtest import fetch_angel_data
             from universe.fno_universe import get_active_scan_symbols
 
             symbols, market = get_active_scan_symbols()
@@ -676,23 +674,42 @@ class TigerLiveRunner:
                 logger.info("Live data refresh: market CLOSED, skip fetch.")
                 return
 
-            # Only fetch 15m from REST — 1m comes from WebSocket (zero rate limits)
-            fresh_15m, _fresh_1m, failed = fetch_angel_data(
-                self.broker, days_15m=10, days_1m=3, fetch_1m=False,
-                symbols=symbols)
-            if fresh_15m:
-                self.data_map = fresh_15m
-            logger.info("Live data refresh [%s]: %d symbols (15m REST), "
-                        "1m from WS. Failed: %d",
-                        market, len(fresh_15m), len(failed))
+            # 15m refresh throttle — only fetch every 30 min
+            now_dt = datetime.now()
+            need_15m_fetch = True
+            if self._last_data_refresh is not None:
+                mins_since = (now_dt - self._last_data_refresh).total_seconds() / 60
+                if mins_since < self._15M_REFRESH_INTERVAL_MIN:
+                    need_15m_fetch = False
 
-            # Append live WS 1m candles to existing 1m data
+            if need_15m_fetch:
+                from backtest.run_tiger_brain_backtest import fetch_angel_data
+                fresh_15m, _fresh_1m, failed = fetch_angel_data(
+                    self.broker, days_15m=10, days_1m=3, fetch_1m=False,
+                    symbols=symbols)
+                if fresh_15m:
+                    # Merge: keep existing symbols, update with fresh data
+                    # Don't lose symbols that failed this fetch (keep old data)
+                    for sym, df in fresh_15m.items():
+                        self.data_map[sym] = df
+                    logger.info("15m refresh [%s]: %d symbols fetched, "
+                                "%d failed (kept cached). Failed: %s",
+                                market, len(fresh_15m),
+                                len(symbols) - len(fresh_15m),
+                                failed[:5] if failed else "none")
+                else:
+                    logger.warning("15m refresh fail — using cached data")
+            else:
+                logger.debug("15m refresh skipped (last %.0f min ago) — "
+                             "using cached + WS live", mins_since)
+
+            # Always merge WS 1m candles (zero REST calls)
             self._merge_ws_1m_candles()
 
             # Re-subscribe to WebSocket for new market symbols
             self._subscribe_ws_symbols(list(symbols.keys()))
         except Exception as exc:
-            logger.warning("Live data refresh fail — continuing with stale data: %s", exc)
+            logger.warning("Live data refresh fail — continuing with cached data: %s", exc)
 
     def _merge_ws_1m_candles(self):
         """Merge live WebSocket 1m candles into data_map_1m.
@@ -1126,15 +1143,16 @@ class TigerLiveRunner:
                 logger.warning("📡 WS: unhealthy (%s) — REST fallback active",
                                ws_status.get("last_error", "disconnected"))
 
-        # === FRESH DATA — throttled refresh (every 5 min, not every 1-min scan) ===
-        # With 1-min scan intervals, fetching REST candles for 42 symbols every
-        # minute would hit Angel One rate limits. SmartWebSocketV2 live ticks
-        # update prices between refreshes. Refresh every 5th minute only.
+        # === DATA REFRESH — 15m every 30 min, 1m from WS every scan ===
+        # _refresh_live_data internally throttles 15m REST fetch to every
+        # 30 min. WS 1m candles merge every call (zero REST). Scan runs
+        # every 1 min with fresh WS live data.
         now_dt = datetime.now()
         need_refresh = True
         if self._last_data_refresh is not None:
             mins_since = (now_dt - self._last_data_refresh).total_seconds() / 60
-            if mins_since < 10.0:
+            # WS 1m merge every 2 min, 15m REST every 30 min (handled inside)
+            if mins_since < 2.0:
                 need_refresh = False
         if need_refresh:
             self._refresh_live_data()

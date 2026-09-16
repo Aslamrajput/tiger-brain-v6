@@ -1581,25 +1581,9 @@ def fetch_angel_data(broker, days_15m=365, days_1m=90, use_scan_universe=False, 
                     print(f"  {tag:30s}: 15m={len(d15):5d}  1m={len(data_map_1m.get(sym, [])):5d}  [ANGEL]")
                     continue
             except Exception as exc:
-                logger.warning(f"{tag}: Angel fetch fail — yfinance fallback: {exc}")
-
-        # FALLBACK: yfinance (sirf agar Angel One fail hua)
-        try:
-            d15, d1 = fetch_yfinance_fallback(sym, ticker, days_15m, days_1m)
-            if d15 is not None and not d15.empty:
-                data_map[sym] = d15
-                if fetch_1m and d1 is not None and not d1.empty:
-                    data_map_1m[sym] = d1
-                yf_used.append(sym)
-                print(f"  {tag:30s}: 15m={len(d15):5d}  1m={len(data_map_1m.get(sym, [])):5d}  [yfinance]")
-                continue
-            else:
+                logger.warning(f"{tag}: Angel fetch fail — will retry next refresh: {exc}")
                 failed.append(sym)
                 continue
-        except Exception as exc:
-            logger.error(f"{tag}: yfinance error: {exc}")
-            failed.append(sym)
-            continue
     if angel_used:
         print(f"\n  Angel One data used for: {len(angel_used)} symbols")
     if yf_used:
