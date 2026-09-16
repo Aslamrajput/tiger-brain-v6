@@ -895,6 +895,8 @@ def find_affordable_option(
     balance: float,
     broker=None,
     max_otm_steps: int = 15,
+    min_delta: float = 0.35,
+    iv_crush_warning_pct: float = 50.0,
 ) -> dict | None:
     """Find an affordable option strike — walks OTM until 1 lot fits balance.
 
@@ -902,18 +904,27 @@ def find_affordable_option(
     until a single lot costs <= balance. This is Tiger's zero-to-hero mode:
     buy cheap OTM options when ATM is too expensive for small accounts.
 
+    QUANT GREEKS LAYER:
+      - Fetches live IV + Delta from Angel One optionGreek API
+      - Rejects contracts with Delta < min_delta (0.35) — dead zero-delta junk
+      - Reads ATM IV to measure instant IV crush risk before placement
+      - If ATM IV > iv_crush_warning_pct, logs IV crush risk warning
+      - Max 15 OTM steps — dynamically balances small accounts (₹4,000-₹8,000)
+      - Falls back to moneyness-based delta estimate if greeks unavailable
+
     Args:
         underlying: 'NIFTY', 'SILVERM', 'CRUDEOIL', etc.
         atm_strike: ATM strike price (underlying close)
         option_type: 'CE' or 'PE'
         balance: available capital (₹)
-        broker: broker instance for LTP fetch (optional — estimates from
-                strike distance if None)
-        max_otm_steps: max OTM strikes to try before giving up
+        broker: broker instance for LTP + greeks fetch
+        max_otm_steps: max OTM strikes to try before giving up (hard cap 15)
+        min_delta: minimum delta threshold (default 0.35)
+        iv_crush_warning_pct: ATM IV % above which IV crush risk is flagged
 
     Returns:
         {'tradingsymbol', 'symboltoken', 'exchange', 'lotsize', 'strike',
-         'ltp', 'one_lot_cost'} or None if nothing affordable found.
+         'ltp', 'one_lot_cost', 'delta', 'iv', 'iv_crush_risk'} or None.
     """
     chain = get_option_chain_instruments(underlying)
     if chain is None or chain.empty:
@@ -930,6 +941,29 @@ def find_affordable_option(
     else:
         matches = matches[matches["strike"] <= atm_strike].sort_values(
             "strike", ascending=False)
+
+    # === FETCH LIVE GREEKS (IV + Delta) from optionGreek API ===
+    greeks_df = None
+    atm_iv = None
+    if broker is not None:
+        try:
+            from data.iv_series import fetch_live_greeks, live_atm_iv
+            from datetime import datetime as _dt
+            # Get expiry from chain
+            expiry_str = matches.iloc[0].get("expiry", "") if len(matches) > 0 else ""
+            if expiry_str:
+                expiry_dt = _dt.strptime(expiry_str, "%d%b%Y").date()
+                greeks_df = fetch_live_greeks(broker, underlying, expiry_dt)
+                if not greeks_df.empty:
+                    iv_result = live_atm_iv(greeks_df, atm_strike)
+                    atm_iv = iv_result.get("atm_iv")
+                    if atm_iv is not None and atm_iv > iv_crush_warning_pct:
+                        logger.warning(
+                            f"⚠️ IV CRUSH RISK: ATM IV={atm_iv:.1f}% > "
+                            f"{iv_crush_warning_pct}% — high IV crush risk on {underlying}")
+        except Exception as exc:
+            logger.debug(f"Greeks fetch fail (will use delta estimate): {exc}")
+            greeks_df = None
 
     for _, row in matches.head(max_otm_steps).iterrows():
         strike = float(row["strike"])
@@ -952,17 +986,47 @@ def find_affordable_option(
             ltp = max(5.0, atm_strike * 0.005 * (1 - otm_distance * 5))
 
         one_lot_cost = lot * ltp
-        if one_lot_cost <= balance and one_lot_cost > 0:
-            _, exchange = OPTION_INSTRUMENT_TYPE.get(underlying, ("OPTSTK", "NFO"))
-            return {
-                "tradingsymbol": row["symbol"],
-                "symboltoken": str(row["token"]),
-                "exchange": exchange,
-                "lotsize": lot,
-                "strike": strike,
-                "ltp": ltp,
-                "one_lot_cost": one_lot_cost,
-            }
+        if one_lot_cost > balance or one_lot_cost <= 0:
+            continue
+
+        # === DELTA GATE — reject dead zero-delta junk ===
+        delta = None
+        iv = None
+        if greeks_df is not None and not greeks_df.empty:
+            greek_row = greeks_df[
+                (greeks_df["strike"] == strike) &
+                (greeks_df["option_type"] == option_type)
+            ]
+            if not greek_row.empty:
+                delta = float(greek_row["delta"].iloc[0])
+                iv = float(greek_row["iv"].iloc[0])
+
+        # Fallback: estimate delta from moneyness if greeks unavailable
+        if delta is None:
+            from broker.option_selector import estimate_delta
+            delta = estimate_delta(
+                {"strike": strike, "delta": None}, atm_strike, option_type)
+
+        if delta < min_delta:
+            logger.info(
+                f"   🚫 DELTA GATE: {underlying} {strike}{option_type} "
+                f"delta={delta:.2f} < {min_delta} — dead option, skip")
+            continue
+
+        _, exchange = OPTION_INSTRUMENT_TYPE.get(underlying, ("OPTSTK", "NFO"))
+        iv_crush_risk = (atm_iv is not None and atm_iv > iv_crush_warning_pct)
+        return {
+            "tradingsymbol": row["symbol"],
+            "symboltoken": str(row["token"]),
+            "exchange": exchange,
+            "lotsize": lot,
+            "strike": strike,
+            "ltp": ltp,
+            "one_lot_cost": one_lot_cost,
+            "delta": round(delta, 2),
+            "iv": round(iv, 1) if iv is not None else None,
+            "iv_crush_risk": iv_crush_risk,
+        }
 
     return None
 

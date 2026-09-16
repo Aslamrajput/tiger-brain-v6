@@ -33,6 +33,125 @@ import pandas as pd
 
 
 # ============================================================
+# FVG (Fair Value Gap) — multi-timeframe institutional footprint
+# ============================================================
+def detect_fvg(df: pd.DataFrame, i: int, lookback: int = 40) -> list[dict]:
+    """Detect Fair Value Gaps (3-bar imbalance) up to bar i.
+
+    Bullish FVG: bar[i-2].high < bar[i].low  (gap up, unfilled)
+    Bearish FVG: bar[i-2].low > bar[i].high  (gap down, unfilled)
+
+    FVGs represent institutional order flow imbalances — price tends to
+    revisit and fill these gaps. Unfilled FVGs near zones strengthen the
+    zone's institutional significance.
+
+    Returns list of FVGs: {type: 'bullish'|'bearish', top, bottom, bar, filled}
+    """
+    if i < 2:
+        return []
+    fvgs = []
+    start = max(2, i - lookback + 1)
+    for idx in range(start, i + 1):
+        h1 = float(df.iloc[idx - 2]["high"])
+        l1 = float(df.iloc[idx - 2]["low"])
+        h3 = float(df.iloc[idx]["high"])
+        l3 = float(df.iloc[idx]["low"])
+        # Bullish FVG: gap between bar1.high and bar3.low
+        if l3 > h1:
+            gap_bottom = h1
+            gap_top = l3
+            # Check if filled by any subsequent bar
+            filled = False
+            if idx < i:
+                for k in range(idx + 1, i + 1):
+                    if float(df.iloc[k]["low"]) <= gap_bottom:
+                        filled = True
+                        break
+            fvgs.append({
+                "type": "bullish", "top": gap_top, "bottom": gap_bottom,
+                "bar": idx, "filled": filled,
+            })
+        # Bearish FVG: gap between bar1.low and bar3.high
+        elif h3 < l1:
+            gap_top = l1
+            gap_bottom = h3
+            filled = False
+            if idx < i:
+                for k in range(idx + 1, i + 1):
+                    if float(df.iloc[k]["high"]) >= gap_top:
+                        filled = True
+                        break
+            fvgs.append({
+                "type": "bearish", "top": gap_top, "bottom": gap_bottom,
+                "bar": idx, "filled": filled,
+            })
+    return fvgs
+
+
+# ============================================================
+# Volume-based absorption pivots — genuine institutional footprint
+# ============================================================
+def detect_absorption_pivots(
+    df: pd.DataFrame, i: int, lookback: int = 40,
+    vol_multiplier: float = 1.5,
+) -> list[dict]:
+    """Detect high-volume absorption pivots up to bar i.
+
+    An absorption pivot is a bar where:
+      - Volume >= vol_multiplier × rolling average (institutional participation)
+      - Price rejects: large wick relative to body (absorption = rejection)
+      - Results in a pivot high (supply) or pivot low (demand)
+
+    These mark genuine institutional footprints — not noise.
+
+    Returns list of pivots: {type: 'demand'|'supply', price, bar, vol_ratio}
+    """
+    if i < 10:
+        return []
+    window = df.iloc[max(0, i - lookback):i + 1]
+    if len(window) < 10:
+        return []
+    closes = window["close"].astype(float).values
+    opens = window["open"].astype(float).values
+    highs = window["high"].astype(float).values
+    lows = window["low"].astype(float).values
+    vols = window["volume"].astype(float).values
+
+    avg_vol = np.mean(vols) if len(vols) > 0 else 1
+    if avg_vol <= 0:
+        avg_vol = 1
+
+    pivots = []
+    for k in range(2, len(window) - 1):
+        vol_ratio = vols[k] / avg_vol
+        if vol_ratio < vol_multiplier:
+            continue
+        body = abs(closes[k] - opens[k])
+        rng = highs[k] - lows[k]
+        if rng <= 0:
+            continue
+        upper_wick = highs[k] - max(closes[k], opens[k])
+        lower_wick = min(closes[k], opens[k]) - lows[k]
+        # Absorption: wick > 2× body (price rejected at level)
+        # Pivot low (demand): large lower wick = buyers absorbed selling
+        if lower_wick > 2 * body and lower_wick > upper_wick:
+            # Check it's a local low (lower than neighbors)
+            if lows[k] <= lows[k - 1] and lows[k] <= lows[k + 1]:
+                pivots.append({
+                    "type": "demand", "price": lows[k],
+                    "bar": i - (len(window) - 1 - k), "vol_ratio": round(vol_ratio, 2),
+                })
+        # Pivot high (supply): large upper wick = sellers absorbed buying
+        elif upper_wick > 2 * body and upper_wick > lower_wick:
+            if highs[k] >= highs[k - 1] and highs[k] >= highs[k + 1]:
+                pivots.append({
+                    "type": "supply", "price": highs[k],
+                    "bar": i - (len(window) - 1 - k), "vol_ratio": round(vol_ratio, 2),
+                })
+    return pivots
+
+
+# ============================================================
 # Zone detection — pure price action
 # ============================================================
 def _bar_body_ratio(c: pd.Series) -> float:
@@ -158,7 +277,8 @@ def detect_zones(df: pd.DataFrame, i: int, lookback: int = 40,
     # Real institutional zones don't overlap. If two zones of the same
     # type overlap (>50% area overlap), keep the one with higher score.
     if len(zones) <= 1:
-        return zones
+        return _enrich_zones_with_smc(zones, df, i, lookback)
+
     deduped = []
     for z in sorted(zones, key=lambda x: x["score"], reverse=True):
         overlap_found = False
@@ -177,7 +297,58 @@ def detect_zones(df: pd.DataFrame, i: int, lookback: int = 40,
                     break
         if not overlap_found:
             deduped.append(z)
-    return deduped
+
+    return _enrich_zones_with_smc(deduped, df, i, lookback)
+
+
+def _enrich_zones_with_smc(
+    zones: list[dict], df: pd.DataFrame, i: int, lookback: int
+) -> list[dict]:
+    """Enrich zones with FVG confluence + absorption pivot data.
+
+    Zones that have nearby unfilled FVGs or absorption pivots get a
+    score boost — this is genuine institutional footprint, not noise.
+    """
+    if not zones:
+        return zones
+    try:
+        fvgs = detect_fvg(df, i, lookback)
+        pivots = detect_absorption_pivots(df, i, lookback)
+    except Exception:
+        return zones
+
+    for z in zones:
+        z["fvg_confluence"] = 0
+        z["absorption_confluence"] = 0
+        # FVG confluence: unfilled FVG near zone (within 1% of price)
+        for fvg in fvgs:
+            if fvg.get("filled", True):
+                continue
+            zone_mid = (z["top"] + z["bottom"]) / 2
+            fvg_mid = (fvg["top"] + fvg["bottom"]) / 2
+            if zone_mid > 0:
+                dist_pct = abs(fvg_mid - zone_mid) / zone_mid * 100
+                if dist_pct < 1.0:
+                    # Type alignment: bullish FVG + demand, bearish FVG + supply
+                    aligned = (
+                        (fvg["type"] == "bullish" and z["type"] == "demand")
+                        or (fvg["type"] == "bearish" and z["type"] == "supply")
+                    )
+                    if aligned:
+                        z["fvg_confluence"] += 1
+                        z["score"] = round(z["score"] + 5, 1)
+        # Absorption pivot confluence: pivot near zone
+        for piv in pivots:
+            if piv["type"] != z["type"]:
+                continue
+            zone_mid = (z["top"] + z["bottom"]) / 2
+            if zone_mid > 0:
+                dist_pct = abs(piv["price"] - zone_mid) / zone_mid * 100
+                if dist_pct < 1.0:
+                    z["absorption_confluence"] += 1
+                    z["score"] = round(
+                        z["score"] + min(piv["vol_ratio"] * 2, 10), 1)
+    return zones
 
 
 # ============================================================
@@ -671,19 +842,29 @@ def zone_touched_on_1m(bar, zone) -> str | None:
     """
     Did a 1m bar TOUCH a 15m zone? Returns 'demand' / 'supply' / None.
 
-    REAL TOUCH — no fake tolerance:
+    STRICT 0.3% ENTRY GATE TOLERANCE:
       demand touch: 1m low <= zone top  AND 1m low >= zone bottom * 0.997
       supply touch: 1m high >= zone bottom AND 1m high <= zone top * 1.003
 
-    Tolerance is only 0.3% (not 2%) — a 2% penetration is a ZONE BREAK,
-    not a touch. Tiger only trades real touches, not broken zones.
+    Tolerance is exactly 0.3% — a wider penetration is a ZONE BREAK,
+    not a touch. If price breaks right through the zone edge, REJECT
+    the signal instantly (institution has abandoned that level).
     """
     low = float(bar["low"])
     high = float(bar["high"])
-    if zone["type"] == "demand" and low <= zone["top"] and low >= zone["bottom"] * 0.997:
-        return "demand"
-    if zone["type"] == "supply" and high >= zone["bottom"] and high <= zone["top"] * 1.003:
-        return "supply"
+    if zone["type"] == "demand":
+        # Price must touch zone (low <= zone top) but NOT break through
+        # Break-through: low < zone bottom * 0.997 (0.3% below zone)
+        if low <= zone["top"] and low >= zone["bottom"] * 0.997:
+            return "demand"
+        # Break-through rejection — price went through the zone
+        return None
+    if zone["type"] == "supply":
+        # Price must touch zone (high >= zone bottom) but NOT break through
+        # Break-through: high > zone top * 1.003 (0.3% above zone)
+        if high >= zone["bottom"] and high <= zone["top"] * 1.003:
+            return "supply"
+        return None
     return None
 
 

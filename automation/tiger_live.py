@@ -77,6 +77,8 @@ class TigerLiveRunner:
     _ORDER_LOG_FILE = "/tmp/tiger_order_log.json"
     # Persist direction blocks — 2-hour lockout survives restart
     _DIRECTION_BLOCKS_FILE = "/tmp/tiger_direction_blocks.json"
+    # Persist daily trade count — anti-loop state lock (restart-safe)
+    _STATE_LOCK_FILE = "/tmp/state_lock.json"
 
     def __init__(self):
         self.broker: AngelBroker | None = None
@@ -105,6 +107,8 @@ class TigerLiveRunner:
         # Prevents the Trade 2 & 3 bug (9900CE + 9900PE same day).
         # {underlying: {"direction": "BUY"/"SELL", "time": datetime, "option_type": "CE"/"PE"}}
         self._direction_blocks: dict[str, dict] = self._load_direction_blocks()
+        # === STATE LOCK — disk-backed daily trade counter (anti-loop) ===
+        self._state_lock: dict = self._load_state_lock()
         # Current market regime (updated during scan, used by trade log)
         self._current_regime: str = "UNKNOWN"
         # Real account capital — fetched from Angel One pre-market
@@ -273,6 +277,73 @@ class TigerLiveRunner:
         except OSError as exc:
             logger.warning(f"Direction blocks save fail: {exc}")
 
+    # ============================================================
+    # STATE LOCK — disk-backed daily trade counter (anti-loop)
+    # ============================================================
+    def _load_state_lock(self) -> dict:
+        """Load state_lock.json — daily_trade_count survives restart.
+
+        Structure: {"date": "2026-09-16", "daily_trade_count": 3, "locked": false}
+        If date doesn't match today, counter resets to 0 (new session).
+        """
+        import json
+        today = datetime.now().date().isoformat()
+        try:
+            with open(self._STATE_LOCK_FILE) as f:
+                raw = json.load(f)
+            if raw.get("date") != today:
+                logger.info(
+                    f"🔓 State lock: new session ({today}) — "
+                    f"counter reset (was {raw.get('daily_trade_count', 0)})")
+                return {"date": today, "daily_trade_count": 0, "locked": False}
+            count = raw.get("daily_trade_count", 0)
+            locked = raw.get("locked", False) or count >= 6
+            if locked:
+                logger.info(
+                    f"🔒 State lock: DAILY CAP LOCKED — "
+                    f"{count}/6 trades taken. No more entries until next session.")
+            return {"date": today, "daily_trade_count": count, "locked": locked}
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            return {"date": today, "daily_trade_count": 0, "locked": False}
+
+    def _save_state_lock(self):
+        """Save state_lock.json to disk — anti-loop counter survives restart."""
+        import json
+        try:
+            with open(self._STATE_LOCK_FILE, "w") as f:
+                json.dump(self._state_lock, f, default=str)
+        except OSError as exc:
+            logger.warning(f"State lock save fail: {exc}")
+
+    def _increment_daily_trade_count(self) -> int:
+        """Increment the daily trade counter and check cap.
+
+        Returns the new count. Locks at 6 trades — no more entries
+        until next session reset.
+        """
+        today = datetime.now().date().isoformat()
+        if self._state_lock.get("date") != today:
+            self._state_lock = {"date": today, "daily_trade_count": 0, "locked": False}
+        count = self._state_lock.get("daily_trade_count", 0) + 1
+        self._state_lock["daily_trade_count"] = count
+        if count >= 6:
+            self._state_lock["locked"] = True
+            logger.info(
+                f"🔒 STATE LOCK: daily_trade_count={count}/6 — "
+                f"PERMANENTLY LOCKED until next session reset.")
+        self._save_state_lock()
+        return count
+
+    def _is_daily_cap_locked(self) -> bool:
+        """Check if daily trade cap is permanently locked at 6."""
+        today = datetime.now().date().isoformat()
+        if self._state_lock.get("date") != today:
+            self._state_lock = {"date": today, "daily_trade_count": 0, "locked": False}
+            self._save_state_lock()
+            return False
+        return self._state_lock.get("locked", False) or \
+            self._state_lock.get("daily_trade_count", 0) >= 6
+
     def _load_position_peaks(self) -> dict:
         """Load per-position peak + target_booked from disk (restart-safe).
 
@@ -393,6 +464,13 @@ class TigerLiveRunner:
 
     def _risk_manager_allows_trading(self) -> bool:
         """Check if RiskManager allows new trades right now."""
+        # Check state lock — permanent daily cap lock
+        if self._is_daily_cap_locked():
+            count = self._state_lock.get("daily_trade_count", 0)
+            logger.info(
+                f"🔒 STATE LOCK active — daily_trade_count={count}/6. "
+                f"No more entries until next session reset.")
+            return False
         # Check pause
         if self._pause_until is not None:
             if datetime.now() < self._pause_until:
@@ -543,9 +621,30 @@ class TigerLiveRunner:
                 f"but need {'green' if is_ce else 'red'} for {option_type}")
             return False
 
+        # Gate 4: RSI speed boundary — CE needs RSI>=60, PE needs RSI<=40
+        try:
+            from subbrains.mean_reversion import calculate_rsi
+            rsi_series = calculate_rsi(df_1m.iloc[-(lookback + 1):])
+            latest_rsi = float(rsi_series.iloc[-1]) if not rsi_series.empty else 50.0
+        except Exception:
+            latest_rsi = 50.0
+        if is_ce and latest_rsi < SCALPER["MIN_RSI_BUY"]:
+            logger.info(
+                f"🚫 VELOCITY BLOCK {symbol} {option_type} — "
+                f"RSI {latest_rsi:.0f} < {SCALPER['MIN_RSI_BUY']} "
+                f"(no bullish momentum)")
+            return False
+        if not is_ce and latest_rsi > SCALPER["MAX_RSI_SELL"]:
+            logger.info(
+                f"🚫 VELOCITY BLOCK {symbol} {option_type} — "
+                f"RSI {latest_rsi:.0f} > {SCALPER['MAX_RSI_SELL']} "
+                f"(no bearish momentum)")
+            return False
+
         logger.info(
             f"✅ VELOCITY CONFIRMED {symbol} {option_type} — "
             f"1m body={body_pct:.0f}% vol={vol_ratio:.1f}x "
+            f"RSI={latest_rsi:.0f} "
             f"{'green' if candle_green else 'red'} candle")
         return True
 
@@ -900,9 +999,20 @@ class TigerLiveRunner:
                 min_hold = SCALPER.get("MIN_HOLD_SECONDS", 180)
                 past_min_hold = hold_seconds >= min_hold
 
-                # 1. Scalper target: +15% → full exit (let momentum run to 15%)
-                if gain_pct >= SCALPER["TARGET_PCT"]:
-                    exit_reason = f"scalper_target_{SCALPER['TARGET_PCT']:.0f}pct"
+                # === 1:2 RR TARGET — dynamic based on effective stop ===
+                # target = 2 × stop_loss_pct (fixed 1:2 risk-to-reward)
+                # If stop is 7%, target = 14%. If structural stop is 10%,
+                # target = 20%.
+                structural_stop_pct = tracker.get("structural_stop_pct", 0)
+                effective_stop_pct = SCALPER["MAX_STOP_PCT"]  # default -7%
+                if structural_stop_pct > 0:
+                    effective_stop_pct = max(structural_stop_pct, SCALPER["MAX_STOP_PCT"])
+                    effective_stop_pct = min(effective_stop_pct, SCALPER.get("CATASTROPHIC_STOP_PCT", 12.0))
+                rr_target_pct = effective_stop_pct * 2  # 1:2 RR
+
+                # 1. Scalper target: 1:2 RR → full exit
+                if gain_pct >= rr_target_pct:
+                    exit_reason = f"scalper_rr_target_{rr_target_pct:.0f}pct"
                 # 2. Catastrophic stop: -12% → instant exit (black swan, no hold time)
                 elif loss_pct >= SCALPER.get("CATASTROPHIC_STOP_PCT", 12.0):
                     exit_reason = f"scalper_catastrophic_{SCALPER.get('CATASTROPHIC_STOP_PCT', 12.0):.0f}pct"
@@ -911,14 +1021,6 @@ class TigerLiveRunner:
                 #    uses -10% not -7%. Survives pullback before rocket.
                 #    ONLY after min hold time (momentum needs time to develop).
                 elif past_min_hold:
-                    # Check for structural stop (zone-based) first
-                    structural_stop_pct = tracker.get("structural_stop_pct", 0)
-                    effective_stop_pct = SCALPER["MAX_STOP_PCT"]  # default -7%
-                    if structural_stop_pct > 0:
-                        # Use the WIDER of structural vs fixed (give room for rocket)
-                        effective_stop_pct = max(structural_stop_pct, SCALPER["MAX_STOP_PCT"])
-                        # But cap at catastrophic (12%) — no unlimited risk
-                        effective_stop_pct = min(effective_stop_pct, SCALPER.get("CATASTROPHIC_STOP_PCT", 12.0))
                     if loss_pct >= effective_stop_pct:
                         if structural_stop_pct > 0 and effective_stop_pct > SCALPER["MAX_STOP_PCT"]:
                             exit_reason = f"scalper_structural_stop_{effective_stop_pct:.0f}pct"
@@ -1685,6 +1787,9 @@ class TigerLiveRunner:
                 self._save_order_keys()  # permanent — survives restart
                 available_balance -= trade_cost
                 self.capital_after_entry = available_balance
+
+                # === STATE LOCK — increment daily trade counter ===
+                daily_count = self._increment_daily_trade_count()
 
                 # Record direction taken — blocks opposite direction for 2 hours
                 self._record_direction_taken(symbol, option_type)
