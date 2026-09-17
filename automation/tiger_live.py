@@ -851,6 +851,112 @@ class TigerLiveRunner:
         if merged:
             logger.debug("WS 1m merge: %d symbols updated with live ticks", merged)
 
+        # === INDEX VOLUME BACKFILL (Bug fix) ===
+        # Index spot tokens (NIFTY/BANKNIFTY) report volume=0 from Angel
+        # historical API. WS ticks carry real volume_trade_for_the_day →
+        # the 1m bars above have real volume. Now resample those 1m bars
+        # to 15m and backfill the 15m data_map so zone detection sees
+        # real volume for today's bars.
+        self._backfill_index_volume_15m(ws)
+
+    def _backfill_index_volume_15m(self, ws=None):
+        """Backfill index volume in the 15m data_map from WS 1m candles.
+
+        For index symbols (NIFTY/BANKNIFTY/FINNIFTY), the 15m historical
+        candles have volume=0 (Angel spot feed limitation). This method:
+          1. Takes the WS 1m candles (which have REAL volume from ticks)
+          2. Resamples them to 15m bars
+          3. For each 15m bar in data_map that matches a WS-resampled bar,
+             replaces volume=0 with the real WS volume
+          4. Also fetches options-chain OI volume as a second source
+
+        This makes zone_explosive_quality, volume_delta, volume_velocity,
+        and compute_volume_profile all work for indices — they were all
+        dead/skipped when volume=0.
+        """
+        if ws is None:
+            if self.broker is None or self.broker.websocket is None:
+                return
+            ws = self.broker.websocket
+        from data.loader import INDEX_UNDERLYING_TOKENS, fetch_index_oi_volume
+
+        for sym in list(self.data_map.keys()):
+            if sym.upper() not in INDEX_UNDERLYING_TOKENS:
+                continue  # stocks/commodities already have real volume
+
+            df_15m = self.data_map.get(sym)
+            if df_15m is None or df_15m.empty:
+                continue
+
+            # Source 1: WS 1m → resample to 15m
+            token = ws._resolve_symbol_token(sym)
+            if token is not None:
+                ws_1m = ws.get_1m_candles(token, min_bars=1)
+                if ws_1m is not None and not ws_1m.empty:
+                    # Resample 1m → 15m, summing volume
+                    ws_15m = ws_1m.resample("15min", closed="left").agg({
+                        "open": "first", "high": "max", "low": "min",
+                        "close": "last", "volume": "sum"
+                    }).dropna(subset=["open"])
+                    # Merge volume into the 15m DataFrame
+                    updated = 0
+                    for ts_15m, row_15m in ws_15m.iterrows():
+                        ws_vol = float(row_15m.get("volume", 0) or 0)
+                        if ws_vol <= 0:
+                            continue
+                        # Find matching bar in data_map by timestamp (floor to 15m)
+                        ts_match = ts_15m
+                        # Try exact match, then floored match
+                        mask = df_15m.index == ts_match
+                        if not mask.any():
+                            # Floor to 15m boundary
+                            try:
+                                ts_floored = ts_15m.floor("15min")
+                                mask = df_15m.index == ts_floored
+                            except Exception:
+                                pass
+                        if mask.any():
+                            cur_vol = float(df_15m.loc[mask, "volume"].iloc[0] or 0)
+                            if cur_vol <= 0 or ws_vol > cur_vol:
+                                df_15m.loc[mask, "volume"] = ws_vol
+                                updated += 1
+                    if updated:
+                        self.data_map[sym] = df_15m
+                        logger.debug(
+                            f"📈 INDEX VOL BACKFILL [{sym}]: {updated} "
+                            f"15m bars got real WS volume (was 0)")
+
+            # Source 2: Options-chain OI volume (cumulative proxy)
+            # Throttled — only every 5 min to avoid API spam
+            cache_key = f"_oi_vol_{sym}"
+            last_oi = getattr(self, cache_key, None)
+            now_dt = datetime.now()
+            if last_oi is not None and (now_dt - last_oi).total_seconds() < 300:
+                continue  # 5 min throttle
+            try:
+                oi_data = fetch_index_oi_volume(self.broker, sym.upper())
+                if oi_data and oi_data.get("total_volume", 0) > 0:
+                    # Inject as the LATEST bar's volume (cumulative day volume
+                    # is a proxy for today's total participation)
+                    total_vol = oi_data["total_volume"]
+                    if not df_15m.empty and "volume" in df_15m.columns:
+                        # If last bar volume is 0 or much smaller than OI volume,
+                        # use OI volume as a floor
+                        last_idx = df_15m.index[-1]
+                        last_vol = float(df_15m.loc[last_idx, "volume"] or 0)
+                        if last_vol < total_vol:
+                            df_15m.loc[last_idx, "volume"] = total_vol
+                            self.data_map[sym] = df_15m
+                            logger.info(
+                                f"📈 INDEX OI VOL [{sym}]: options-chain "
+                                f"vol={total_vol:.0f} OI={oi_data['total_oi']:.0f} "
+                                f"B/S={oi_data['buy_sell_ratio']:.2f} → "
+                                f"15m last bar volume backfilled")
+                    setattr(self, cache_key, now_dt)
+            except Exception as exc:
+                logger.debug(f"OI volume fetch fail for {sym}: {exc}")
+                setattr(self, cache_key, now_dt)  # throttle even on failure
+
     # ============================================================
     # MARKET OPEN (09:15) — ready signal
     # ============================================================

@@ -901,7 +901,10 @@ def one_min_exhaustion(df_1m, i, direction: str, lookback: int = 4) -> tuple[boo
     if direction == "BUY":
         # bearish reversal candle w/ volume = exhaustion
         bearish = cur_close < cur_open
-        vol_spike = cur_vol > avg_vol * 1.3
+        # Keep the proxy when volume=0 — don't overwrite with a hard check
+        # that always fails for indices (Bug fix: was vol_spike = cur_vol > avg_vol * 1.3)
+        if avg_vol > 0:
+            vol_spike = cur_vol > avg_vol * 1.3
         # 3 consecutive lower highs
         highs = [float(bars.iloc[j]["high"]) for j in range(len(bars))]
         lower_highs = len(highs) >= 3 and all(highs[k] < highs[k - 1] for k in range(1, len(highs)))
@@ -911,7 +914,10 @@ def one_min_exhaustion(df_1m, i, direction: str, lookback: int = 4) -> tuple[boo
             return (True, "3-lower-highs")
     else:  # SELL (long put)
         bullish = cur_close > cur_open
-        vol_spike = cur_vol > avg_vol * 1.3
+        # Keep the proxy when volume=0 — don't overwrite with a hard check
+        # that always fails for indices (Bug fix: was vol_spike = cur_vol > avg_vol * 1.3)
+        if avg_vol > 0:
+            vol_spike = cur_vol > avg_vol * 1.3
         lows = [float(bars.iloc[j]["low"]) for j in range(len(bars))]
         higher_lows = len(lows) >= 3 and all(lows[k] > lows[k - 1] for k in range(1, len(lows)))
         if bullish and vol_spike:

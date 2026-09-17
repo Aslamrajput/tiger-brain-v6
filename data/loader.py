@@ -1076,6 +1076,12 @@ def fetch_option_chain_oi(
     Sub-Brains (OI Thresholds, Section 19) aur Meta-Brain ke liye
     ZAROORI data hai jo abhi tak missing tha.
 
+    Uses Angel One optionGreek API which returns per-strike: IV, delta,
+    gamma, theta, vega, tradeVolume, openInterest, totalBuyQuantity,
+    totalSellQuantity. For indices (NIFTY/BANKNIFTY) the summed options
+    tradeVolume + OI become the REAL volume proxy for the underlying
+    index (whose spot feed reports volume=0).
+
     Args:
         underlying: 'NIFTY', etc.
         expiry_date: None = nearest expiry
@@ -1084,14 +1090,105 @@ def fetch_option_chain_oi(
                              ATM ke aas-paas ka hi kaam ka hota hai
 
     Returns:
-        DataFrame: columns = [strike, CE_token, CE_oi, CE_ltp,
-                   PE_token, PE_oi, PE_ltp]
+        DataFrame: columns = [strike, option_type, ltp, oi, volume,
+                   iv, delta, total_buy_qty, total_sell_qty]
     """
-    if broker.smart_api is None:
+    if broker is None or broker.smart_api is None:
         raise RuntimeError("Broker login nahi hua hai — pehle broker.login() call karo.")
 
+    from data.iv_series import fetch_live_greeks
+    from datetime import datetime as _dt
+
+    # Resolve expiry
     instruments = get_option_chain_instruments(underlying, expiry_date)
     if instruments.empty:
         return pd.DataFrame()
 
-    # ATM strike                    
+    # Use nearest expiry from instruments if not specified
+    if expiry_date is None and not instruments.empty:
+        expiry_date = instruments.iloc[0].get("expiry", "")
+
+    try:
+        expiry_dt = _dt.strptime(expiry_date, "%d%b%Y").date()
+    except Exception:
+        return pd.DataFrame()
+
+    # Fetch full greeks snapshot (now includes OI + volume per strike)
+    greeks = fetch_live_greeks(broker, underlying, expiry_dt)
+    if greeks.empty:
+        return pd.DataFrame()
+
+    # Build result — full chain with OI + volume
+    result = greeks[["strike", "option_type", "iv", "delta",
+                     "trade_volume", "open_interest",
+                     "total_buy_qty", "total_sell_qty"]].copy()
+    result.rename(columns={
+        "trade_volume": "volume",
+        "open_interest": "oi",
+    }, inplace=True)
+
+    # Fetch LTP per contract via WS (zero rate limits) or REST
+    result["ltp"] = 0.0
+    for idx, row in result.iterrows():
+        strike = row["strike"]
+        otype = row["option_type"]
+        # Find the contract token from instruments
+        match = instruments[
+            (instruments["strike"] == strike) &
+            (instruments["option_type"] == otype)
+        ]
+        if match.empty:
+            continue
+        token = str(match.iloc[0]["token"])
+        tsym = match.iloc[0]["symbol"]
+        exch = match.iloc[0].get("exchange", "NFO")
+        try:
+            ltp = broker.ws_get_ltp(tsym, token, exch)
+            result.at[idx, "ltp"] = ltp
+        except Exception:
+            pass
+
+    return result
+
+
+def fetch_index_oi_volume(
+    broker, underlying: str = "NIFTY", expiry_date: str = None
+) -> dict:
+    """
+    Index ka REAL volume proxy — options chain se.
+
+    NIFTY/BANKNIFTY spot feed volume=0 deta hai. Lekin options chain
+    mein har strike ka tradeVolume + openInterest milta hai (optionGreek
+    API). In sabhi strikes ka sum = index participation volume.
+
+    Ye function total tradeVolume + total OI + buy/sell pressure return
+    karta hai — tiger_live isse 15m DataFrame ke volume column mein
+    backfill karta hai.
+
+    Returns:
+        {total_volume, total_oi, total_buy_qty, total_sell_qty,
+         buy_sell_ratio, expiry, fetched_at}
+        Empty dict agar data na mile.
+    """
+    from datetime import datetime as _dt
+
+    chain = fetch_option_chain_oi(broker, underlying, expiry_date)
+    if chain.empty:
+        return {}
+
+    total_vol = float(chain["volume"].sum())
+    total_oi = float(chain["oi"].sum())
+    total_buy = float(chain["total_buy_qty"].sum()) if "total_buy_qty" in chain else 0.0
+    total_sell = float(chain["total_sell_qty"].sum()) if "total_sell_qty" in chain else 0.0
+    buy_sell_ratio = total_buy / total_sell if total_sell > 0 else 1.0
+
+    expiry = chain.iloc[0].get("expiry", expiry_date or "")
+    return {
+        "total_volume": total_vol,
+        "total_oi": total_oi,
+        "total_buy_qty": total_buy,
+        "total_sell_qty": total_sell,
+        "buy_sell_ratio": buy_sell_ratio,
+        "expiry": expiry,
+        "fetched_at": _dt.now().isoformat(),
+    }                    

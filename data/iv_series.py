@@ -199,7 +199,12 @@ def fetch_live_greeks(broker, name: str, expiry: date) -> pd.DataFrame:
         return pd.DataFrame()
 
     frame = pd.DataFrame(rows)
-    return pd.DataFrame({
+    # === INDEX VOLUME FIX: optionGreek also returns openInterest +
+    # totalBuyQuantity + totalSellQuantity per strike. These are NOT parsed
+    # by the original 8-field extraction. For indices (NIFTY/BANKNIFTY) the
+    # spot feed reports volume=0, so summed options OI + tradeVolume become
+    # the REAL volume proxy for the underlying index.
+    result = pd.DataFrame({
         "strike": frame["strikePrice"].astype(float),
         "option_type": frame["optionType"],
         "iv": frame["impliedVolatility"].astype(float),
@@ -209,6 +214,18 @@ def fetch_live_greeks(broker, name: str, expiry: date) -> pd.DataFrame:
         "vega": frame["vega"].astype(float),
         "trade_volume": frame["tradeVolume"].astype(float),
     })
+    # OI fields are present in the API response but may be missing for some
+    # underlyings — coerce to 0 so the sum never fails.
+    for _oi_col, _src in [
+        ("open_interest", "openInterest"),
+        ("total_buy_qty", "totalBuyQuantity"),
+        ("total_sell_qty", "totalSellQuantity"),
+    ]:
+        if _src in frame.columns:
+            result[_oi_col] = frame[_src].astype(float)
+        else:
+            result[_oi_col] = 0.0
+    return result
 
 
 def live_atm_iv(
