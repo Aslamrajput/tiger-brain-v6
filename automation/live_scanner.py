@@ -33,7 +33,7 @@ from backtest.tiger_session_brain import (
     should_force_hunt,
 )
 from universe.fno_universe import segment_of, is_expiry_day
-from config.thresholds import SCALPER
+from config.thresholds import SCALPER, get_scalper_min_score
 from subbrains.momentum_hunter import hunt_momentum
 
 logger = logging.getLogger(__name__)
@@ -322,10 +322,13 @@ def find_scalper_entry(
     if pcr_aligned:
         score += 5
 
-    # === GATE 8: Score >= 75 (Rocket Filter final gate) ===
-    if score < SCALPER["MIN_SCORE"]:
+    # === GATE 8: Score >= exchange-isolated threshold (Rocket Filter final gate) ===
+    # Bug 3 fix: NSE and MCX no longer share one global MIN_SCORE.
+    min_score_scalper = get_scalper_min_score(segment)
+    if score < min_score_scalper:
         logger.info(
-            f"🚫 SKIP {symbol} — score {score:.0f} < {SCALPER['MIN_SCORE']} "
+            f"🚫 SKIP {symbol} — score {score:.0f} < {min_score_scalper} "
+            f"[{segment.upper()}] "
             f"(low quality: body={body_pct:.0f}% vol={vol_ratio:.1f}x "
             f"rsi={latest_rsi:.0f} pcr={pcr:.1f} vwap={'Y' if vwap_ok else 'N'})")
         return None

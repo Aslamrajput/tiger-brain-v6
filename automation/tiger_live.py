@@ -1437,6 +1437,44 @@ class TigerLiveRunner:
             strike = t.get("strike", 0)
             option_type = t.get("option_type", "")
             direction = t.get("direction", "")
+
+            # === STALE SIGNAL GUARD (Bug 1 fix) ===
+            # A signal older than SIGNAL_MAX_AGE_SEC is rejected — Tiger must
+            # NEVER execute a pending signal from a stale buffer. When the
+            # user changes the score threshold mid-scan, old signals die here.
+            max_age_sec = AUTOMATION.get("SIGNAL_MAX_AGE_SEC", 90)
+            try:
+                sig_age = (now - entry_ts).total_seconds() if hasattr(entry_ts, "total_seconds") \
+                    else (now - pd.Timestamp(entry_ts)).total_seconds()
+                if sig_age > max_age_sec:
+                    logger.warning(
+                        f"   🗑️ SKIP {symbol} {strike}{option_type} — "
+                        f"STALE signal ({sig_age:.0f}s old > {max_age_sec}s limit). "
+                        f"Not executing stale-buffer pending signal.")
+                    continue
+            except Exception:
+                pass  # age check failure → don't block (conservative)
+
+            # === DATA FRESHNESS GUARD (Bug 1 fix) ===
+            # The latest 1m bar for this symbol must be recent. If the WS feed
+            # stalled, Tiger skips rather than trading on stale ticks.
+            data_max_age = AUTOMATION.get("DATA_MAX_AGE_SEC", 120)
+            if self.data_map_1m and symbol in self.data_map_1m:
+                df_1m_sym = self.data_map_1m[symbol]
+                if df_1m_sym is not None and not df_1m_sym.empty:
+                    try:
+                        last_bar_ts = df_1m_sym.index[-1]
+                        last_bar = pd.Timestamp(last_bar_ts)
+                        bar_age = (now - last_bar).total_seconds()
+                        if bar_age > data_max_age:
+                            logger.warning(
+                                f"   🗑️ SKIP {symbol} {strike}{option_type} — "
+                                f"STALE 1m data (last bar {bar_age:.0f}s old > "
+                                f"{data_max_age}s). Waiting for fresh tick.")
+                            continue
+                    except Exception:
+                        pass  # freshness check failure → don't block
+
             # NOTE: backtest quantity is IGNORED — re-sized by Fund Brain using
             # REAL balance + REAL LTP + REAL lot size
             is_delivery = t.get("is_delivery", False)
@@ -1753,7 +1791,10 @@ class TigerLiveRunner:
             )
 
             if result.get("success"):
-                # Step 7: Check order STATUS — rejected or not?
+                # Step 7: Check order STATUS — rejected or EXECUTED?
+                # Bug 2 fix: log entry must happen ONLY after Angel One confirms
+                # order_status == executed/complete. The logged price/qty must
+                # come from the broker's actual fill, NOT the pre-trade LTP.
                 import time as _time
                 _time.sleep(2)  # Allow RMS to process
                 status = self.broker.get_order_status(result["order_id"])
@@ -1781,11 +1822,89 @@ class TigerLiveRunner:
                     self._save_order_log()
                     continue
 
-                # Order accepted!
+                # === EXECUTION CONFIRMATION (Bug 2 fix) ===
+                # Angel One MARKET orders fill near-instantly, but the status
+                # field can lag ("open"/"trigger pending" briefly before
+                # "complete"). Poll up to 2 more times (1s apart) for a
+                # definitive executed/complete status.
+                _EXECUTED_STATES = {"complete", "executed", "filled",
+                                    "traded", "fully executed"}
+                fill_polls = 0
+                while order_status not in _EXECUTED_STATES and fill_polls < 2:
+                    _time.sleep(1)
+                    status = self.broker.get_order_status(result["order_id"])
+                    order_status = status.get("status", "").lower()
+                    reject_reason = status.get("reject_reason")
+                    fill_polls += 1
+                    if "reject" in order_status or reject_reason:
+                        break
+
+                if "reject" in order_status or reject_reason:
+                    logger.error(
+                        f"   ❌ ORDER REJECTED after poll: {reject_reason}")
+                    self._order_log.append({
+                        "time": datetime.now().isoformat(),
+                        "symbol": symbol, "strike": strike,
+                        "option_type": option_type,
+                        "exchange": contract["exchange"],
+                        "tradingsymbol": contract["tradingsymbol"],
+                        "quantity": quantity, "real_ltp": real_ltp,
+                        "trade_cost": trade_cost,
+                        "order_id": result["order_id"],
+                        "success": False,
+                        "error": f"REJECTED (poll): {reject_reason}",
+                        "reject_reason": reject_reason,
+                    })
+                    self._save_order_log()
+                    continue
+
+                if order_status not in _EXECUTED_STATES:
+                    # Order accepted but NOT executed — do NOT log as a trade.
+                    # This prevents blind logging of pending/unfilled orders.
+                    logger.warning(
+                        f"   ⏳ ORDER NOT EXECUTED (status={order_status}) — "
+                        f"{contract['tradingsymbol']}. NOT logged to trade_log. "
+                        f"Will reconcile on next position sync.")
+                    self._order_log.append({
+                        "time": datetime.now().isoformat(),
+                        "symbol": symbol, "strike": strike,
+                        "option_type": option_type, "direction": direction,
+                        "exchange": contract["exchange"],
+                        "tradingsymbol": contract["tradingsymbol"],
+                        "quantity": quantity, "real_ltp": real_ltp,
+                        "trade_cost": trade_cost,
+                        "order_id": result["order_id"],
+                        "success": False,
+                        "error": f"NOT_EXECUTED: status={order_status}",
+                        "order_status": order_status,
+                    })
+                    self._save_order_log()
+                    continue
+
+                # === EXECUTED — use broker's ACTUAL fill price + qty ===
+                # Bug 2 fix: the log now carries the real execution price from
+                # Angel One (avg_price), not the pre-trade LTP estimate. This
+                # eliminates the 4893-vs-4989 discrepancy.
+                broker_avg_price = float(status.get("avg_price", 0) or 0)
+                broker_filled_qty = int(status.get("filled_qty", 0) or 0)
+                fill_price = broker_avg_price if broker_avg_price > 0 else real_ltp
+                executed_qty = broker_filled_qty if broker_filled_qty > 0 else quantity
+                if broker_avg_price > 0:
+                    logger.info(
+                        f"   🎯 BROKER FILL: avg_price=₹{broker_avg_price:.2f} "
+                        f"filled_qty={broker_filled_qty} (pre-trade LTP was ₹{real_ltp:.2f})")
+                else:
+                    logger.warning(
+                        f"   ⚠️ Broker fill price unavailable (avg_price=0) — "
+                        f"falling back to pre-trade LTP ₹{real_ltp:.2f}")
+                # Recompute trade_cost from the ACTUAL fill (not estimate)
+                actual_trade_cost = fill_price * executed_qty
+
+                # Order executed!
                 placed_count += 1
                 self._placed_order_keys.add(order_key)
                 self._save_order_keys()  # permanent — survives restart
-                available_balance -= trade_cost
+                available_balance -= actual_trade_cost
                 self.capital_after_entry = available_balance
 
                 # === STATE LOCK — increment daily trade counter ===
@@ -1813,7 +1932,7 @@ class TigerLiveRunner:
                 structural_stop = t.get("structural_stop", 0.0)
                 if structural_stop > 0:
                     tsym = contract["tradingsymbol"]
-                    entry_price = real_ltp
+                    entry_price = fill_price
                     # Convert structural stop (underlying price) to premium stop
                     # using delta approximation: premium_stop ≈ entry * (stop_pct_of_underlying)
                     stop_pct = abs(entry_price - structural_stop) / entry_price * 100 if entry_price > 0 else 7.0
@@ -1834,17 +1953,20 @@ class TigerLiveRunner:
                         f"(zone-based, not fixed -7%)")
 
                 logger.info(
-                    f"   ✅ Order accepted: {order_status}")
+                    f"   ✅ Order EXECUTED: {order_status} "
+                    f"(fill ₹{fill_price:.2f} × {executed_qty})")
                 logger.info(
-                    f"   🔥 REAL ORDER: BUY {quantity} "
+                    f"   🔥 REAL ORDER: BUY {executed_qty} "
                     f"{contract['tradingsymbol']} ({option_type}) "
-                    f"cost ₹{trade_cost:,.0f} → order_id={result['order_id']}"
+                    f"cost ₹{actual_trade_cost:,.0f} → order_id={result['order_id']}"
                     f"{' [MOMENTUM HUNTER]' if is_momentum_hunter else ''}"
                     f"{' [SCALPER]' if is_scalper else ''}")
                 logger.info(
                     f"   💰 Remaining balance: ₹{available_balance:,.0f}")
 
-                # === TRADE LOG (Fix 4 — Night Replay needs this) ===
+                # === TRADE LOG — bound to broker EXECUTED response (Bug 2 fix) ===
+                # Entry is logged ONLY here, after Angel One confirmed the fill.
+                # entry_price = broker avg_price (actual execution), NOT real_ltp.
                 try:
                     from replay.nightly_replay import append_trade_record
                     from replay.tiger_memory import _get_time_slot
@@ -1857,13 +1979,15 @@ class TigerLiveRunner:
                         "regime": self._current_regime,
                         "time_slot": _get_time_slot(datetime.now().isoformat()),
                         "entry_time": datetime.now().isoformat(),
-                        "entry_price": real_ltp,
-                        "quantity": quantity,
-                        "trade_cost": trade_cost,
+                        "entry_price": fill_price,
+                        "broker_fill_price": broker_avg_price,
+                        "quantity": executed_qty,
+                        "trade_cost": actual_trade_cost,
                         "setup_score": setup_score,
                         "brain_alignment": brain_alignment,
                         "is_scalper": is_scalper,
                         "order_id": result.get("order_id"),
+                        "order_status": order_status,
                         "status": "OPEN",
                     })
                 except Exception as exc:

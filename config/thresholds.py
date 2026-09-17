@@ -238,6 +238,15 @@ AUTOMATION = {
     "NSE_SQUARE_OFF_TIME": "15:15",
     # MCX square-off — 23:15 (15 min before MCX close 23:30)
     "MCX_SQUARE_OFF_TIME": "23:15",
+    # === STALE DATA GUARD (Bug 1 fix) ===
+    # A signal is only valid for this many seconds after it is generated.
+    # If _place_live_orders picks up a signal older than this, it is rejected
+    # — no executing stale-buffer signals when the user changes score mid-scan.
+    "SIGNAL_MAX_AGE_SEC": 90,
+    # The latest 1m bar for a symbol must be newer than this many seconds for
+    # an entry to be allowed. If the WS feed stalled, Tiger skips the symbol
+    # rather than trading on stale ticks.
+    "DATA_MAX_AGE_SEC": 120,
 }
 
 # ============================================================
@@ -384,7 +393,13 @@ SCALPER = {
     # Volume is highly sensitive: 1.3x-1.5x rolling average captures the
     # initial impulse wave without freezing. Body 65% allows bottom sweeps
     # and sharp wick turnarounds on 1m timeframe. Score>=75 keeps quality.
-    "MIN_SCORE": 75,              # high-conviction scalps only
+    "MIN_SCORE": 75,              # high-conviction scalps only (default fallback)
+    # === EXCHANGE ISOLATION — NSE and MCX have different microstructure.
+    # A single global score caused NSE/MCX clashes (MCX commodities need a
+    # lower bar than NSE index/stock options). Each exchange now has its own
+    # scalper score threshold. Use get_scalper_min_score(segment).
+    "MIN_SCORE_NSE": 75,          # NSE equity/index — high-conviction scalps
+    "MIN_SCORE_MCX": 70,          # MCX commodity — lower bar (matches session brain)
     "MIN_BODY_PCT": 65,           # dynamic — capture bottom sweeps + wick turnarounds
     "MIN_VOLUME_SURGE": 1.4,      # dynamic — instantaneous vol 1.3x-1.5x of trailing avg
     "MIN_RSI_BUY": 60,            # CE: RSI >= 60 (bullish momentum)
@@ -411,6 +426,22 @@ SCALPER = {
         "MCX": "15:45",
     },
 }
+
+
+def get_scalper_min_score(segment: str) -> float:
+    """Exchange-isolated scalper score threshold (Bug 3 fix).
+
+    NSE and MCX no longer share one global MIN_SCORE. MCX commodities get
+    a lower bar (matches the session-brain thresholds); NSE stays strict.
+
+    Args:
+        segment: "nse", "mcx", "equity", or "commodity".
+    """
+    seg = (segment or "").lower()
+    if seg in ("mcx", "commodity"):
+        return float(SCALPER.get("MIN_SCORE_MCX", SCALPER["MIN_SCORE"]))
+    return float(SCALPER.get("MIN_SCORE_NSE", SCALPER["MIN_SCORE"]))
+
 
 # === RISK MANAGER — consecutive loss protection ===
 # Prevents death spirals: 2 losses → pause 30min, 3 losses → stop for day.
