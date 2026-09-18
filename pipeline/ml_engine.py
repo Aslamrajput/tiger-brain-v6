@@ -393,15 +393,35 @@ def build_training_data(trade_log: list[dict], feature_columns: list[str],
 
     rows = []
     skipped_sniper = 0
+    skipped_entry_quality = 0
     for t in trade_log:
         # Skip entry-only (OPEN) records — no outcome label available.
         # Retrain learns from CLOSED trades only (features + realized pnl).
         if t.get("status") == "OPEN":
             continue
 
-        # --- SNIPER-ONLY FILTER ---
+        # --- ENTRY-QUALITY GATE (ML SAFETY — Sep 2026) ---
+        # ML ko sirf TRUE sniper entries se sikhna chahiye. Ek lucky win
+        # jo galt entry se aayi (no zone edge, no SMC), wo ML ko sikhayi
+        # NAHI jaani — warna ML galt patterns reinforce karega.
+        # is_true_sniper = zone_touched + smc_confluence + velocity + confirm.
+        entry_quality = t.get("entry_quality", {})
+        if sniper_only and entry_quality:
+            if not entry_quality.get("is_true_sniper", False):
+                skipped_entry_quality += 1
+                continue
+        elif sniper_only and not entry_quality:
+            # Old trade records (pre-entry_quality) — fall back to outcome
+            # filter but LOG a warning so we know it's legacy data.
+            logger.debug(
+                "Trade %s missing entry_quality — legacy record, "
+                "using outcome-based filter as fallback",
+                t.get("symbol", "?"),
+            )
+
+        # --- SNIPER-ONLY OUTCOME FILTER (secondary, for legacy records) ---
         # Only learn from high-conviction sniper winners that trailed out.
-        if sniper_only:
+        if sniper_only and not entry_quality:
             exit_reason = t.get("exit_reason", "")
             if exit_reason != sniper_exit_reason:
                 skipped_sniper += 1
@@ -447,14 +467,21 @@ def build_training_data(trade_log: list[dict], feature_columns: list[str],
         rows.append(row)
 
     if not rows:
+        if sniper_only and skipped_entry_quality:
+            logger.info("entry_quality gate: %d trades skipped (not true sniper entry — "
+                        "ML refuses to learn from bad/lucky entries)", skipped_entry_quality)
         if sniper_only and skipped_sniper:
-            logger.info("sniper_only filter: %d trades skipped (pnl<%.0f%% or non-sniper exit)",
+            logger.info("sniper_only fallback: %d legacy trades skipped (pnl<%.0f%% or non-sniper exit)",
                         skipped_sniper, sniper_min_pnl_pct)
         return pd.DataFrame(columns=feature_columns + ["label", "entry_ts"])
 
+    if sniper_only and skipped_entry_quality:
+        logger.info("entry_quality gate: %d bad-entry trades blocked from ML training "
+                    "(not true sniper), %d true-sniper trades kept",
+                    skipped_entry_quality, len(rows))
     if sniper_only and skipped_sniper:
-        logger.info("sniper_only filter: %d trades skipped, %d kept (pnl>%.0f%% + %s)",
-                    skipped_sniper, len(rows), sniper_min_pnl_pct, sniper_exit_reason)
+        logger.info("sniper_only fallback: %d legacy trades skipped, %d kept",
+                    skipped_sniper, len(rows))
 
     df = pd.DataFrame(rows)
     # Convert entry_ts to datetime for sorting

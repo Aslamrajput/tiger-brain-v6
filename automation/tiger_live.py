@@ -1431,6 +1431,7 @@ class TigerLiveRunner:
                                 "win": 1 if pnl > 0 else 0,
                                 "status": "CLOSED",
                                 "is_scalper": True,
+                                "entry_quality": _pe.get("entry_quality", {}),
                                 "ml_features": _ml_feats,
                                 "ml_win_prob": _pe.get("ml_win_prob", 1.0),
                                 "sensex_trend": _pe.get("sensex_trend", 0.0),
@@ -1554,6 +1555,7 @@ class TigerLiveRunner:
                                 "status": "CLOSED",
                                 "is_sniper": True,
                                 "is_scalper": False,
+                                "entry_quality": _pe.get("entry_quality", {}),
                                 "ml_features": _ml_feats,
                                 "ml_win_prob": _pe.get("ml_win_prob", 1.0),
                                 "sensex_trend": _pe.get("sensex_trend", 0.0),
@@ -2492,6 +2494,27 @@ class TigerLiveRunner:
                 is_scalper = t.get("is_scalper", False)
                 is_momentum_hunter = t.get("is_momentum_hunter", False)
                 is_sniper = t.get("is_sniper", False)
+
+                # === ENTRY QUALITY SNAPSHOT — for safe ML training ===
+                # ML ko sirf TRUE sniper entries se sikhna chahiye. Yahan
+                # capture karte hain ki entry ke time kaunse gates pass hue.
+                # is_true_sniper = zone + SMC + velocity + sniper-confirm ALL true.
+                # This prevents ML from learning lucky wins from bad entries.
+                _has_smc = bool(
+                    t.get("fvg") or t.get("bos") or t.get("liquidity_sweep")
+                    or t.get("order_block")
+                )
+                entry_quality = {
+                    "zone_touched": bool(t.get("zone_type")),
+                    "smc_confluence": _has_smc,
+                    "velocity_verified": True,   # line 2275 gate passed
+                    "sniper_entry_confirmed": bool(is_sniper),
+                    "options_math_passed": bool(t.get("zone_type")),  # GATE 9 passed
+                    "is_true_sniper": bool(
+                        is_sniper and _has_smc and t.get("zone_type")
+                    ),
+                }
+
                 if is_scalper:
                     self._scalper_positions.add(contract["tradingsymbol"])
                     self._save_scalper_positions()
@@ -2587,6 +2610,7 @@ class TigerLiveRunner:
                         "order_id": result.get("order_id"),
                         "order_status": order_status,
                         "status": "OPEN",
+                        "entry_quality": entry_quality,
                         "ml_features": t.get("ml_features", {}),
                         "ml_win_prob": t.get("ml_win_prob", 1.0),
                         "sensex_trend": t.get("sensex_trend", 0.0),
@@ -2603,6 +2627,7 @@ class TigerLiveRunner:
                     pe["ml_features"] = t.get("ml_features", {})
                     pe["ml_win_prob"] = t.get("ml_win_prob", 1.0)
                     pe["sensex_trend"] = t.get("sensex_trend", 0.0)
+                    pe["entry_quality"] = entry_quality   # survive to exit record
                     self._position_peaks[contract["tradingsymbol"]] = pe
                     self._save_position_peaks()
                 except Exception:

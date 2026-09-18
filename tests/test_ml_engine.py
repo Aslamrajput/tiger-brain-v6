@@ -482,6 +482,69 @@ class TestMLEngine:
         df = build_training_data(trade_log, feature_cols, sniper_only=False)
         assert len(df) == 2
 
+    def test_entry_quality_gate_blocks_bad_entries(self):
+        """ML SAFETY: entry_quality gate blocks trades that are NOT true sniper.
+
+        A lucky win from a bad entry (no SMC, no zone) must NOT enter ML
+        training — otherwise ML learns junk patterns.
+        """
+        from pipeline.ml_engine import build_training_data
+        feature_cols = ["zone_strength", "sniper_zone_strength"]
+        trade_log = [
+            # TRUE sniper — zone + SMC + velocity + confirmed → KEEP (even if loss)
+            {"status": "CLOSED", "exit_reason": "SNIPER_TRAILING_EXIT",
+             "pnl": -30, "trade_cost": 100,
+             "entry_quality": {"is_true_sniper": True, "zone_touched": True,
+                               "smc_confluence": True, "velocity_verified": True},
+             "ml_features": {"zone_strength": 0.9, "sniper_zone_strength": 85},
+             "entry_ts": "2026-09-01 09:30:00"},
+            # BAD entry — lucky win but NOT true sniper → BLOCK from ML
+            {"status": "CLOSED", "exit_reason": "SNIPER_TRAILING_EXIT",
+             "pnl": 500, "trade_cost": 100,
+             "entry_quality": {"is_true_sniper": False, "zone_touched": False,
+                               "smc_confluence": False, "velocity_verified": True},
+             "ml_features": {"zone_strength": 0.2, "sniper_zone_strength": 40},
+             "entry_ts": "2026-09-01 10:00:00"},
+            # TRUE sniper — big winner → KEEP
+            {"status": "CLOSED", "exit_reason": "SNIPER_TRAILING_EXIT",
+             "pnl": 80, "trade_cost": 100,
+             "entry_quality": {"is_true_sniper": True, "zone_touched": True,
+                               "smc_confluence": True, "velocity_verified": True},
+             "ml_features": {"zone_strength": 0.95, "sniper_zone_strength": 92},
+             "entry_ts": "2026-09-01 11:00:00"},
+        ]
+        df = build_training_data(trade_log, feature_cols, sniper_only=True,
+                                 sniper_min_pnl_pct=30.0,
+                                 sniper_exit_reason="SNIPER_TRAILING_EXIT")
+        # Only 2 TRUE sniper entries kept — the lucky-win bad entry is blocked
+        assert len(df) == 2
+        # The loss from a true sniper is labeled 0 (ML learns from it)
+        labels = sorted(df["label"].tolist())
+        assert labels == [0, 1]
+        # The bad-entry lucky win (sniper_zone_strength=40) is NOT in training
+        assert 40 not in df["sniper_zone_strength"].tolist()
+
+    def test_entry_quality_gate_legacy_fallback(self):
+        """Old trade records without entry_quality fall back to outcome filter."""
+        from pipeline.ml_engine import build_training_data
+        feature_cols = ["zone_strength"]
+        trade_log = [
+            # Legacy record (no entry_quality) — big sniper winner → KEEP via fallback
+            {"status": "CLOSED", "exit_reason": "SNIPER_TRAILING_EXIT",
+             "pnl": 80, "trade_cost": 100,
+             "ml_features": {"zone_strength": 0.9},
+             "entry_ts": "2026-09-01 09:30:00"},
+            # Legacy record — small winner → SKIP (< 30%)
+            {"status": "CLOSED", "exit_reason": "SNIPER_TRAILING_EXIT",
+             "pnl": 10, "trade_cost": 100,
+             "ml_features": {"zone_strength": 0.5},
+             "entry_ts": "2026-09-01 10:00:00"},
+        ]
+        df = build_training_data(trade_log, feature_cols, sniper_only=True,
+                                 sniper_min_pnl_pct=30.0,
+                                 sniper_exit_reason="SNIPER_TRAILING_EXIT")
+        assert len(df) == 1  # legacy fallback keeps the big winner
+
     def test_save_and_load_model(self, tmp_path):
         """save_model → joblib load → TigerMLGate loads it."""
         from pipeline.ml_engine import train_model, save_model, TigerMLGate
