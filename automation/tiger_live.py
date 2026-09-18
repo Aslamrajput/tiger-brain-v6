@@ -37,11 +37,18 @@ from automation.scheduler import (
     is_mcx_hours,
 )
 from data.loader import resolve_option_contract, OPTION_INSTRUMENT_TYPE, find_affordable_option
-from config.thresholds import AUTOMATION, MARKET_CATEGORIES
+from config.thresholds import AUTOMATION, MARKET_CATEGORIES, SCALPER, ML_ENGINE
 from backtest.tiger_fund_brain import announce_fund_plan, size_trade_with_fund_brain
 from risk.capital_manager import CapitalManager
 from automation.daily_cleanup import run_daily_cleanup
 from pipeline.seven_brains import count_aligned_brains
+from pipeline.ml_engine import TigerMLGate, required_confluence_for_win_prob
+from data.features import extract_live_features, sensex_blocks_option
+from subbrains.mcx_scanner import (
+    MCX_SYMBOLS as SNIPER_MCX_SYMBOLS,
+    scan_mcx as scan_mcx_sniper,
+    calculate_atr as sniper_atr,
+)
 
 
 def resolve_exchange_for_symbol(symbol: str) -> str:
@@ -122,10 +129,18 @@ class TigerLiveRunner:
         self._position_peaks: dict = self._load_position_peaks()
         # Scalper positions tracker — tsym → True (for special exit rules)
         self._scalper_positions: set = self._load_scalper_positions()
+        # Sniper positions tracker — tsym → True (ATR*2.5 trailing exit)
+        self._sniper_positions: set = set()
         # Data refresh throttle — with 1-min scans, only refresh REST candles
         # every 5 min. SmartWebSocketV2 live ticks fill the gap between refreshes.
         self._last_data_refresh: datetime | None = None
         self._last_15m_fetch: datetime | None = None
+        # === ML INFERENCE GATE — LightGBM win-probability gate ===
+        self.ml_gate = TigerMLGate(
+            model_path=ML_ENGINE["MODEL_PATH"],
+            min_win_prob=ML_ENGINE["MIN_WIN_PROB"],
+            feature_columns=ML_ENGINE["FEATURE_COLUMNS"],
+        )
 
     def _live_re_size(
         self, real_balance: float, real_ltp: float, real_lot_size: int,
@@ -297,11 +312,12 @@ class TigerLiveRunner:
                     f"counter reset (was {raw.get('daily_trade_count', 0)})")
                 return {"date": today, "daily_trade_count": 0, "locked": False}
             count = raw.get("daily_trade_count", 0)
-            locked = raw.get("locked", False) or count >= 6
+            locked = raw.get("locked", False) or count >= SCALPER["MAX_TRADES_PER_DAY"]
             if locked:
                 logger.info(
                     f"🔒 State lock: DAILY CAP LOCKED — "
-                    f"{count}/6 trades taken. No more entries until next session.")
+                    f"{count}/{SCALPER['MAX_TRADES_PER_DAY']} trades taken. "
+                    f"No more entries until next session.")
             return {"date": today, "daily_trade_count": count, "locked": locked}
         except (FileNotFoundError, json.JSONDecodeError, OSError):
             return {"date": today, "daily_trade_count": 0, "locked": False}
@@ -318,7 +334,7 @@ class TigerLiveRunner:
     def _increment_daily_trade_count(self) -> int:
         """Increment the daily trade counter and check cap.
 
-        Returns the new count. Locks at 6 trades — no more entries
+        Returns the new count. Locks at MAX_TRADES_PER_DAY — no more entries
         until next session reset.
         """
         today = datetime.now().date().isoformat()
@@ -326,23 +342,24 @@ class TigerLiveRunner:
             self._state_lock = {"date": today, "daily_trade_count": 0, "locked": False}
         count = self._state_lock.get("daily_trade_count", 0) + 1
         self._state_lock["daily_trade_count"] = count
-        if count >= 6:
+        if count >= SCALPER["MAX_TRADES_PER_DAY"]:
             self._state_lock["locked"] = True
             logger.info(
-                f"🔒 STATE LOCK: daily_trade_count={count}/6 — "
+                f"🔒 STATE LOCK: daily_trade_count={count}/"
+                f"{SCALPER['MAX_TRADES_PER_DAY']} — "
                 f"PERMANENTLY LOCKED until next session reset.")
         self._save_state_lock()
         return count
 
     def _is_daily_cap_locked(self) -> bool:
-        """Check if daily trade cap is permanently locked at 6."""
+        """Check if daily trade cap is permanently locked."""
         today = datetime.now().date().isoformat()
         if self._state_lock.get("date") != today:
             self._state_lock = {"date": today, "daily_trade_count": 0, "locked": False}
             self._save_state_lock()
             return False
         return self._state_lock.get("locked", False) or \
-            self._state_lock.get("daily_trade_count", 0) >= 6
+            self._state_lock.get("daily_trade_count", 0) >= SCALPER["MAX_TRADES_PER_DAY"]
 
     def _load_position_peaks(self) -> dict:
         """Load per-position peak + target_booked from disk (restart-safe).
@@ -468,7 +485,8 @@ class TigerLiveRunner:
         if self._is_daily_cap_locked():
             count = self._state_lock.get("daily_trade_count", 0)
             logger.info(
-                f"🔒 STATE LOCK active — daily_trade_count={count}/6. "
+                f"🔒 STATE LOCK active — daily_trade_count={count}/"
+                f"{SCALPER['MAX_TRADES_PER_DAY']}. "
                 f"No more entries until next session reset.")
             return False
         # Check pause
@@ -542,21 +560,14 @@ class TigerLiveRunner:
     def _verify_1m_velocity(self, symbol: str, option_type: str) -> bool:
         """Final entry-confirmation gate using the LATEST 1-minute candle.
 
-        High-frequency scalping micro-momentum layer. Before Tiger
-        transmits any BUY to Angel One, it re-verifies the live 1m candle:
-          1. Real Body >= 65% of total range (captures bottom sweeps +
-             sharp wick turnarounds on 1m timeframe — the initial impulse)
-          2. Volume >= 1.4x rolling average (sensitive instantaneous
-             multiplier — 1.3x-1.5x band, anti-freeze)
-          3. Candle direction matches option_type (CE → green, PE → red)
-
-        This is the ABSOLUTE CONFIRMATION layer — scanner signals are
-        necessary but NOT sufficient. The 1m candle must confirm live.
+        Simplified to DIRECTION ONLY — the scanner already checks body,
+        volume, and RSI in the 9-gate pipeline. This gate is the final
+        confirmation that the live 1m candle direction matches the
+        option type (CE → green, PE → red) before transmitting to broker.
 
         Returns:
-            True if the latest 1m candle passes all velocity checks.
+            True if the latest 1m candle direction matches option_type.
         """
-        from config.thresholds import SCALPER
         df_1m = self.data_map_1m.get(symbol)
         if df_1m is None or df_1m.empty:
             logger.info(
@@ -567,29 +578,7 @@ class TigerLiveRunner:
         # Latest 1m candle
         row = df_1m.iloc[-1]
         o = float(row.get("open", 0) or 0)
-        h = float(row.get("high", 0) or 0)
-        l = float(row.get("low", 0) or 0)
         c = float(row.get("close", 0) or 0)
-        v = float(row.get("volume", 0) or 0)
-
-        rng = h - l
-        if rng <= 0:
-            logger.info(
-                f"🚫 VELOCITY BLOCK {symbol} — 1m candle range is 0 (no movement)")
-            return False
-
-        body = abs(c - o)
-        body_pct = (body / rng) * 100
-
-        # Rolling average volume (last 10 1m candles, excluding current)
-        lookback = min(10, len(df_1m) - 1)
-        if lookback < 3:
-            logger.info(
-                f"🚫 VELOCITY BLOCK {symbol} — insufficient 1m history "
-                f"({lookback} candles, need 3+)")
-            return False
-        avg_vol = float(df_1m["volume"].iloc[-(lookback + 1):-1].mean())
-        vol_ratio = v / avg_vol if avg_vol > 0 else 0
 
         # Direction check: CE needs green candle, PE needs red candle
         is_ce = option_type.upper() == "CE"
@@ -597,23 +586,6 @@ class TigerLiveRunner:
         candle_red = c < o
         direction_ok = (is_ce and candle_green) or (not is_ce and candle_red)
 
-        # Gate 1: Body >= 65% (dynamic — captures impulse + wick turnarounds)
-        if body_pct < SCALPER["MIN_BODY_PCT"]:
-            logger.info(
-                f"🚫 VELOCITY BLOCK {symbol} {option_type} — "
-                f"1m body {body_pct:.0f}% < {SCALPER['MIN_BODY_PCT']}% "
-                f"(no impulse confirmation)")
-            return False
-
-        # Gate 2: Volume >= 1.4x (sensitive — anti-freeze, 1.3x-1.5x band)
-        if vol_ratio < SCALPER["MIN_VOLUME_SURGE"]:
-            logger.info(
-                f"🚫 VELOCITY BLOCK {symbol} {option_type} — "
-                f"1m vol {vol_ratio:.1f}x < {SCALPER['MIN_VOLUME_SURGE']}x "
-                f"(no micro-momentum surge)")
-            return False
-
-        # Gate 3: Direction match
         if not direction_ok:
             logger.info(
                 f"🚫 VELOCITY BLOCK {symbol} {option_type} — "
@@ -621,32 +593,278 @@ class TigerLiveRunner:
                 f"but need {'green' if is_ce else 'red'} for {option_type}")
             return False
 
-        # Gate 4: RSI speed boundary — CE needs RSI>=60, PE needs RSI<=40
-        try:
-            from subbrains.mean_reversion import calculate_rsi
-            rsi_series = calculate_rsi(df_1m.iloc[-(lookback + 1):])
-            latest_rsi = float(rsi_series.iloc[-1]) if not rsi_series.empty else 50.0
-        except Exception:
-            latest_rsi = 50.0
-        if is_ce and latest_rsi < SCALPER["MIN_RSI_BUY"]:
-            logger.info(
-                f"🚫 VELOCITY BLOCK {symbol} {option_type} — "
-                f"RSI {latest_rsi:.0f} < {SCALPER['MIN_RSI_BUY']} "
-                f"(no bullish momentum)")
-            return False
-        if not is_ce and latest_rsi > SCALPER["MAX_RSI_SELL"]:
-            logger.info(
-                f"🚫 VELOCITY BLOCK {symbol} {option_type} — "
-                f"RSI {latest_rsi:.0f} > {SCALPER['MAX_RSI_SELL']} "
-                f"(no bearish momentum)")
-            return False
-
-        logger.info(
-            f"✅ VELOCITY CONFIRMED {symbol} {option_type} — "
-            f"1m body={body_pct:.0f}% vol={vol_ratio:.1f}x "
-            f"RSI={latest_rsi:.0f} "
-            f"{'green' if candle_green else 'red'} candle")
         return True
+
+    # ============================================================
+    # TIGER SNIPER ADVANCED V2 — MCX commodity sniper
+    # Pure SMC entry: OB retest + CHOCH + wick rejection on 1m.
+    # Exit: ATR(14)*2.5 trailing + 5m opposite BOS. No fixed target.
+    # ============================================================
+    def _sniper_session_active(self, now_dt: datetime = None) -> bool:
+        """MCX high-volume sniper session: 10:30 AM - 11:30 PM IST."""
+        from config.thresholds import SNIPER
+        from datetime import time
+        if now_dt is None:
+            now_dt = datetime.now()
+        cur = now_dt.time()
+        sh, sm = map(int, SNIPER["SESSION_START"].split(":"))
+        eh, em = map(int, SNIPER["SESSION_END"].split(":"))
+        return time(sh, sm) <= cur <= time(eh, em)
+
+    def _nse_sniper_session_active(self, now_dt: datetime = None) -> bool:
+        """NSE sniper session: 9:15 AM - 3:00 PM IST (entry cutoff)."""
+        from config.thresholds import SNIPER
+        from datetime import time
+        if now_dt is None:
+            now_dt = datetime.now()
+        cur = now_dt.time()
+        sh, sm = map(int, SNIPER["NSE_SESSION_START"].split(":"))
+        eh, em = map(int, SNIPER["NSE_SESSION_END"].split(":"))
+        return time(sh, sm) <= cur <= time(eh, em)
+
+    def _sniper_trades_today(self) -> int:
+        """Count of sniper trades placed today (max 3)."""
+        today = datetime.now().date()
+        return int(self._daily_entries_taken.get(today, 0)) \
+            if hasattr(self, "_daily_entries_taken") else 0
+
+    def _sniper_can_trade(self, market: str = "MCX") -> tuple[bool, str]:
+        """Sniper safety gate: session + daily cap + risk manager.
+
+        market: "MCX" (10:30-23:30) or "NSE" (09:15-15:00).
+        """
+        from config.thresholds import SNIPER
+        if market == "NSE":
+            if not self._nse_sniper_session_active():
+                return False, "outside NSE sniper session (09:15-15:00)"
+        else:
+            if not self._sniper_session_active():
+                return False, "outside MCX sniper session (10:30-23:30)"
+        count = self._sniper_trades_today()
+        if count >= SNIPER["MAX_TRADES_PER_DAY"]:
+            return False, f"max {SNIPER['MAX_TRADES_PER_DAY']} sniper trades/day reached"
+        if not self._risk_manager_allows_trading():
+            return False, "risk manager paused"
+        return True, "ok"
+
+    def _verify_sniper_entry(self, symbol: str, option_type: str,
+                             order_block: dict) -> tuple[bool, str]:
+        """Sniper entry confirmation on 1m: OB retest + CHOCH + wick rejection.
+
+        No market entry on impulse — Tiger waits for price to retest the order
+        block, then confirms a Change of Character + a rejection wick on 1m.
+        """
+        from config.thresholds import SNIPER
+        df_1m = self.data_map_1m.get(symbol)
+        if df_1m is None or df_1m.empty or len(df_1m) < SNIPER["CHOCH_LOOKBACK"] + 2:
+            return False, "insufficient 1m data"
+
+        ob_top = float(order_block.get("top", 0.0) or 0.0)
+        ob_bottom = float(order_block.get("bottom", 0.0) or 0.0)
+        if ob_top <= 0 or ob_bottom <= 0:
+            return False, "order block edges missing"
+
+        lookback = SNIPER["CHOCH_LOOKBACK"]
+        window = df_1m.iloc[-lookback - 1:]
+        last = window.iloc[-1]
+        o, c = float(last["open"]), float(last["close"])
+        h, l = float(last["high"]), float(last["low"])
+        rng = h - l
+        if rng <= 0:
+            return False, "zero-range 1m candle"
+
+        is_ce = option_type.upper() == "CE"
+
+        # 1) OB RETEST — recent 1m low (CE) / high (PE) must have touched the OB
+        recent_lows = window["low"].astype(float)
+        recent_highs = window["high"].astype(float)
+        if is_ce:
+            retested = bool((recent_lows <= ob_top + (ob_top - ob_bottom) * 0.2).any())
+        else:
+            retested = bool((recent_highs >= ob_bottom - (ob_top - ob_bottom) * 0.2).any())
+        if not retested:
+            return False, "OB not retested on 1m"
+
+        # 2) CHOCH (Change of Character) — the last candle reverses the prior
+        #    lookback structure. For CE: prior lows breaking down then last
+        #    candle closes up (bullish reversal). For PE: mirror.
+        prior = window.iloc[:-1]
+        if is_ce:
+            prior_low = float(prior["low"].min())
+            choch = c > o and l <= prior_low + (rng * 0.1) and c > float(prior["close"].iloc[-1])
+        else:
+            prior_high = float(prior["high"].max())
+            choch = c < o and h >= prior_high - (rng * 0.1) and c < float(prior["close"].iloc[-1])
+        if not choch:
+            return False, "no CHOCH on 1m"
+
+        # 3) WICK REJECTION — optional when the reversal candle is impulsive.
+        #    A strong-body reversal (body >= 60% of range) is itself the
+        #    confirmation — forcing a wick on it misses impulsive rockets
+        #    (real momentum moves are body-heavy, not wick-heavy). Only a
+        #    small-body candle NEEDS a rejection wick to prove rejection.
+        body = abs(c - o)
+        lower_wick = min(o, c) - l
+        upper_wick = h - max(o, c)
+        body_ratio = body / rng
+        if body_ratio < 0.60:  # not impulsive → require a rejection wick
+            if is_ce:
+                wick_ratio = lower_wick / rng
+            else:
+                wick_ratio = upper_wick / rng
+            if wick_ratio < SNIPER["WICK_REJECTION_MIN"]:
+                return False, f"weak reversal (body {body_ratio:.0%}, wick {wick_ratio:.0%} < {SNIPER['WICK_REJECTION_MIN']:.0%})"
+
+        return True, "OB_retest+CHOCH+wick/body"
+
+    def _sniper_stop_price(self, entry_price: float, option_type: str,
+                           order_block: dict) -> float:
+        """SL = order block edge +/- 0.35% buffer (on the option premium)."""
+        from config.thresholds import SNIPER
+        buffer = entry_price * (SNIPER["OB_BUFFER_PCT"] / 100.0)
+        is_ce = option_type.upper() == "CE"
+        ob_edge = float(order_block.get("bottom", 0.0) or 0.0) if is_ce \
+            else float(order_block.get("top", 0.0) or 0.0)
+        # If OB edge not usable, fall back to entry - buffer (CE) / entry + buffer (PE)
+        if ob_edge <= 0:
+            ob_edge = entry_price
+        # Express the OB edge as a premium-side stop via the buffer distance.
+        # CE: stop below entry; PE: stop below entry too (option premium drops).
+        stop = entry_price - buffer - max(0.0, entry_price - ob_edge) * 0.5 if is_ce \
+            else entry_price - buffer
+        return max(stop, entry_price * 0.80)  # never tighter than -20%
+
+    def scan_sniper_signals(self) -> list[dict]:
+        """Run the sniper scanner across the ACTIVE market(s) → 0 or 1 signal.
+
+        One engine, two markets:
+          - NSE session (09:15-15:00): NIFTY/BANKNIFTY/FINNIFTY/SENSEX + top
+            liquid F&O stocks, with NSE_MIN_CONFLUENCE_COMPONENTS=2 (looser —
+            index/stock moves are noisier, 3-component confluence is rare).
+          - MCX session (10:30-23:30): GOLD/SILVER/CRUDEOIL/NATURALGAS/COPPER,
+            with MIN_CONFLUENCE_COMPONENTS=3 (strict — commodities trend clean).
+
+        Both share the SAME pure-SMC scanner (BOS+sweep+OB+FVG), the SAME 1m
+        entry confirmation (OB retest + CHOCH + wick), the SAME ML 0.80 gate,
+        and the SAME exit (no fixed target, +5% trail / 50% peak lock).
+        Returns the first qualifying zone (NSE checked first during overlap).
+        """
+        from config.thresholds import SNIPER
+
+        # NSE session active? (checked first — index options priority)
+        if self._nse_sniper_session_active():
+            sig = self._scan_one_market("NSE")
+            if sig:
+                return [sig]
+
+        # MCX session active?
+        if self._sniper_session_active():
+            sig = self._scan_one_market("MCX")
+            if sig:
+                return [sig]
+
+        return []
+
+    def _scan_one_market(self, market: str) -> Optional[dict]:
+        """Scan one market (NSE or MCX) for a sniper entry. Returns a signal
+        dict (compatible with _place_live_orders) or None.
+
+        Shared core: build 5m from 1m, run scan_mcx with the market's allowed
+        universe + min_components, confirm on 1m, apply the ML 0.80 gate.
+        """
+        from config.thresholds import SNIPER
+        from subbrains.mcx_scanner import calculate_atr_pct
+
+        can, reason = self._sniper_can_trade(market=market)
+        if not can:
+            logger.info(f"🎯 SNIPER [{market}] skip: {reason}")
+            return None
+
+        # Build the universe set + min_components for this market
+        if market == "NSE":
+            try:
+                from universe.fno_universe import nse_scan_symbols
+                universe = set(nse_scan_symbols().keys())
+            except Exception as exc:
+                logger.warning(f"🎯 SNIPER [NSE] universe fetch fail: {exc}")
+                return None
+            min_components = SNIPER.get("NSE_MIN_CONFLUENCE_COMPONENTS", 2)
+            exchange = "NSE"
+        else:
+            universe = set(SNIPER_MCX_SYMBOLS)
+            min_components = SNIPER.get("MIN_CONFLUENCE_COMPONENTS", 3)
+            exchange = "MCX"
+
+        # Build 5m candles from 1m data (resample) for each symbol in universe
+        data_map_5m: dict = {}
+        for sym in universe:
+            df_1m = self.data_map_1m.get(sym)
+            if df_1m is not None and not df_1m.empty and len(df_1m) >= 30:
+                try:
+                    df_5m = df_1m.resample("5min").agg({
+                        "open": "first", "high": "max",
+                        "low": "min", "close": "last",
+                        "volume": "sum",
+                    }).dropna()
+                    if len(df_5m) >= 25:
+                        data_map_5m[sym] = df_5m
+                except Exception:
+                    pass
+        if not data_map_5m:
+            logger.debug(f"🎯 SNIPER [{market}]: no 5m data built this cycle")
+            return None
+
+        zone = scan_mcx_sniper(data_map_5m, now_ts=datetime.now().isoformat(),
+                               min_components=min_components, allowed=universe,
+                               market=market)
+        if zone is None:
+            return None
+
+        sig = zone.to_signal()
+        symbol = sig["symbol"]
+        option_type = sig["option_type"]
+
+        # Entry confirmation on 1m
+        ok, why = self._verify_sniper_entry(symbol, option_type, sig.get("order_block", {}))
+        if not ok:
+            logger.info(f"🎯 SNIPER [{market}] ENTRY WAIT {symbol} {option_type} — {why}")
+            return None
+
+        # ML conviction ADVISOR — win_prob as confidence signal, never blocks
+        try:
+            ml_features = extract_live_features(
+                symbol=symbol, signal=sig,
+                data_map_15m=self.data_map, data_map_1m=self.data_map_1m,
+                broker=self.broker, pcr_value=sig.get("pcr", 1.0),
+            )
+            sig["ml_features"] = ml_features
+            ml_passed, win_prob = self.ml_gate.check_gate(ml_features)
+            sig["ml_win_prob"] = win_prob
+            sig["sensex_trend"] = float(ml_features.get("sensex_trend", 0.0))
+            # ADVISORY: ML never blocks. Log win_prob as confidence signal.
+            if win_prob < SNIPER["MIN_WIN_PROB"]:
+                logger.info(
+                    f"💡 ML ADVISORY {symbol} {option_type} — "
+                    f"win_prob={win_prob:.2f} < {SNIPER['MIN_WIN_PROB']:.2f} "
+                    f"(advisory only — Tiger decides)")
+            logger.info(
+                f"🎯 SNIPER [{market}] ENTRY READY {symbol} {option_type} — "
+                f"score={sig['zone_strength']:.0f} win_prob={win_prob:.2f} {why}")
+        except Exception as exc:
+            logger.warning(f"🎯 SNIPER [{market}] ML gate error (pass-through): {exc}")
+            sig["ml_features"] = {}
+            sig["ml_win_prob"] = 1.0
+            sig["sensex_trend"] = 0.0
+
+        # Stamp sniper exit params on the signal for the exit engine
+        sig["is_sniper"] = True
+        sig["is_scalper"] = False
+        sig["is_momentum_hunter"] = False
+        sig["setup_score"] = float(sig.get("zone_strength", 85.0))
+        sig["entry_ts"] = datetime.now()
+        sig["sniper_atr_pct"] = sig.get("commodity_volatility", 0.0)
+        sig["market"] = market
+        return sig
 
     # ============================================================
     # PRE-MARKET (09:00) — login + data load
@@ -820,6 +1038,10 @@ class TigerLiveRunner:
         WebSocket TickCandleBuilder produces real-time 1m OHLCV bars from
         live ticks. This appends them to the historical 1m data so the
         scanner has up-to-date 1m candles without any REST calls.
+
+        If a symbol's 1m REST fetch failed (rate limit), it's not in
+        data_map_1m yet — create it from WS candles so velocity gate
+        can confirm entries.
         """
         if self.broker is None or self.broker.websocket is None:
             return
@@ -827,29 +1049,47 @@ class TigerLiveRunner:
             return
         ws = self.broker.websocket
         merged = 0
-        for sym in list(self.data_map_1m.keys()):
+        created = 0
+        # Iterate ALL scan symbols (data_map has 15m — that's our universe)
+        for sym in list(self.data_map.keys()):
             token = ws._resolve_symbol_token(sym)
             if token is None:
                 continue
             ws_df = ws.get_1m_candles(token, min_bars=1)
             if ws_df is None or ws_df.empty:
                 continue
-            # Append WS live candles to historical 1m data
-            hist_df = self.data_map_1m[sym]
-            # Avoid duplicate timestamps — only add bars newer than last historical
-            if not hist_df.empty:
-                last_hist_ts = hist_df.index[-1]
-                new_bars = ws_df[ws_df.index > last_hist_ts]
+            if sym not in self.data_map_1m or self.data_map_1m[sym] is None or self.data_map_1m[sym].empty:
+                # REST 1m fetch failed (rate limit) — create from WS live ticks
+                self.data_map_1m[sym] = ws_df.copy()
+                created += 1
             else:
-                new_bars = ws_df
-            if not new_bars.empty:
-                self.data_map_1m[sym] = pd.concat([hist_df, new_bars])
-                # Keep last 1000 bars (enough for scalper/momentum)
-                if len(self.data_map_1m[sym]) > 1000:
-                    self.data_map_1m[sym] = self.data_map_1m[sym].tail(1000)
-                merged += 1
-        if merged:
-            logger.debug("WS 1m merge: %d symbols updated with live ticks", merged)
+                # Append WS live candles to historical 1m data.
+                # Normalize tz: WS candles may be tz-aware (Asia/Kolkata)
+                # while historical 1m data is tz-naive — comparing them
+                # directly raises TypeError in pandas 2.x. Coerce both to
+                # the same tz before the comparison.
+                hist_df = self.data_map_1m[sym]
+                ws_idx = ws_df.index
+                hist_idx = hist_df.index
+                if ws_idx.tz is not None and hist_idx.tz is None:
+                    hist_idx = hist_idx.tz_localize(ws_idx.tz)
+                elif ws_idx.tz is None and hist_idx.tz is not None:
+                    ws_idx = ws_idx.tz_localize(hist_idx.tz)
+                elif ws_idx.tz is not None and hist_idx.tz is not None and ws_idx.tz != hist_idx.tz:
+                    ws_idx = ws_idx.tz_convert(hist_idx.tz)
+                last_hist_ts = hist_idx[-1]
+                new_bars = ws_df[ws_idx > last_hist_ts]
+                if not new_bars.empty:
+                    # Drop tz to match historical storage (tz-naive) so later
+                    # downstream code that expects tz-naive 1m data keeps working.
+                    if new_bars.index.tz is not None:
+                        new_bars = new_bars.tz_localize(None)
+                    self.data_map_1m[sym] = pd.concat([hist_df, new_bars])
+                    if len(self.data_map_1m[sym]) > 1000:
+                        self.data_map_1m[sym] = self.data_map_1m[sym].tail(1000)
+                    merged += 1
+        if merged or created:
+            logger.debug("WS 1m merge: %d updated, %d created from live ticks", merged, created)
 
         # === INDEX VOLUME BACKFILL (Bug fix) ===
         # Index spot tokens (NIFTY/BANKNIFTY) report volume=0 from Angel
@@ -1065,7 +1305,11 @@ class TigerLiveRunner:
             entry_time = tracker.get("entry_time")
             if not entry_time:
                 entry_time = datetime.now().isoformat()
+            # Preserve sniper metadata (is_sniper, order_block, sniper_atr_pct,
+            # symbol, ml_features) stashed at entry — the rebuild below must
+            # NOT wipe them, else the sniper exit branch never fires.
             self._position_peaks[tsym] = {
+                **tracker,                       # keep sniper + ml fields
                 "peak": peak, "target_booked": target_booked,
                 "entry": entry_price,
                 "entry_time": entry_time,
@@ -1105,22 +1349,21 @@ class TigerLiveRunner:
                 min_hold = SCALPER.get("MIN_HOLD_SECONDS", 180)
                 past_min_hold = hold_seconds >= min_hold
 
-                # === 1:2 RR TARGET — dynamic based on effective stop ===
-                # target = 2 × stop_loss_pct (fixed 1:2 risk-to-reward)
-                # If stop is 7%, target = 14%. If structural stop is 10%,
-                # target = 20%.
+                # === 1:2 RR TARGET REMOVED — pure momentum ride (Sep 2026) ===
+                # effective_stop_pct still used by the normal stop-loss gate below.
                 structural_stop_pct = tracker.get("structural_stop_pct", 0)
                 effective_stop_pct = SCALPER["MAX_STOP_PCT"]  # default -7%
                 if structural_stop_pct > 0:
                     effective_stop_pct = max(structural_stop_pct, SCALPER["MAX_STOP_PCT"])
                     effective_stop_pct = min(effective_stop_pct, SCALPER.get("CATASTROPHIC_STOP_PCT", 12.0))
-                rr_target_pct = effective_stop_pct * 2  # 1:2 RR
+                # rr_target_pct = effective_stop_pct * 2  # 1:2 RR — removed (no fixed target)
 
-                # 1. Scalper target: 1:2 RR → full exit
-                if gain_pct >= rr_target_pct:
-                    exit_reason = f"scalper_rr_target_{rr_target_pct:.0f}pct"
+                # === 1:2 RR TARGET REMOVED — pure momentum ride (Sep 2026).
+                #    Scalper now rides winners via trailing only; no fixed RR target.
+                # if gain_pct >= rr_target_pct:
+                #     exit_reason = f"scalper_rr_target_{rr_target_pct:.0f}pct"
                 # 2. Catastrophic stop: -12% → instant exit (black swan, no hold time)
-                elif loss_pct >= SCALPER.get("CATASTROPHIC_STOP_PCT", 12.0):
+                if loss_pct >= SCALPER.get("CATASTROPHIC_STOP_PCT", 12.0):
                     exit_reason = f"scalper_catastrophic_{SCALPER.get('CATASTROPHIC_STOP_PCT', 12.0):.0f}pct"
                 # 3. Normal stop: structural (zone-based) OR fixed -7%, whichever wider
                 #    CRUDEOIL fix: if structural stop is -10% (zone bottom), Tiger
@@ -1140,7 +1383,7 @@ class TigerLiveRunner:
                     trail_floor = entry_price * (1 + peak_gain_pct * 0.70 / 100)
                     if ltp <= trail_floor:
                         if ltp >= entry_price:
-                            exit_reason = "scalper_trail_lock_70pct"
+                            exit_reason = "TRAILING_EXIT"
                         else:
                             exit_reason = "scalper_breakeven_exit"
 
@@ -1174,16 +1417,23 @@ class TigerLiveRunner:
                         # Trade log exit
                         try:
                             from replay.nightly_replay import append_trade_record
+                            _pe = self._position_peaks.get(tsym, {})
+                            _ml_feats = _pe.get("ml_features", {})
                             append_trade_record({
                                 "symbol": tsym,
                                 "tradingsymbol": tsym,
                                 "exchange": exch,
                                 "exit_time": datetime.now().isoformat(),
+                                "entry_ts": _pe.get("entry_time", ""),
                                 "exit_price": ltp,
                                 "exit_reason": exit_reason,
                                 "pnl": pnl,
+                                "win": 1 if pnl > 0 else 0,
                                 "status": "CLOSED",
                                 "is_scalper": True,
+                                "ml_features": _ml_feats,
+                                "ml_win_prob": _pe.get("ml_win_prob", 1.0),
+                                "sensex_trend": _pe.get("sensex_trend", 0.0),
                             })
                         except Exception:
                             pass
@@ -1191,6 +1441,130 @@ class TigerLiveRunner:
                         logger.error(
                             f"❌ SCALPER EXIT FAIL {tsym}: {exit_reason} — {result.get('error')}")
                 continue  # scalper positions don't use V19 exit logic
+
+            # === SNIPER EXIT LOGIC (TIGER SNIPER ADVANCED V2) ===
+            # NO FIXED TARGET. Pure momentum ride — let the rocket run.
+            #   1. Give the rocket room: trail arms only after +25% profit
+            #      (aggressive — only true rockets arm the trail; small pops
+            #      stay on the wide OB stop so the rocket isn't choked early).
+            #   2. Once armed, trail = 50% of peak (lock half, ride the rest).
+            #   3. OB hard stop at -12% (survive the pre-rocket pullback/noise).
+            #   4. 5m opposite BOS = structure reversal exit.
+            # exit_reason = "SNIPER_TRAILING_EXIT" for the trailing case.
+            if tracker.get("is_sniper", False) or tsym in getattr(self, "_sniper_positions", set()):
+                from config.thresholds import SNIPER as _SNIPER_CFG
+                from subbrains.mcx_scanner import detect_bos as _sniper_detect_bos
+                exit_reason = None
+                exit_qty = qty
+
+                peak_premium = max(peak, entry_price)
+                gain_pct_now = (ltp - entry_price) / entry_price * 100.0
+                # Where the trailing floor sits once armed.
+                trail_lock_frac = _SNIPER_CFG["TRAIL_LOCK_PCT_OF_PEAK"] / 100.0
+                trail_floor = peak_premium - (peak_premium - entry_price) * (1.0 - trail_lock_frac)
+
+                # 1. OB hard stop — wide (-12%) so the rocket survives its
+                #    initial pullback before takeoff (was -0.7% → 40 premature
+                #    exits in backtest, momentum surrendered).
+                ob_stop = entry_price * (1.0 - _SNIPER_CFG["OB_STOP_PCT"] / 100.0)
+                if ltp <= ob_stop:
+                    exit_reason = "sniper_ob_stop"
+                # 2. Trailing SL — arms after +10% profit. Before that the
+                #    OB stop is the ONLY exit, so the rocket has room to ignite.
+                elif gain_pct_now >= _SNIPER_CFG["TRAIL_ACTIVATE_PCT"] and ltp <= trail_floor:
+                    exit_reason = _SNIPER_CFG["EXIT_REASON"]  # SNIPER_TRAILING_EXIT
+                # 3. 5m opposite BOS — structure reversal. BUT only checked
+                #    AFTER the trail has armed (gain >= TRAIL_ACTIVATE_PCT).
+                #    Before arming, first-pullback BOS must NOT kill the rocket
+                #    — that was the #1 momentum-surrender bug (rockets died at
+                #    +5% on the first 1-bar dip). Now the OB stop protects pre-
+                #    arming, and a CONFIRMED 2-bar BOS handles post-arming exits.
+                elif gain_pct_now >= _SNIPER_CFG["TRAIL_ACTIVATE_PCT"]:
+                    underlying = tsym
+                    for _sym in SNIPER_MCX_SYMBOLS:
+                        if _sym in tsym or tsym.startswith(_sym):
+                            underlying = _sym
+                            break
+                    df_1m_sym = self.data_map_1m.get(underlying)
+                    df_5m = None
+                    if df_1m_sym is not None and not df_1m_sym.empty and len(df_1m_sym) >= 26:
+                        try:
+                            df_5m = df_1m_sym.resample("5min").agg({
+                                "open": "first", "high": "max",
+                                "low": "min", "close": "last",
+                                "volume": "sum",
+                            }).dropna()
+                        except Exception:
+                            pass
+                    # 2-bar confirmed BOS: the break must hold for 2 consecutive
+                    # 5m closes (single-bar noise is NOT a real structure reversal).
+                    if df_5m is not None and len(df_5m) >= 26:
+                        bos = _sniper_detect_bos(df_5m, len(df_5m) - 1)
+                        if bos is not None:
+                            is_ce = option_type.upper() == "CE"
+                            opposite = (is_ce and bos["direction"] == "bearish") or \
+                                       (not is_ce and bos["direction"] == "bullish")
+                            if opposite and len(df_5m) >= 2:
+                                # Confirm: prior 5m close also on the break side
+                                prev_close = float(df_5m.iloc[-2]["close"])
+                                bos_level = float(bos["level"])
+                                confirmed = (is_ce and prev_close < bos_level) or \
+                                            (not is_ce and prev_close > bos_level)
+                                if confirmed:
+                                    exit_reason = "sniper_5m_opposite_bos"
+
+                if exit_reason:
+                    pos_product = p.get("producttype", "INTRADAY")
+                    if pos_product not in ("INTRADAY", "CARRYFORWARD"):
+                        pos_product = "INTRADAY"
+                    result = self.broker.place_option_order(
+                        tradingsymbol=tsym, symboltoken=token, exchange=exch,
+                        transaction_type="SELL", quantity=exit_qty,
+                        product_type=pos_product, order_type="MARKET",
+                        is_exit=True)
+                    if result.get("success"):
+                        closed += 1
+                        if hasattr(self, "_sniper_positions"):
+                            self._sniper_positions.discard(tsym)
+                        pnl = (ltp - entry_price) * exit_qty
+                        logger.info(
+                            f"🎯 SNIPER EXIT {tsym}: {exit_reason} — "
+                            f"SELL {exit_qty}/{qty} @ LTP ₹{ltp:.2f} "
+                            f"(gain {gain_pct:+.1f}%, peak ₹{peak_premium:.2f}, "
+                            f"PnL ₹{pnl:+.0f})")
+                        self._record_trade_pnl(pnl, tsym, exit_reason)
+                        for o in self._order_log:
+                            if o.get("tradingsymbol") == tsym and o.get("success"):
+                                o["exited"] = True
+                        self._save_order_log()
+                        try:
+                            from replay.nightly_replay import append_trade_record
+                            _pe = self._position_peaks.get(tsym, {})
+                            _ml_feats = _pe.get("ml_features", {})
+                            append_trade_record({
+                                "symbol": _pe.get("symbol", underlying) if 'underlying' in dir() else tsym,
+                                "tradingsymbol": tsym,
+                                "exchange": exch,
+                                "exit_time": datetime.now().isoformat(),
+                                "entry_ts": _pe.get("entry_time", ""),
+                                "exit_price": ltp,
+                                "exit_reason": exit_reason,
+                                "pnl": pnl,
+                                "win": 1 if pnl > 0 else 0,
+                                "status": "CLOSED",
+                                "is_sniper": True,
+                                "is_scalper": False,
+                                "ml_features": _ml_feats,
+                                "ml_win_prob": _pe.get("ml_win_prob", 1.0),
+                                "sensex_trend": _pe.get("sensex_trend", 0.0),
+                                "trade_cost": _pe.get("trade_cost", entry_price * qty),
+                            })
+                        except Exception:
+                            pass
+                    else:
+                        logger.error(
+                            f"❌ SNIPER EXIT FAIL {tsym}: {exit_reason} — {result.get('error')}")
+                continue  # sniper positions don't use V19 exit logic
 
             # === V19 EXIT LOGIC (on real broker data) ===
             # TIGHT EXIT — Tiger exits fast when wrong. No riding losers.
@@ -1223,18 +1597,19 @@ class TigerLiveRunner:
                     trail_floor = entry_price * (1 + peak_gain * 0.80)
                     if ltp <= trail_floor:
                         if ltp >= entry_price:
-                            exit_reason = "trail_lock_80pct_profit"
+                            exit_reason = "TRAILING_EXIT"
                         else:
                             exit_reason = "breakeven_exit"
 
-            # 3. Fixed target — book 40% quantity at +50% (first time only)
-            if exit_reason is None and gain_pct >= V19_FIXED_TARGET_PCT \
-                    and not target_booked:
-                exit_qty = max(1, int(qty * V19_FIXED_TARGET_BOOK))
-                exit_reason = "fixed_target_50pct_book40"
-                self._position_peaks[tsym]["target_booked"] = True
+            # 3. FIXED TARGET REMOVED — pure momentum ride (Sep 2026).
+            #    Tiger now rides winners via trailing only; no +50% booking.
+            # if exit_reason is None and gain_pct >= V19_FIXED_TARGET_PCT \
+            #         and not target_booked:
+            #     exit_qty = max(1, int(qty * V19_FIXED_TARGET_BOOK))
+            #     exit_reason = "fixed_target_50pct_book40"
+            #     self._position_peaks[tsym]["target_booked"] = True
 
-            # 4. Runaway safety
+            # 4. Runaway safety — black-swan cap (not a profit target)
             if gain_pct >= V19_RUNAWAY_EXIT_PCT:
                 exit_reason = "runaway_safety_250pct"
                 exit_qty = qty
@@ -1270,16 +1645,23 @@ class TigerLiveRunner:
                     # Trade log exit
                     try:
                         from replay.nightly_replay import append_trade_record
+                        _pe = self._position_peaks.get(tsym, {})
+                        _ml_feats = _pe.get("ml_features", {})
                         append_trade_record({
                             "symbol": tsym,
                             "tradingsymbol": tsym,
                             "exchange": exch,
                             "exit_time": datetime.now().isoformat(),
+                            "entry_ts": _pe.get("entry_time", ""),
                             "exit_price": ltp,
                             "exit_reason": exit_reason,
                             "pnl": pnl,
+                            "win": 1 if pnl > 0 else 0,
                             "status": "CLOSED",
                             "is_scalper": False,
+                            "ml_features": _ml_feats,
+                            "ml_win_prob": _pe.get("ml_win_prob", 1.0),
+                            "sensex_trend": _pe.get("sensex_trend", 0.0),
                         })
                     except Exception:
                         pass
@@ -1409,9 +1791,20 @@ class TigerLiveRunner:
 
             placed = self._place_live_orders(signals)
 
+            # === TIGER SNIPER ADVANCED V2 — MCX sniper scan (after scalper) ===
+            # The sniper runs on 5m MCX data, needs OB retest + CHOCH + wick
+            # on 1m, and a 0.80 ML conviction gate. Max 3/day, 10:30-23:30 IST.
+            sniper_placed = 0
+            try:
+                sniper_signals = self.scan_sniper_signals()
+                if sniper_signals:
+                    sniper_placed = self._place_live_orders(sniper_signals)
+            except Exception as exc:
+                logger.error("🎯 Sniper scan error: %s", exc, exc_info=True)
+
             # Update the daily entry counter
-            self._daily_entries_taken[today] = daily_entries + placed
-            if placed > 0:
+            self._daily_entries_taken[today] = daily_entries + placed + sniper_placed
+            if (placed + sniper_placed) > 0:
                 self._last_trade_time = datetime.now()
                 # Track scalper trades separately
                 for s in signals:
@@ -1420,8 +1813,8 @@ class TigerLiveRunner:
                         break
 
             logger.info("Scan done: %d live signals, %d buy orders placed, "
-                        "%d monitored exits, balance ₹%.0f",
-                        len(signals), placed, monitored,
+                        "%d sniper, %d monitored exits, balance ₹%.0f",
+                        len(signals), placed, sniper_placed, monitored,
                         self.account_capital)
         except Exception as exc:
             logger.error("Intraday scan error: %s", exc, exc_info=True)
@@ -1659,6 +2052,11 @@ class TigerLiveRunner:
                 float(o.get("trade_cost", 0)) for o in self._order_log
                 if o.get("success") and not o.get("exited", False)
             )
+            # Open position COUNT for the MAX_OPEN_POSITIONS gate.
+            open_position_count = sum(
+                1 for o in self._order_log
+                if o.get("success") and not o.get("exited", False)
+            )
 
             # MCX MINI fallback — if a full-size MCX contract is not affordable,
             # try the MINI variant (smaller lot = less capital).
@@ -1814,6 +2212,7 @@ class TigerLiveRunner:
                     trade_cost_estimate=trade_cost,
                     open_positions_cost=current_exposure,
                     min_allocation=one_lot_cost,
+                    open_position_count=open_position_count,
                 )
                 if not cap_check.allowed:
                     logger.info(
@@ -1885,6 +2284,76 @@ class TigerLiveRunner:
                 })
                 self._save_order_log()
                 continue
+
+            # === ML INFERENCE ADVISOR — win-probability signal (never blocks) ===
+            # Extract live features from WS 1m candles + 15m zones + option
+            # chain, run ensemble predict_proba. ML is ADVISORY — provides
+            # win_prob as confidence, Tiger decides whether to proceed.
+            try:
+                ml_features = extract_live_features(
+                    symbol=symbol,
+                    signal=t,
+                    data_map_15m=self.data_map,
+                    data_map_1m=self.data_map_1m,
+                    broker=self.broker,
+                    pcr_value=t.get("pcr", 1.0),
+                )
+                ml_passed, win_prob = self.ml_gate.check_gate(ml_features)
+                # Attach features + win_prob to signal early (used by both
+                # block branches and the trade-log entry below).
+                t["ml_features"] = ml_features
+                t["ml_win_prob"] = win_prob
+                t["sensex_trend"] = float(ml_features.get("sensex_trend", 0.0))
+
+                # --- SENSEX DIRECTIONAL FILTER ---
+                # Block options that fight the broad-market trend:
+                #   bullish market (sensex_trend=+1) + PE → BLOCK
+                #   bearish market (sensex_trend=-1) + CE → BLOCK
+                if self.ml_gate.is_enabled() and sensex_blocks_option(
+                        t["sensex_trend"], option_type):
+                    logger.info(
+                        f"   📉 SENSEX BLOCK {symbol} {option_type} — "
+                        f"trend={t['sensex_trend']:+.0f} fights {option_type}")
+                    self._order_log.append({
+                        "time": datetime.now().isoformat(),
+                        "symbol": symbol, "strike": strike,
+                        "option_type": option_type,
+                        "exchange": contract["exchange"],
+                        "tradingsymbol": contract["tradingsymbol"],
+                        "success": False,
+                        "error": f"sensex_trend_block (trend={t['sensex_trend']:+.0f}, opt={option_type})",
+                        "ml_features": ml_features,
+                        "win_prob": win_prob,
+                        "sensex_trend": t["sensex_trend"],
+                    })
+                    self._save_order_log()
+                    continue
+
+                # --- ML WIN-PROBABILITY ADVISORY (never blocks) ---
+                # ML check_gate always passes now. Log low win_prob as advisory.
+                if win_prob < self.ml_gate.min_win_prob:
+                    logger.info(
+                        f"   💡 ML ADVISORY {symbol} {option_type} — "
+                        f"win_prob={win_prob:.2f} < {self.ml_gate.min_win_prob:.2f} "
+                        f"(advisory only — Tiger decides)")
+
+                # --- ML CONFLUENCE ADVISORY (never blocks) ---
+                # Higher ML confidence → fewer 7-brain alignments needed.
+                # Lower confidence → log advisory but Tiger decides.
+                if self.ml_gate.is_enabled():
+                    req_conf = required_confluence_for_win_prob(win_prob)
+                    if brain_alignment < req_conf:
+                        logger.info(
+                            f"   💡 ML CONFLUENCE ADVISORY {symbol} {option_type} — "
+                            f"brains {brain_alignment}/{req_conf} suggested "
+                            f"(win_prob={win_prob:.2f}) — Tiger decides")
+                    else:
+                        logger.info(
+                            f"   🧠 ML SIGNAL {symbol} {option_type} — "
+                            f"win_prob={win_prob:.2f}, "
+                            f"confluence {brain_alignment}/{req_conf}")
+            except Exception as exc:
+                logger.warning(f"ML gate error (pass-through): {exc}")
 
             result = self.broker.place_option_order(
                 tradingsymbol=contract["tradingsymbol"],
@@ -2022,6 +2491,7 @@ class TigerLiveRunner:
                 # Track scalper positions for special exit rules
                 is_scalper = t.get("is_scalper", False)
                 is_momentum_hunter = t.get("is_momentum_hunter", False)
+                is_sniper = t.get("is_sniper", False)
                 if is_scalper:
                     self._scalper_positions.add(contract["tradingsymbol"])
                     self._save_scalper_positions()
@@ -2030,6 +2500,27 @@ class TigerLiveRunner:
                     self._scalper_positions.add(contract["tradingsymbol"])
                     self._save_scalper_positions()
                     logger.info(f"   🐅 MOMENTUM HUNTER position tracked: {contract['tradingsymbol']}")
+                if is_sniper:
+                    self._sniper_positions.add(contract["tradingsymbol"])
+                    # Stamp sniper exit params on the position tracker so the
+                    # exit branch can size the ATR*2.5 trail + OB stop.
+                    _snipe_pe = self._position_peaks.get(contract["tradingsymbol"], {})
+                    _snipe_pe["is_sniper"] = True
+                    _snipe_pe["order_block"] = t.get("order_block", {})
+                    _snipe_pe["sniper_atr_pct"] = t.get("sniper_atr_pct",
+                                                         t.get("commodity_volatility", 0.0))
+                    _snipe_pe["entry"] = fill_price
+                    _snipe_pe.setdefault("peak", fill_price)
+                    _snipe_pe.setdefault("target_booked", False)
+                    _snipe_pe["ml_features"] = t.get("ml_features", {})
+                    _snipe_pe["ml_win_prob"] = t.get("ml_win_prob", 1.0)
+                    _snipe_pe["sensex_trend"] = t.get("sensex_trend", 0.0)
+                    _snipe_pe["entry_time"] = datetime.now().isoformat()
+                    _snipe_pe["trade_cost"] = actual_trade_cost
+                    self._position_peaks[contract["tradingsymbol"]] = _snipe_pe
+                    self._save_position_peaks()
+                    logger.info(f"   🎯 SNIPER position tracked: {contract['tradingsymbol']} "
+                                f"(ATR%={_snipe_pe['sniper_atr_pct']:.2f})")
 
                 # === STRUCTURAL STOP — save zone-based SL for exit system ===
                 # Instead of fixed -7%, exit system uses zone bottom (demand)
@@ -2092,12 +2583,30 @@ class TigerLiveRunner:
                         "setup_score": setup_score,
                         "brain_alignment": brain_alignment,
                         "is_scalper": is_scalper,
+                        "is_sniper": is_sniper,
                         "order_id": result.get("order_id"),
                         "order_status": order_status,
                         "status": "OPEN",
+                        "ml_features": t.get("ml_features", {}),
+                        "ml_win_prob": t.get("ml_win_prob", 1.0),
+                        "sensex_trend": t.get("sensex_trend", 0.0),
                     })
                 except Exception as exc:
                     logger.warning(f"Trade log save fail: {exc}")
+
+                # Stash ML features on the position tracker so the exit
+                # loop can write a COMBINED retrain record (features + pnl).
+                # This closes the training-data loop: entry features survive
+                # until exit, where the realized PnL label is attached.
+                try:
+                    pe = self._position_peaks.get(contract["tradingsymbol"], {})
+                    pe["ml_features"] = t.get("ml_features", {})
+                    pe["ml_win_prob"] = t.get("ml_win_prob", 1.0)
+                    pe["sensex_trend"] = t.get("sensex_trend", 0.0)
+                    self._position_peaks[contract["tradingsymbol"]] = pe
+                    self._save_position_peaks()
+                except Exception:
+                    pass
             else:
                 logger.error(
                     f"   ❌ Order fail: BUY {quantity} "

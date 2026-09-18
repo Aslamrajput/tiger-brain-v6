@@ -334,16 +334,16 @@ class TestBrain3:
 
 class TestTradeCounter:
     def test_global_limit_blocks_all(self):
-        g = TradeCounterGuard(global_limit=5, commodity_limit=5)
-        for _ in range(5):
+        g = TradeCounterGuard(global_limit=20, commodity_limit=10)
+        for _ in range(20):
             assert g.register_trade("RELIANCE", exchange="NSE")["registered"] is True
         r = g.can_trade("RELIANCE", exchange="NSE")
         assert r["allowed"] is False
         assert "GLOBAL limit hit" in r["blocked_by"][0]
 
     def test_commodity_limit_blocks_only_commodity(self):
-        g = TradeCounterGuard(global_limit=10, commodity_limit=5)
-        for _ in range(5):
+        g = TradeCounterGuard(global_limit=20, commodity_limit=10)
+        for _ in range(10):
             g.register_trade("GOLD", exchange="MCX")
         blocked = g.can_trade("CRUDEOIL", exchange="MCX")
         assert blocked["allowed"] is False
@@ -353,20 +353,20 @@ class TestTradeCounter:
         assert equity["allowed"] is True
 
     def test_register_blocked_trade_refuses(self):
-        g = TradeCounterGuard(global_limit=5, commodity_limit=5)
-        for _ in range(5):
+        g = TradeCounterGuard(global_limit=20, commodity_limit=10)
+        for _ in range(10):
             g.register_trade("GOLD", exchange="MCX")
         r = g.register_trade("GOLD", exchange="MCX")
         assert r["registered"] is False
-        assert g.global_count == 5  # no double-count
+        assert g.commodity_count == 10  # no double-count
 
-    def test_limits_clamped_to_5_10(self):
+    def test_limits_clamped_to_10_20(self):
         g_low = TradeCounterGuard(global_limit=2, commodity_limit=1)
-        assert g_low.global_limit == 5
-        assert g_low.commodity_limit == 5
+        assert g_low.global_limit == 10
+        assert g_low.commodity_limit == 10
         g_high = TradeCounterGuard(global_limit=99, commodity_limit=99)
-        assert g_high.global_limit == 10
-        assert g_high.commodity_limit == 10
+        assert g_high.global_limit == 20
+        assert g_high.commodity_limit == 20
 
     def test_date_roll_resets(self, monkeypatch):
         import risk.risk_management as rm
@@ -607,8 +607,8 @@ class TestBrainFlow:
 
     def test_flow_blocked_by_trade_counter(self):
         df, bench = self._data()
-        exhausted = TradeCounterGuard(global_limit=5, commodity_limit=5)
-        for _ in range(5):
+        exhausted = TradeCounterGuard(global_limit=20, commodity_limit=10)
+        for _ in range(20):
             exhausted.register_trade("NIFTY", exchange="NSE")
         result = run_brain_flow(
             symbol="NIFTY", df=df, chain_snapshot=make_chain(float(df["close"].iloc[-1])),

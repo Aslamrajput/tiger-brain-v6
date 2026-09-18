@@ -72,18 +72,15 @@ def _should_activate_scalper(
 ) -> bool:
     """Should Tiger activate Fallback Scalper Mode?
 
-    Activates when:
-      - 0 trades AND past zero-trade activation time (NSE 14:00 / MCX 21:00)
-      - OR idle since last trade:
-        * Morning golden window (9:15-11:30): 10 min idle → activate FAST
-        * Rest of day: 30 min idle → activate
+    Aggressive hunting — activates fast (3 min idle) throughout the
+    session. No long waits: if Tiger hasn't traded in 3 min, fire up
+    the scalper and keep hunting every opportunity.
 
-    Tiger doesn't wait in the golden window — that's when the biggest
-    moves happen. 10 minutes without a signal = activate scalper.
+    Activates when:
+      - 0 trades AND past zero-trade activation time (NSE 09:30 / MCX 15:45)
+      - OR idle for ACTIVATION_IDLE_MINUTES (3 min) since last trade
     """
-    # Morning golden window = 10 min idle, otherwise 30 min
-    is_morning = time(9, 15) <= ts_time <= time(11, 30)
-    idle_mins = 10 if is_morning else SCALPER["ACTIVATION_IDLE_MINUTES"]
+    idle_mins = SCALPER["ACTIVATION_IDLE_MINUTES"]
 
     # Try both cases (config uses 'MCX'/'NSE', caller may pass 'mcx'/'nse')
     zero_time_str = SCALPER["ACTIVATION_ZERO_TRADE_TIME"].get(
@@ -102,11 +99,11 @@ def _should_activate_scalper(
     # zero_time) — zero_activate already covers that case above.
     if last_trade_time is not None:
         idle = (datetime.now() - last_trade_time).total_seconds() / 60
-        if idle >= idle_mins and daily_trades < 5:
+        if idle >= idle_mins and daily_trades < SCALPER["MAX_TRADES_PER_DAY"]:
             return True
 
-    # Morning golden window with 0 trades: activate after just 10 min
-    if is_morning and daily_trades == 0:
+    # Fresh session with 0 trades past zero_activate time: activate immediately
+    if daily_trades == 0 and zero_activate:
         return True
 
     return False

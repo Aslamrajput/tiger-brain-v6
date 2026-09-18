@@ -172,6 +172,34 @@ class TigerWebSocket:
     # second socket — grep "WS Connection count" in logs to verify.
     _active_connections: int = 0
 
+    # === SINGLETON GUARD ===
+    # Ensures only ONE TigerWebSocket instance exists per process.
+    # Multiple WS connections to Angel One cause duplicate tick floods,
+    # rate-limit violations, and race conditions in the candle builder.
+    # This is especially critical for MCX: the MCX feed opens at 9:00 AM
+    # and runs until 11:30 PM — if a second WS spawns during the NSE→MCX
+    # handoff, both sockets subscribe to the same MCX tokens, doubling
+    # every tick and corrupting volume calculations.
+    _singleton_instance: Optional["TigerWebSocket"] = None
+    _singleton_lock = threading.Lock()
+
+    def __new__(cls, *args, **kwargs):
+        """Enforce singleton — return existing instance if one is alive."""
+        with cls._singleton_lock:
+            existing = cls._singleton_instance
+            if existing is not None and existing.is_healthy():
+                logger.info(
+                    "🛡️ WS SINGLETON GUARD — reusing existing healthy WS "
+                    "(ticks=%d, age=%.0fs)",
+                    existing.tick_count(),
+                    existing.last_tick_age_seconds(),
+                )
+                return existing
+            # Existing instance is dead/None → create new
+            instance = super().__new__(cls)
+            cls._singleton_instance = instance
+            return instance
+
     def __init__(self, broker, mode: int = 3):
         """Initialize TigerWebSocket.
 
@@ -182,6 +210,14 @@ class TigerWebSocket:
                   2 = Quote (price + OHLC day + volume + OI)
                   3 = Snap Quote (full — quote + best 5 bids/asks + OI)
         """
+        # === SINGLETON INIT GUARD ===
+        # __new__ returns the existing healthy instance, but Python calls
+        # __init__ on it again. Skip re-init if already initialized.
+        if getattr(self, "_initialized", False):
+            logger.debug("🛡️ WS SINGLETON — __init__ skipped (already initialized)")
+            return
+        self._initialized = True
+
         self.broker = broker
         self.mode = mode
 

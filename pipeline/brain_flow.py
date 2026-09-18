@@ -12,7 +12,7 @@ Wires all 5 Brains together in a sequence:
     Brain 4 (risk.risk_management + broker.position_sizer)
                                     — trade counter guard + live capital sizing
         ↓ allowed & sized
-    [EXECUTION — pipeline.stage5_execution / broker]
+    [EXECUTION — automation/tiger_live.py / broker]
         ↓ position open
     Brain 5 (risk.exit_brain)       — stop/target/trail/time/gamma exits
 

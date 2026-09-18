@@ -258,11 +258,11 @@ class TestScalperActivation:
             time(10, 0), "nse", 1, last_trade)
         assert result is True
 
-    def test_afternoon_normal_activation_delay(self):
+    def test_afternoon_fast_activation(self):
         from automation.live_scanner import _should_activate_scalper
         from datetime import datetime, timedelta
-        # Afternoon, idle only 10 min → should NOT activate (need 30)
+        # Afternoon, idle 10 min → should activate (3 min idle threshold, full session)
         last_trade = datetime.now() - timedelta(minutes=10)
         result = _should_activate_scalper(
             time(14, 0), "nse", 1, last_trade)
-        assert result is False
+        assert result is True

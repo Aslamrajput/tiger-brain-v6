@@ -270,12 +270,13 @@ def check_intraday_exit_v19(pos, cur_underlying, cur_premium, is_square_off_bar,
             return {"exit": True, "reason": "opposing_zone_reached",
                     "exit_premium": max(cur_premium, 0.5)}
 
-    # 5. FIXED TARGET — book 50% at +100% (first time only)
-    if gain_pct >= V19_FIXED_TARGET_PCT and not pos.get("target_booked", False):
-        pos["target_booked"] = True
-        pos["quantity"] = max(1, int(pos["quantity"] * (1 - V19_FIXED_TARGET_BOOK)))
-        return {"exit": True, "reason": "fixed_target_100pct_book50",
-                "exit_premium": cur_premium}
+    # 5. FIXED TARGET REMOVED — pure momentum ride (Sep 2026).
+    #    Backtest now rides winners via trailing only; no +50%/+100% booking.
+    # if gain_pct >= V19_FIXED_TARGET_PCT and not pos.get("target_booked", False):
+    #     pos["target_booked"] = True
+    #     pos["quantity"] = max(1, int(pos["quantity"] * (1 - V19_FIXED_TARGET_BOOK)))
+    #     return {"exit": True, "reason": "fixed_target_100pct_book50",
+    #             "exit_premium": cur_premium}
 
     # 6. Dynamic trail — activates at +5% (har trade — profit jaldi lock)
     if gain_pct >= V19_TRAIL_ACTIVATE_PCT:
@@ -283,7 +284,7 @@ def check_intraday_exit_v19(pos, cur_underlying, cur_premium, is_square_off_bar,
         peak_gain = (peak - pos["entry_premium"]) / pos["entry_premium"]
         trail_floor = pos["entry_premium"] * (1 + peak_gain * V19_TRAIL_LOCK_PCT / 100)
         if cur_premium <= trail_floor:
-            return {"exit": True, "reason": "v19_trail_lock_70pct",
+            return {"exit": True, "reason": "TRAILING_EXIT",
                     "exit_premium": max(cur_premium, 0.5)}
 
     # 7. 1m exhaustion (only after +5% gain — micro exhaustion pattern)

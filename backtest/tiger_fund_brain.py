@@ -89,16 +89,16 @@ class FundPlan:
 TIER_CONFIG = {
     TIER_MICRO: {
         "risk_per_trade_pct": 3.0,       # aggressive — ₹10k me ₹300 risk
-        # 80% per trade when fully sure (user rule: 100% capital deployable).
-        # ⚠️ Micro tier: single option can lose 100% premium → 80% account
-        # wipeout on one trade. Risk accepted per user mandate — high-conviction
-        # sniper trades only. Stop-loss (60% of entry) caps actual loss.
-        "max_capital_per_trade_pct": 80.0, # 80% per trade when fully sure
+        # FULL capital per trade (user rule: "pura fund use karo").
+        # ⚠️ Micro tier: single option can lose 100% premium → full account
+        # at risk. Risk accepted per user mandate — high-conviction
+        # sniper trades only. Stop-loss (OB -12%) caps actual loss.
+        "max_capital_per_trade_pct": 100.0, # FULL capital deployable
         "max_total_exposure_pct": 100.0,   # full capital deployable
         "max_trades_today": 2,             # few trades, high conviction
         "max_trades_intraday": 1,
         "max_trades_delivery": 1,
-        "intraday_allocation_pct": 50.0,
+        "intraday_allocation_pct": 100.0,  # no split — micro needs full fund per trade
         "delivery_allocation_pct": 50.0,
         "growth_target_monthly_pct": 30.0, # 30% monthly = aggressive compounding
         "growth_strategy": "SURVIVAL+AGGRESSIVE — ek-ek rupee ka jawab",
@@ -106,12 +106,12 @@ TIER_CONFIG = {
     },
     TIER_SMALL: {
         "risk_per_trade_pct": 2.0,       # ₹1L me ₹2000 risk
-        "max_capital_per_trade_pct": 80.0, # 80% per trade when fully sure
+        "max_capital_per_trade_pct": 100.0, # FULL capital deployable (user: "pura fund use karo")
         "max_total_exposure_pct": 100.0,   # full capital deployable
         "max_trades_today": 3,
         "max_trades_intraday": 2,
         "max_trades_delivery": 1,
-        "intraday_allocation_pct": 60.0,
+        "intraday_allocation_pct": 100.0,  # no intraday/delivery split — full fund for the active trade
         "delivery_allocation_pct": 40.0,
         "growth_target_monthly_pct": 20.0,
         "growth_strategy": "BALANCED COMPOUNDING — steady growth, controlled risk",
@@ -276,24 +276,14 @@ def size_trade_with_fund_brain(
     is_delivery: bool = False,
 ) -> dict:
     """
-    Fund Brain ke plan ke hisab se position size karo.
+    ADVISORY position sizing — Fund Brain advises, Tiger decides.
 
-    CAPITAL se decide hota hai, LOT SIZE se nahi. Ye core function hai
-    jo ensure karta hai ki:
-      - Risk per trade plan ke andar ho
-      - Total exposure limit me ho
-      - Lot size capital ke hisab se scale ho
-
-    Args:
-        plan: FundPlan from announce_fund_plan()
-        entry_premium: option premium (LTP)
-        stop_premium: stop-loss premium
-        lot_sz: exchange lot size
-        current_exposure: already deployed capital
-        is_delivery: delivery trade (2-3 day hold) or intraday
+    The money is Tiger's.  Fund Brain never blocks — it calculates the
+    optimal lot count and logs a risk advisory if the stop loss exceeds
+    the risk guideline.  Tiger can override and take the trade anyway.
 
     Returns:
-        dict with quantity, lots, allocated_capital, max_loss, etc.
+        dict with quantity, lots, allocated_capital, max_loss, advisory, etc.
     """
     if plan is None:
         return {"quantity": 0, "lots": 0, "allocated_capital": 0.0,
@@ -310,41 +300,37 @@ def size_trade_with_fund_brain(
         return {"quantity": 0, "lots": 0, "allocated_capital": 0.0,
                 "max_loss": 0.0, "reason": "no stop distance"}
 
-    # Risk budget from plan (₹)
-    risk_budget = plan.risk_per_trade_rupees
+    # Risk guideline from plan (₹) — ADVISORY, not a hard cap
+    risk_guideline = plan.risk_per_trade_rupees
     if is_delivery:
-        # Delivery trades get less capital (longer hold = more risk)
-        risk_budget = risk_budget * 0.7
+        risk_guideline = risk_guideline * 0.7
 
-    # Capital cap from plan
-    capital_cap = plan.max_capital_per_trade_rupees
-    if is_delivery:
-        capital_cap = capital_cap * (plan.delivery_allocation_pct / 100)
-    else:
-        capital_cap = capital_cap * (plan.intraday_allocation_pct / 100)
-
-    # Exposure cap check
+    # Capital available for this trade — Tiger deploys what it needs
     max_exposure = plan.max_total_exposure_rupees
     headroom = max_exposure - current_exposure
     if headroom <= 0:
         return {"quantity": 0, "lots": 0, "allocated_capital": 0.0,
                 "max_loss": 0.0, "reason": "exposure limit reached"}
 
-    capital_cap = min(capital_cap, headroom)
+    capital_available = min(plan.max_capital_per_trade_rupees, headroom)
 
-    # Calculate lots based on RISK (primary) and CAPITAL CAP (secondary)
+    # Lots based on CAPITAL (Tiger takes what it needs — full lot if affordable)
     loss_per_lot = stop_per_unit * lot
-    lots_by_risk = max(1, int(risk_budget // loss_per_lot))
-    lots_by_capital = max(1, int(capital_cap // (entry_premium * lot)))
-    lots = min(lots_by_risk, lots_by_capital)
-
-    # MICRO tier: force minimum 1 lot (survival mode)
-    if plan.tier == TIER_MICRO:
-        lots = max(1, min(lots, 1))
+    lots = max(1, int(capital_available // (entry_premium * lot)))
 
     quantity = lots * lot
     allocated_capital = quantity * entry_premium
     max_loss = stop_per_unit * quantity
+
+    # Advisory: is the stop loss exceeding the risk guideline?
+    advisory = None
+    if max_loss > risk_guideline:
+        advisory = (
+            f"⚠️ Risk advisory: max loss ₹{max_loss:,.0f} exceeds guideline "
+            f"₹{risk_guideline:,.0f} ({max_loss / plan.account_capital * 100:.1f}% "
+            f"vs {risk_guideline / plan.account_capital * 100:.1f}%) — Tiger decides"
+        )
+        logger.info(advisory)
 
     return {
         "quantity": quantity,
@@ -356,6 +342,7 @@ def size_trade_with_fund_brain(
         "stop_per_unit": round(stop_per_unit, 2),
         "tier": plan.tier,
         "is_delivery": is_delivery,
+        "advisory": advisory,
         "reason": "sized_by_fund_brain",
     }
 
