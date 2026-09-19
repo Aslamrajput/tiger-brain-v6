@@ -505,69 +505,77 @@ def scan_live_signals(
     logger.info("7-Brain scan done @ %s: %d signal(s) from %d symbols",
                 now.strftime("%H:%M"), len(signals), len(data_map))
 
-    # === 🐅 MOMENTUM HUNTER (Priority 1.5) ===
-    # Tiger ka naya dimaag — har symbol pe nazar. 7-brain ne agar signal
-    # nahi diya, Tiger MOMENTUM HUNTER chalata hai: ORB breakout, momentum
-    # spike, VWAP reclaim — with FULL OPTIONS MATH (IV + delta gate).
-    # Ye scalper se PEHLE chalta hai kyunki ye zyada powerful hai.
-    if len(signals) == 0:
-        vix_val = get_vix_for_date(now)
-        for sym, df_15m in data_map.items():
-            if df_15m is None or len(df_15m) < 40:
-                continue
-            seg = segment_of(sym)
-            session_thresh = get_session_score_threshold(ts_time, seg)
-            if session_thresh >= 999.0:
-                continue
-            i_15m = _latest_15m_index(df_15m, now)
-            if i_15m < 40:
-                continue
-            df_1m = data_map_1m.get(sym) if data_map_1m else None
-            try:
-                mh_signal = hunt_momentum(
-                    df_15m, i_15m, df_1m, seg, sym,
-                    broker, pcr_cache, vix_val, now)
-            except Exception as exc:
-                logger.debug("Momentum hunter %s error: %s", sym, exc)
-                continue
-            if mh_signal is None:
-                continue
-            # Build full signal structure
-            direction = mh_signal.get("direction", "BUY")
-            is_call = direction == "BUY"
-            cur_underlying = mh_signal.get("entry_price", 0.0)
-            strike = round(cur_underlying)
-            mh_signal["symbol"] = sym
-            mh_signal["segment"] = seg
-            mh_signal["scan_time"] = now.isoformat()
-            mh_signal["entry_ts"] = now
-            mh_signal["strike"] = strike
-            mh_signal["option_type"] = "CE" if is_call else "PE"
-            mh_signal["entry_premium"] = 0.0
-            mh_signal["is_delivery"] = False
-            mh_signal["exit_ts"] = None
-            signals.append(mh_signal)
+    # === 🐅 MOMENTUM HUNTER (Priority 1.5) — ALWAYS runs ===
+    # Tiger ka breakout dimaag — har symbol pe nazar, har cycle me.
+    # 7-brain (zone touch) aur Momentum Hunter (breakout) DO parallel
+    # chalte hain. Pehle ye sirf fallback tha (jab 0 signals), but
+    # usse Tiger breakouts miss karta tha (Lodha/Adani jaisa momentum).
+    # Ab hamesha chalta hai — 7-brain ne zone diya, MH ne breakout diya,
+    # Tiger best pe entry karta hai.
+    zone_symbols = {s["symbol"] for s in signals}  # already covered by zones
+    vix_val = get_vix_for_date(now)
+    hunter_signals: list[dict] = []
+    for sym, df_15m in data_map.items():
+        if df_15m is None or len(df_15m) < 40:
+            continue
+        # Skip symbols already found by zone scan (avoid duplicate entry)
+        if sym in zone_symbols:
+            continue
+        seg = segment_of(sym)
+        session_thresh = get_session_score_threshold(ts_time, seg)
+        if session_thresh >= 999.0:
+            continue
+        i_15m = _latest_15m_index(df_15m, now)
+        if i_15m < 40:
+            continue
+        df_1m = data_map_1m.get(sym) if data_map_1m else None
+        try:
+            mh_signal = hunt_momentum(
+                df_15m, i_15m, df_1m, seg, sym,
+                broker, pcr_cache, vix_val, now)
+        except Exception as exc:
+            logger.debug("Momentum hunter %s error: %s", sym, exc)
+            continue
+        if mh_signal is None:
+            continue
+        # Build full signal structure
+        direction = mh_signal.get("direction", "BUY")
+        is_call = direction == "BUY"
+        cur_underlying = mh_signal.get("entry_price", 0.0)
+        strike = round(cur_underlying)
+        mh_signal["symbol"] = sym
+        mh_signal["segment"] = seg
+        mh_signal["scan_time"] = now.isoformat()
+        mh_signal["entry_ts"] = now
+        mh_signal["strike"] = strike
+        mh_signal["option_type"] = "CE" if is_call else "PE"
+        mh_signal["entry_premium"] = 0.0
+        mh_signal["is_delivery"] = False
+        mh_signal["exit_ts"] = None
+        hunter_signals.append(mh_signal)
+        logger.info(
+            f"🐅 MOMENTUM HUNTER SIGNAL: {sym} {direction} "
+            f"score={mh_signal.get('setup_score', 0):.0f} "
+            f"strat={mh_signal.get('strategy', '?')} "
+            f"[{mh_signal.get('options_math', '')}]")
+
+    if hunter_signals:
+        # Merge hunter signals with zone signals — Tiger picks the BEST
+        hunter_signals.sort(key=lambda s: s.get("setup_score", 0), reverse=True)
+        # Keep top 2 hunter signals + all zone signals (zones are high-conviction)
+        top_hunter = hunter_signals[:2]
+        for best in top_hunter:
             logger.info(
-                f"🐅 MOMENTUM HUNTER SIGNAL: {sym} {direction} "
-                f"score={mh_signal.get('setup_score', 0):.0f} "
-                f"strat={mh_signal.get('strategy', '?')} "
-                f"[{mh_signal.get('options_math', '')}]")
+                f"🐅 HUNTER PICK: {best['symbol']} "
+                f"{best.get('direction', '')} "
+                f"score={best.get('setup_score', 0):.0f} "
+                f"strat={best.get('strategy', '?')}")
+        signals.extend(top_hunter)
 
-        if signals:
-            # Rank by score — Tiger picks the BEST momentum
-            signals.sort(key=lambda s: s.get("setup_score", 0), reverse=True)
-            top_n = min(2, len(signals))
-            for idx in range(top_n):
-                best = signals[idx]
-                logger.info(
-                    f"🐅 HUNTER PICK #{idx+1}: {best['symbol']} "
-                    f"{best.get('direction', '')} "
-                    f"score={best.get('setup_score', 0):.0f} "
-                    f"strat={best.get('strategy', '?')}")
-            signals = signals[:top_n]
-
-    logger.info("Full scan done @ %s: %d signal(s) from %d symbols",
-                now.strftime("%H:%M"), len(signals), len(data_map))
+    logger.info("Full scan done @ %s: %d signal(s) (%d zone + %d hunter) from %d symbols",
+                now.strftime("%H:%M"), len(signals),
+                len(signals) - len(hunter_signals[:2]),
+                len(hunter_signals[:2]), len(data_map))
 
     # === TIGER FALLBACK SCALPER MODE (Priority 2) ===
     # Dual-execution logic: if NO Big Move (Supply/Demand zone) signal found,

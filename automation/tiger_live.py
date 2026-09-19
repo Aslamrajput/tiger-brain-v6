@@ -1717,16 +1717,23 @@ class TigerLiveRunner:
         if not is_market_hours():
             logger.info("Intraday scan: market is closed, skip.")
             return
-        if is_opening_range_period():
-            logger.info("Intraday scan: opening range period, skip (15 min wait).")
-            return
+        in_opening_range = is_opening_range_period()
+        if in_opening_range:
+            # Opening range (9:15-9:30): Momentum Hunter runs to catch ORB
+            # breakouts, but sniper/scalper wait for zones to form. Before
+            # this fix, Tiger slept through 9:15-9:30 and missed morning
+            # breakouts (Lodha/Adani momentum).
+            logger.info("🐅 INTRADAY SCAN [OPENING RANGE] — %s "
+                        "Momentum Hunter ACTIVE (ORB), sniper/scalper waiting",
+                        datetime.now().strftime("%H:%M"))
         if self.broker is None:
             logger.warning("Intraday scan: no broker, skip.")
             return
 
         from automation.scheduler import get_active_market
         market = get_active_market()
-        logger.info("🐅 INTRADAY SCAN [%s] — %s", market, datetime.now().strftime("%H:%M"))
+        if not in_opening_range:
+            logger.info("🐅 INTRADAY SCAN [%s] — %s", market, datetime.now().strftime("%H:%M"))
 
         # WebSocket status — zero rate limits active?
         if self.broker.websocket is not None:
@@ -1796,13 +1803,19 @@ class TigerLiveRunner:
             # === TIGER SNIPER ADVANCED V2 — MCX sniper scan (after scalper) ===
             # The sniper runs on 5m MCX data, needs OB retest + CHOCH + wick
             # on 1m, and a 0.80 ML conviction gate. Max 3/day, 10:30-23:30 IST.
+            # During opening range (9:15-9:30), sniper waits — zones haven't
+            # formed yet. Momentum Hunter (inside scan_live_signals above)
+            # handles ORB breakouts during this window.
             sniper_placed = 0
-            try:
-                sniper_signals = self.scan_sniper_signals()
-                if sniper_signals:
-                    sniper_placed = self._place_live_orders(sniper_signals)
-            except Exception as exc:
-                logger.error("🎯 Sniper scan error: %s", exc, exc_info=True)
+            if not in_opening_range:
+                try:
+                    sniper_signals = self.scan_sniper_signals()
+                    if sniper_signals:
+                        sniper_placed = self._place_live_orders(sniper_signals)
+                except Exception as exc:
+                    logger.error("🎯 Sniper scan error: %s", exc, exc_info=True)
+            else:
+                logger.debug("🎯 Sniper waiting — opening range period (zones not formed)")
 
             # Update the daily entry counter
             self._daily_entries_taken[today] = daily_entries + placed + sniper_placed

@@ -178,6 +178,36 @@ class TestORBBreakout:
         result = detect_orb_breakout(df_15m, len(df_15m) - 1, None, now)
         assert result is None
 
+    def test_orb_time_window_morning_only(self):
+        """ORB breakout only fires 9:30-11:30 — afternoon returns None."""
+        dates_1m = pd.date_range("2025-09-08 09:15", periods=15, freq="1min")
+        df_1m = pd.DataFrame({
+            "open": [100.0] * 15, "high": [101.0] * 15,
+            "low": [99.0] * 15, "close": [100.5] * 15,
+            "volume": [1000] * 15,
+        }, index=dates_1m)
+        dates_15m = pd.date_range("2025-09-08 09:15", periods=50, freq="15min")
+        closes = [100.0] * 49 + [103.0]
+        opens = [99.5] * 49 + [100.5]
+        highs = [100.5] * 49 + [103.5]
+        lows = [99.0] * 49 + [100.0]
+        vols = [1000] * 49 + [3000]
+        df_15m = pd.DataFrame({
+            "open": opens, "high": highs, "low": lows,
+            "close": closes, "volume": vols,
+        }, index=dates_15m)
+
+        # 10:00 AM → within ORB window → breakout detected
+        now_morning = datetime(2025, 9, 8, 10, 0)
+        result_am = detect_orb_breakout(df_15m, len(df_15m) - 1, df_1m, now_morning)
+        assert result_am is not None
+        assert result_am["strategy"] == "ORB_BREAKOUT"
+
+        # 2:00 PM → outside ORB window → None (momentum_spike handles it)
+        now_afternoon = datetime(2025, 9, 8, 14, 0)
+        result_pm = detect_orb_breakout(df_15m, len(df_15m) - 1, df_1m, now_afternoon)
+        assert result_pm is None
+
 
 class TestOptionsMathGate:
     def test_gate_does_not_crash(self):
