@@ -38,11 +38,10 @@ logger = logging.getLogger(__name__)
 # the live path maps these to MCX option contracts via data/loader.
 # ─────────────────────────────────────────────────────────────────
 MCX_SYMBOLS: dict[str, str] = {
-    "GOLD": "GC=F",
-    "SILVER": "SI=F",
+    "GOLDM": "GC=F",
+    "SILVERM": "SI=F",
     "CRUDEOIL": "CL=F",
     "NATURALGAS": "NG=F",
-    "COPPER": "HG=F",   # COMEX copper futures proxy for MCX Copper
 }
 
 # Confluence weights — sum to 100.

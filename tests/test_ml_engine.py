@@ -59,9 +59,9 @@ class TestFeatureStore:
         assert "NSE_SESSION_START" in SNIPER and "NSE_SESSION_END" in SNIPER
         assert SNIPER["NSE_SESSION_START"] == "09:15"
         assert SNIPER["NSE_SESSION_END"] == "15:00"
-        # NSE confluence gate is LOOSER than MCX (2 vs 3)
+        # Both NSE and MCX use 2-component confluence (was 3 for MCX, too strict)
         assert SNIPER["NSE_MIN_CONFLUENCE_COMPONENTS"] == 2
-        assert SNIPER["NSE_MIN_CONFLUENCE_COMPONENTS"] < SNIPER["MIN_CONFLUENCE_COMPONENTS"]
+        assert SNIPER["MIN_CONFLUENCE_COMPONENTS"] == 2
 
     def test_sniper_trail_activates_at_10pct(self):
         """Rocket trail arms at +10% profit (was 25% — too high, never armed).

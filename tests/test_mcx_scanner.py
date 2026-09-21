@@ -228,7 +228,7 @@ class TestScanMCX:
             "open": [100] * 30, "high": [101] * 30, "low": [99] * 30,
             "close": [100] * 30, "volume": [100] * 30,
         }, index=pd.date_range("2026-09-17 10:00", periods=30, freq="5min"))
-        assert scan_mcx({"GOLD": flat}) is None
+        assert scan_mcx({"GOLDM": flat}) is None
 
     def test_returns_zone_on_strong_impulse(self):
         from subbrains.mcx_scanner import scan_mcx
@@ -253,7 +253,7 @@ class TestScanMCX:
             "open": [100] * 30, "high": [101] * 30, "low": [99] * 30,
             "close": [100] * 30, "volume": [100] * 30,
         }, index=pd.date_range("2026-09-17 10:00", periods=30, freq="5min"))
-        zone = scan_mcx({"GOLD": flat, "CRUDEOIL": df})
+        zone = scan_mcx({"GOLDM": flat, "CRUDEOIL": df})
         if zone is not None:
             assert zone.symbol == "CRUDEOIL"
 
@@ -353,9 +353,10 @@ class TestScanMCX:
 # MCX universe
 # ─────────────────────────────────────────────────────────
 class TestMCXUniverse:
-    def test_all_five_commodities_present(self):
+    def test_all_four_commodities_present(self):
         from subbrains.mcx_scanner import MCX_SYMBOLS
-        expected = {"GOLD", "SILVER", "CRUDEOIL", "NATURALGAS", "COPPER"}
+        expected = {"GOLDM", "SILVERM", "CRUDEOIL", "NATURALGAS"}
         assert set(MCX_SYMBOLS.keys()) == expected
-        # COPPER must have a yfinance proxy ticker
-        assert MCX_SYMBOLS["COPPER"] == "HG=F"
+        # Symbols must match mcx_scan_symbols (mini contracts)
+        assert MCX_SYMBOLS["GOLDM"] == "GC=F"
+        assert MCX_SYMBOLS["SILVERM"] == "SI=F"

@@ -504,10 +504,8 @@ SNIPER = {
     "CHOCH_LOOKBACK": 20,           # 1m structure-shift lookback
     "WICK_REJECTION_MIN": 0.50,     # min wick/range ratio for rejection candle
     # Scanner: require 3+ agreeing SMC components for a true rocket setup
-    "MIN_CONFLUENCE_COMPONENTS": 3,     # MCX — strict (commodities trend clean)
-    "NSE_MIN_CONFLUENCE_COMPONENTS": 2, # NSE — looser (index moves are noisier,
-                                        #   3-component confluence is rare; 2 still
-                                        #   filters noise but lets rockets through)
+    "MIN_CONFLUENCE_COMPONENTS": 2,     # MCX — 2+ SMC components (was 3, too strict)
+    "NSE_MIN_CONFLUENCE_COMPONENTS": 2, # NSE — 2+ SMC components
     # Exit: NO FIXED TARGET. Pure momentum ride — let the rocket run.
     #   1. Give the rocket room first: trail activates only after +10% profit
     #      (options real moves are +10-15%; 25% was too high — never armed,
