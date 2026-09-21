@@ -15,7 +15,6 @@ import pandas as pd
 
 from backtest.engine import backtest_range, new_gate_stats, _record_gate_stats
 from meta_brain.weighting import decide
-from pipeline.stage1_scanner import run_scanner
 from subbrains import breakout, mean_reversion, trend_follow
 
 
@@ -162,6 +161,7 @@ def test_zero_threshold_does_not_invent_a_direction():
 
 def test_run_scanner_accepts_vix_positionally():
     """vix_series ka positional contract naye params se toota nahi chahiye."""
+    from pipeline.stage1_scanner import run_scanner
     df = make_ohlcv(volume=0)
     vix = pd.Series(14.0, index=df.index)
     result = run_scanner(df, vix)

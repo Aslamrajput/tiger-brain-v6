@@ -822,20 +822,6 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
 
     # ============================================================
-    # BRAIN 1 — Pre-market gun-powder scanner (daily + 4H)
-    # ============================================================
-    print("\n" + "#" * 72)
-    print("#  BRAIN 1 — PRE-MARKET 'GUN-POWDER' SCANNER")
-    print("#" * 72)
-    from pipeline.premarket_scanner import run_premarket_scan, print_watchlist
-    # Full scan is slow (161 symbols × daily+4H); run on the traded universe.
-    scan_syms = all_symbols()
-    scan_res = run_premarket_scan(symbols=scan_syms)
-    print_watchlist(scan_res)
-    explosive = {w["symbol"] for w in scan_res["watchlist"]}
-    print(f"\n  → {len(explosive)} explosive assets on the watchlist for live session.\n")
-
-    # ============================================================
     # Fetch 15m + 1m intraday data (V6.5 sniper needs both)
     # ============================================================
     print("Fetching 15-min + 1-min intraday data via yfinance (~7 days for 1m)...")

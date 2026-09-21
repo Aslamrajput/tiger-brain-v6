@@ -12,13 +12,13 @@ BRAIN MAP
 
 Brain 1 — Scanner & Regime Detection
     Entry-window gate + momentum filter + RS divergence.
-    Source: pipeline.brain1_scanner / backtest.brain1_intraday_pass
+    Source: pipeline.stage1_scanner / backtest.brain1_intraday_pass
     Role: HARD GATE — rejects chop. Only directional bars with volume
     velocity >= 1.8x and body-to-range >= 0.5 pass.
 
 Brain 2 — SMC Setup Trigger (Supply/Demand)
     Zone detection + zone touch on 1m + volume delta confirmation.
-    Source: pipeline.smart_money_scanner / detect_zones / zone_touched_on_1m
+    Source: pipeline.intraday_strategies / detect_zones / zone_touched_on_1m
     Boosters: explosive quality (+10), liquidity sweep (+8),
     delta spike (+5), trend alignment (+5), PDH/PDL (+5), VWAP (+5).
     Role: HARD GATE + primary scorer. Score = zone_quality + boosters.
@@ -102,9 +102,9 @@ class BrainResult:
 
 SEVEN_BRAINS = [
     {"id": 1, "name": "Scanner & Regime Detection",
-     "module": "pipeline.brain1_scanner"},
+     "module": "pipeline.stage1_scanner"},
     {"id": 2, "name": "SMC Setup Trigger (Supply/Demand)",
-     "module": "pipeline.smart_money_scanner"},
+     "module": "pipeline.intraday_strategies"},
     {"id": 3, "name": "Option Chain & Greeks Selector",
      "module": "broker.option_selector"},
     {"id": 4, "name": "Capital Allocation & Trade Counter",
