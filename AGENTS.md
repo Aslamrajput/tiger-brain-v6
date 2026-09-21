@@ -573,3 +573,26 @@ Fixes in this commit:
      chrony NTP sync + pip install -r requirements.txt.
 Verified on server: 559 tests passed, imports OK.
 
+
+## SQUARE-OFF CRASH FIX (2026-09-22, commit 2879df5, PR #29)
+Live log showed `❌ NSE square-off error: 'NoneType' object is not iterable` at
+15:15 and the same for MCX at 23:15 — no positions closed.
+Root cause: `AngelBroker.get_positions()` did `pos.get("data", [])`; Angel
+returns `{"data": null}` when there are no positions, and the key exists with
+value None so the `[]` default never applied → returned None → `for p in
+positions` in `square_off_all()` raised. Fixed with `(pos.get("data") or [])`
+in both the primary and re-login paths + `self.get_positions() or []` guard.
+5 regression tests in tests/test_pr_review_fixes.py (TestGetPositionsNoneSafety).
+Full suite now 564 passed. Server deployed + restarted.
+Note: CI conda workflow had only 1 run (on push); PR merge triggers no
+re-run, so CI status on main is not automatically refreshed after merge.
+
+## Live market facts (server, 2026-09-22)
+- TIGER_BRAIN_DRY_RUN=false (real orders), TIGER_WEBSOCKET=true, TZ=Asia/Kolkata.
+- Clock: chrony, stratum 4, offset <1µs; TOTP secret configured (26 chars),
+  pyotp produces valid 6-digit codes. Last pre-market login 2026-09-21 09:00:00.
+- Data-rate limit error seen: "Access denied because of exceeding access rate"
+  (Angel candle fetch) — throttle candle fetches at open.
+- Benign: SmartWebSocketV2 `_on_close() takes 2 positional args but 4 given`
+  on close; nightly ML logs "ensemble partial" (models absent, advisory only).
+
