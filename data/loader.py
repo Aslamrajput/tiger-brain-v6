@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import io
 import logging
+import threading
 import time
 from datetime import datetime, timedelta
 
@@ -435,6 +436,32 @@ ANGEL_CHUNK_PAUSE_SEC = 0.5
 ANGEL_MAX_RETRIES = 2
 ANGEL_RETRY_BACKOFF_SEC = 3.0
 
+# Angel historical API allows ~3 req/sec, but a burst across many symbols
+# (per-symbol chunks) trips "Access denied because of exceeding access rate".
+# A process-wide gate serialises every getCandleData call so consecutive
+# requests are spaced >= ANGEL_MIN_CALL_INTERVAL_SEC apart (< 2 req/sec),
+# including across symbols scanned in sequence.
+ANGEL_MIN_CALL_INTERVAL_SEC = 0.5
+_angel_call_lock = threading.Lock()
+_angel_last_call_ts = 0.0
+
+
+def _angel_rate_limit_gate() -> None:
+    """Block until >= ANGEL_MIN_CALL_INTERVAL_SEC since the last candle call.
+
+    Thread-safe: holds the lock only while reserving the next slot, then
+    sleeps outside the lock so callers queue rather than serialise on a
+    shared sleep.
+    """
+    global _angel_last_call_ts
+    with _angel_call_lock:
+        now = time.monotonic()
+        wait = ANGEL_MIN_CALL_INTERVAL_SEC - (now - _angel_last_call_ts)
+        if wait > 0:
+            time.sleep(wait)
+        _angel_last_call_ts = time.monotonic()
+
+
 _RATE_LIMIT_MARKERS = (
     "access rate", "rate limit", "exceeding access", "too many request",
     "too many requests", "ab1021",
@@ -479,6 +506,7 @@ def fetch_candle_chunk(
 
     for attempt in range(max_retries):
         try:
+            _angel_rate_limit_gate()
             response = broker.smart_api.getCandleData(params)
         except Exception as exc:
             # Token error as exception → auto relogin + retry
@@ -487,6 +515,7 @@ def fetch_candle_chunk(
                 broker._token_healthy = False
                 if broker._auto_relogin():
                     try:
+                        _angel_rate_limit_gate()
                         response = broker.smart_api.getCandleData(params)
                         if response.get("status") and response.get("data"):
                             return response["data"]
@@ -511,6 +540,7 @@ def fetch_candle_chunk(
             broker._token_healthy = False
             if broker._auto_relogin():
                 try:
+                    _angel_rate_limit_gate()
                     response = broker.smart_api.getCandleData(params)
                     if response.get("status") and response.get("data"):
                         return response["data"]
