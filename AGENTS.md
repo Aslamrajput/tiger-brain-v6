@@ -596,3 +596,27 @@ re-run, so CI status on main is not automatically refreshed after merge.
 - Benign: SmartWebSocketV2 `_on_close() takes 2 positional args but 4 given`
   on close; nightly ML logs "ensemble partial" (models absent, advisory only).
 
+
+## RATE-LIMIT ROOT CAUSE + DEDUP FIX (2026-09-22, commit ea568ac, PR #29 merged 3f246af)
+User suspected duplicate AWS deploys left an old process running, so two
+instances hit Angel at once. Investigated thoroughly:
+- ONLY ONE instance runs: systemd MainPID (single unit `tiger-brain.service`,
+  `tiger-mechanics.service` is masked, one repo dir, one PID holds the log via
+  lsof). systemd Stops before Starting on each deploy, so an old process is
+  NOT left running. No duplicate process existed.
+- The real duplicate was WITHIN one instance: apscheduler's 1-min
+  `intraday_guarded` job AND the 60s heartbeat loop both call
+  `intraday_scan()`. The `_scan_lock` only blocked *overlapping* runs, not
+  back-to-back ones. Live log proof: 12:01:00 heartbeat scan + 12:01:21
+  scheduler scan = two full scans in one minute → REST candle calls doubled
+  (each scan re-fetches symbols) → tripped the rate limit.
+FIX: min-interval dedup guard (55s) inside the lock; first caller wins, the
+second is skipped. 4 regression tests (TestScanDedup).
+Candle throttle (commit 3d80ae3): process-wide thread-safe gate
+`_angel_rate_limit_gate()` spaces every getCandleData call >= 0.5s
+(ANGEL_MIN_CALL_INTERVAL_SEC, strictly < 2 req/sec), applied to the primary
+call and both token-relogin retries. 3 gate tests.
+CI workflow now `on: [push, pull_request]`.
+Full suite: 571 passed. Server deployed + restarted (single instance confirmed
+via MainPID). Capture script PID 1231908 left parked for the 09:00/09:15 bell.
+
