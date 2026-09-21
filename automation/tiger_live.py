@@ -748,23 +748,31 @@ class TigerLiveRunner:
         Both share the SAME pure-SMC scanner (BOS+sweep+OB+FVG), the SAME 1m
         entry confirmation (OB retest + CHOCH + wick), the SAME ML 0.80 gate,
         and the SAME exit (no fixed target, +5% trail / 50% peak lock).
-        Returns the first qualifying zone (NSE checked first during overlap).
+        Returns up to the remaining daily sniper budget of signals — both
+        markets are scanned independently during the overlap window.
         """
         from config.thresholds import SNIPER
 
-        # NSE session active? (checked first — index options priority)
+        # Scan BOTH active markets independently — a signal in one market must
+        # NEVER suppress the other. During the 10:30-15:00 overlap both the NSE
+        # and MCX sessions are live, so an NSE zone must not shadow an MCX zone
+        # (that was the "one market blocks the other" bug).
+        signals: list[dict] = []
         if self._nse_sniper_session_active():
             sig = self._scan_one_market("NSE")
             if sig:
-                return [sig]
-
-        # MCX session active?
+                signals.append(sig)
         if self._sniper_session_active():
             sig = self._scan_one_market("MCX")
             if sig:
-                return [sig]
+                signals.append(sig)
 
-        return []
+        # Respect the shared daily cap across markets: never return more than
+        # the remaining sniper budget for today.
+        remaining = SNIPER["MAX_TRADES_PER_DAY"] - self._sniper_trades_today()
+        if remaining <= 0:
+            return []
+        return signals[:remaining]
 
     def _scan_one_market(self, market: str) -> Optional[dict]:
         """Scan one market (NSE or MCX) for a sniper entry. Returns a signal
@@ -1456,9 +1464,12 @@ class TigerLiveRunner:
             if tracker.get("is_sniper", False) or tsym in getattr(self, "_sniper_positions", set()):
                 from config.thresholds import SNIPER as _SNIPER_CFG
                 from subbrains.mcx_scanner import detect_bos as _sniper_detect_bos
-                # Option type for the 5m opposite-BOS check — derived from the
-                # tradingsymbol (…CE/…PE) since the exit loop has no signal dict.
-                option_type = "PE" if tsym.upper().endswith("PE") else "CE"
+                # Option type for the 5m opposite-BOS check — read it from the
+                # position tracker (stamped at entry), falling back to the
+                # tradingsymbol suffix (…CE/…PE) for positions adopted after a
+                # restart where the tracker has no option_type yet.
+                option_type = tracker.get("option_type") or (
+                    "PE" if tsym.upper().endswith("PE") else "CE")
                 exit_reason = None
                 exit_qty = qty
 
@@ -2557,6 +2568,7 @@ class TigerLiveRunner:
                     _snipe_pe["sensex_trend"] = t.get("sensex_trend", 0.0)
                     _snipe_pe["entry_time"] = datetime.now().isoformat()
                     _snipe_pe["trade_cost"] = actual_trade_cost
+                    _snipe_pe["option_type"] = option_type
                     self._position_peaks[contract["tradingsymbol"]] = _snipe_pe
                     self._save_position_peaks()
                     logger.info(f"   🎯 SNIPER position tracked: {contract['tradingsymbol']} "
@@ -2645,6 +2657,7 @@ class TigerLiveRunner:
                     pe["ml_win_prob"] = t.get("ml_win_prob", 1.0)
                     pe["sensex_trend"] = t.get("sensex_trend", 0.0)
                     pe["entry_quality"] = entry_quality   # survive to exit record
+                    pe["option_type"] = option_type
                     self._position_peaks[contract["tradingsymbol"]] = pe
                     self._save_position_peaks()
                 except Exception:

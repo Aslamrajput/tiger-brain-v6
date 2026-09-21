@@ -425,6 +425,47 @@ class TestNSESniperRoute:
         assert "_sniper_session_active" in src
         assert "_scan_one_market" in src
 
+    def test_scan_sniper_signals_does_not_market_shadow(self):
+        """CRITICAL: during the 10:30-15:00 NSE+MCX overlap, an NSE signal must
+        NOT suppress the MCX scan (and vice versa). Both markets are scanned
+        independently and every qualifying signal is returned."""
+        from datetime import datetime
+        import automation.tiger_live as tl
+
+        runner = tl.TigerLiveRunner()
+        calls = []
+
+        def fake_scan(market):
+            calls.append(market)
+            return {"symbol": f"{market}_SYM", "market": market}
+
+        runner._scan_one_market = fake_scan
+        runner._sniper_trades_today = lambda: 0
+
+        # 11:00 → both NSE (09:15-15:00) and MCX (10:30-23:30) sessions are live.
+        runner._nse_sniper_session_active = lambda now=None: True
+        runner._sniper_session_active = lambda now=None: True
+
+        signals = runner.scan_sniper_signals()
+
+        assert calls == ["NSE", "MCX"]          # neither market skipped
+        assert len(signals) == 2                 # both signals returned
+        assert {s["market"] for s in signals} == {"NSE", "MCX"}
+
+    def test_scan_sniper_signals_honours_daily_cap_across_markets(self):
+        """The shared MAX_TRADES_PER_DAY cap is respected across both markets —
+        a cap already reached returns no signals."""
+        import automation.tiger_live as tl
+        from config.thresholds import SNIPER
+
+        runner = tl.TigerLiveRunner()
+        runner._scan_one_market = lambda market: {"symbol": "X", "market": market}
+        runner._sniper_trades_today = lambda: SNIPER["MAX_TRADES_PER_DAY"]
+        runner._nse_sniper_session_active = lambda now=None: True
+        runner._sniper_session_active = lambda now=None: True
+
+        assert runner.scan_sniper_signals() == []
+
     def test_scan_one_market_uses_market_specific_confluence(self):
         """_scan_one_market must apply NSE (2) vs MCX (3) confluence gates."""
         import automation.tiger_live as tl
