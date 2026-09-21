@@ -89,19 +89,28 @@ class TestTradeSizing:
         assert result["max_loss"] > 0
         assert result["reason"] == "sized_by_fund_brain"
 
-    def test_micro_account_forces_one_lot(self):
+    def test_micro_account_one_lot_when_affordable(self):
+        """MICRO account: 1 lot if affordable — Tiger takes what it needs."""
         plan = announce_fund_plan(10000)
         result = size_trade_with_fund_brain(
             plan, entry_premium=20, stop_premium=10, lot_sz=100)
-        assert result["lots"] == 1  # MICRO always 1 lot
+        # capital_available = ₹10,000, lot cost = ₹2,000 → 5 lots affordable
+        # No more "force 1 lot" — Tiger deploys what it can afford
+        assert result["lots"] >= 1
 
-    def test_risk_capped(self):
-        plan = announce_fund_plan(100000)  # risk = ₹2000
+    def test_risk_advisory_not_hard_cap(self):
+        """Risk guideline is ADVISORY — trade proceeds even if max_loss
+        exceeds the guideline.  Fund Brain advises, Tiger decides."""
+        plan = announce_fund_plan(100000)  # risk guideline = ₹2000
         result = size_trade_with_fund_brain(
             plan, entry_premium=100, stop_premium=90, lot_sz=100)
         # loss_per_lot = 10 * 100 = 1000
-        # risk_budget = 2000 → lots_by_risk = 2
-        assert result["max_loss"] <= 2000 + 1  # within risk budget
+        # capital_available = ₹100,000 → lots = 100,000 // 10,000 = 10
+        # max_loss = 1000 * 10 = 10,000 (exceeds ₹2,000 guideline)
+        # But trade is NOT blocked — advisory is logged instead
+        assert result["lots"] >= 1
+        assert result["max_loss"] > 2000  # exceeds guideline
+        assert result.get("advisory") is not None  # advisory logged
 
     def test_delivery_trade_less_capital(self):
         plan = announce_fund_plan(100000)

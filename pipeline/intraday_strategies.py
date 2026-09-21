@@ -164,7 +164,7 @@ def _bar_body_ratio(c: pd.Series) -> float:
 
 
 def detect_zones(df: pd.DataFrame, i: int, lookback: int = 40,
-                 cluster_min: int = 4, impulse_min_pct: float = 0.6) -> list[dict]:
+                 cluster_min: int = 3, impulse_min_pct: float = 0.3) -> list[dict]:
     """
     Detect major Supply & Demand zones up to bar i (no lookahead).
 
@@ -180,11 +180,9 @@ def detect_zones(df: pd.DataFrame, i: int, lookback: int = 40,
       Zone bounds = base's wick high & low.
 
     REAL ZONE GATES (anti-fake):
-      - cluster_min=4: 4+ bars consolidation (not 3-bar noise)
-      - impulse_min_pct=0.6: real institutional move (not normal bar)
-      - impulse checked over 1-2 bars before base (not just 1)
-      - freshness: zone must NOT be broken since formation
-      - dedup: overlapping zones merged, strongest kept
+      - cluster_min=3: 3+ bars consolidation
+      - impulse_min_pct=0.3: institutional move (checked over 1-3 bars)
+      - freshness: zone broken only on CLOSE violation (wicks = tests, OK)
 
     Returns list of zones: {type: 'demand'|'supply', top, bottom, score, bar}
     """
@@ -225,30 +223,26 @@ def detect_zones(df: pd.DataFrame, i: int, lookback: int = 40,
         base_mid = (base_high + base_low) / 2
 
         # Look at the bar(s) BEFORE the base (impulsive leg)
-        # Real institutional impulse can be 1-2 bars. Check both.
+        # Real institutional impulse can be 1-3 bars. Check strongest.
         if j == 0:
             j += 1
             continue
-        # Check last 1-2 bars before base for strongest impulse
-        prev_close_1 = closes[j - 1]
-        prev_open_1 = opens[j - 1]
-        leg_move_1 = (prev_close_1 - prev_open_1) / max(prev_open_1, 1e-9)
-        # Also check 2-bar impulse if available
-        leg_move_2 = 0.0
-        if j >= 2:
-            prev_close_2 = closes[j - 2]
-            prev_open_2 = opens[j - 2]
-            leg_move_2 = (prev_close_2 - prev_open_2) / max(prev_open_2, 1e-9)
-        # Use the strongest impulse (1-bar or 2-bar)
-        leg_move = leg_move_1 if abs(leg_move_1) >= abs(leg_move_2) else leg_move_2
+        # Check last 1-3 bars before base for strongest impulse
+        leg_move = 0.0
+        for lookback_bars in range(1, min(4, j + 1)):
+            prev_close = closes[j - lookback_bars]
+            prev_open = opens[j - lookback_bars]
+            move = (prev_close - prev_open) / max(prev_open, 1e-9)
+            if abs(move) > abs(leg_move):
+                leg_move = move
 
         # Skip if base is too recent (we want mature zones, not current chop)
         bars_since_base = n - (j + cluster_min)
 
         # DEMAND zone: strong UP move before the base => institutions bought
         if leg_move >= impulse_min_pct / 100:
-            # freshness: zone should not have been broken since
-            broken = any(lows[k] < base_low for k in range(j + cluster_min, n))
+            # freshness: zone broken only if CLOSE goes below (wick tests OK)
+            broken = any(closes[k] < base_low for k in range(j + cluster_min, n))
             if not broken:
                 strength = abs(leg_move)
                 # prefer zones with more bars since (tested, mature)
@@ -261,7 +255,7 @@ def detect_zones(df: pd.DataFrame, i: int, lookback: int = 40,
                 })
         # SUPPLY zone: strong DOWN move before the base => institutions sold
         elif leg_move <= -impulse_min_pct / 100:
-            broken = any(highs[k] > base_high for k in range(j + cluster_min, n))
+            broken = any(closes[k] > base_high for k in range(j + cluster_min, n))
             if not broken:
                 strength = abs(leg_move)
                 score = 55 + min(strength * 30, 25) + min(bars_since_base * 0.3, 15)
@@ -901,7 +895,10 @@ def one_min_exhaustion(df_1m, i, direction: str, lookback: int = 4) -> tuple[boo
     if direction == "BUY":
         # bearish reversal candle w/ volume = exhaustion
         bearish = cur_close < cur_open
-        vol_spike = cur_vol > avg_vol * 1.3
+        # Keep the proxy when volume=0 — don't overwrite with a hard check
+        # that always fails for indices (Bug fix: was vol_spike = cur_vol > avg_vol * 1.3)
+        if avg_vol > 0:
+            vol_spike = cur_vol > avg_vol * 1.3
         # 3 consecutive lower highs
         highs = [float(bars.iloc[j]["high"]) for j in range(len(bars))]
         lower_highs = len(highs) >= 3 and all(highs[k] < highs[k - 1] for k in range(1, len(highs)))
@@ -911,7 +908,10 @@ def one_min_exhaustion(df_1m, i, direction: str, lookback: int = 4) -> tuple[boo
             return (True, "3-lower-highs")
     else:  # SELL (long put)
         bullish = cur_close > cur_open
-        vol_spike = cur_vol > avg_vol * 1.3
+        # Keep the proxy when volume=0 — don't overwrite with a hard check
+        # that always fails for indices (Bug fix: was vol_spike = cur_vol > avg_vol * 1.3)
+        if avg_vol > 0:
+            vol_spike = cur_vol > avg_vol * 1.3
         lows = [float(bars.iloc[j]["low"]) for j in range(len(bars))]
         higher_lows = len(lows) >= 3 and all(lows[k] > lows[k - 1] for k in range(1, len(lows)))
         if bullish and vol_spike:

@@ -3,21 +3,18 @@ Tiger V19 — Dynamic Capital Management Module
 =============================================
 
 Pre-order RMS check that prevents margin rejection before an order
-reaches Angel One.  Three gates:
+reaches Angel One.  This module is an ADVISOR, not a gatekeeper.  Tiger
+owns the account money — it decides how much to deploy.  CapitalManager
+only answers one question: "Is there enough REAL money in the account?"
 
-  GATE 1 — Live funds fetch (RMS API)
-      Calls broker.get_balance() which hits rmsLimit().  Returns the
-      real available cash.  Zero funds = hard block.
+  GATE 0 — Max open positions (safety: too many concurrent trades)
+  GATE 1 — Live funds fetch (RMS API) — real available cash
+  GATE 2 — Real money check: available - deployed >= trade cost?
 
-  GATE 2 — Disposable capital check
-      If positions are already open and no free disposable capital
-      remains for a new position, the order is BLOCKED immediately.
-      A secondary trade is allowed only when sufficient separate capital
-      is available without affecting the primary running trade.
+Everything else (conviction tier, allocation %, Fund Brain risk guideline)
+is ADVISORY — logged for Tiger's information, never blocks a trade.
 
-  GATE 3 — Conviction-based dynamic allocation (RULE A)
-      When all 7 brains are aligned and sure, capital is allocated
-      dynamically based on available margin and conviction tier.
+The money is Tiger's.  Fund Brain advises.  CapitalManager checks reality.
 """
 
 from __future__ import annotations
@@ -137,6 +134,7 @@ class CapitalManager:
         trade_cost_estimate: float,
         open_positions_cost: float = 0.0,
         min_allocation: float = 0.0,
+        open_position_count: int = 0,
     ) -> CapitalCheck:
         """Run all three gates and return allocation decision.
 
@@ -149,10 +147,26 @@ class CapitalManager:
             min_allocation: minimum capital required for the trade to
                 make sense (e.g., one lot cost). If allocated < this,
                 the trade is blocked.
+            open_position_count: number of currently OPEN positions
+                (used by the MAX_OPEN_POSITIONS gate).
 
         Returns:
             CapitalCheck with allowed/blocked + allocation details.
         """
+        # GATE 0: Max open positions (CAPITAL FIX — quality over quantity)
+        max_open = BRAIN4.get("MAX_OPEN_POSITIONS", 0)
+        if max_open > 0 and open_position_count >= max_open:
+            return CapitalCheck(
+                allowed=False,
+                reason=(
+                    f"BLOCKED: {open_position_count} open positions "
+                    f">= MAX_OPEN_POSITIONS {max_open} — wait for exit"
+                ),
+                available_funds=0.0,
+                deployed_capital=open_positions_cost,
+                blocked=True,
+            )
+
         # GATE 1: Live funds
         available = self.fetch_live_funds()
         if available <= 0:
@@ -181,37 +195,28 @@ class CapitalManager:
                 blocked=True,
             )
 
-        # GATE 3: Conviction-based allocation (RULE A)
+        # GATE 3: Conviction tier — ADVISORY ONLY (never blocks).
+        # Tiger decides.  We log the tier so Tiger knows the conviction level,
+        # but we do NOT block on low conviction.  That's Tiger's call.
         tier, multiplier = self.conviction_tier(setup_score, brain_alignment)
         if multiplier <= 0:
+            logger.info(
+                "💡 ADVISORY: low conviction (score %.0f, brains %d/7, tier=%s) "
+                "— Tiger decides whether to proceed",
+                setup_score, brain_alignment, tier)
+
+        # REAL MONEY CHECK: can the account actually afford this trade?
+        # If trade_cost > free_disposable → not enough REAL money → block.
+        # If trade_cost <= free_disposable → ALLOW, Tiger takes what it needs.
+        allocated = free_disposable  # Tiger deploys whatever is needed
+        if trade_cost_estimate > 0 and trade_cost_estimate > free_disposable:
             return CapitalCheck(
                 allowed=False,
                 reason=(
-                    f"BLOCKED: Conviction too low (score {setup_score:.0f}, "
-                    f"brains {brain_alignment}/7, tier={tier}) — no allocation"
-                ),
-                available_funds=available,
-                deployed_capital=open_positions_cost,
-                free_disposable=free_disposable,
-                conviction_tier=tier,
-                conviction_multiplier=multiplier,
-                blocked=True,
-            )
-
-        # Dynamic allocation: multiplier of available margin, capped by
-        # free disposable to ensure primary trades are never affected.
-        allocated = min(
-            available * multiplier,
-            free_disposable,
-        )
-
-        # If a minimum allocation is required and we can't meet it, block
-        if min_allocation > 0 and allocated < min_allocation:
-            return CapitalCheck(
-                allowed=False,
-                reason=(
-                    f"BLOCKED: Allocated {allocated:,.0f} < minimum "
-                    f"{min_allocation:,.0f} required for this position"
+                    f"BLOCKED: Not enough real money — trade cost "
+                    f"{trade_cost_estimate:,.0f} > available "
+                    f"{free_disposable:,.0f} (balance ₹{available:,.0f}, "
+                    f"deployed ₹{open_positions_cost:,.0f})"
                 ),
                 available_funds=available,
                 deployed_capital=open_positions_cost,
@@ -222,13 +227,20 @@ class CapitalManager:
                 blocked=True,
             )
 
-        # If the trade cost exceeds what we allocated, block
-        if trade_cost_estimate > 0 and trade_cost_estimate > allocated:
+        # NOTE: Old min_allocation and trade_cost > allocated gates removed.
+        # The REAL MONEY CHECK above already handles both cases:
+        #   - trade_cost > free_disposable → blocked (not enough real money)
+        #   - trade_cost <= free_disposable → allowed (Tiger takes what it needs)
+        # But if a minimum allocation is specified and free_disposable can't
+        # meet it, that's also not enough real money → block.
+        if min_allocation > 0 and free_disposable < min_allocation:
             return CapitalCheck(
                 allowed=False,
                 reason=(
-                    f"BLOCKED: Trade cost {trade_cost_estimate:,.0f} > "
-                    f"allocated {allocated:,.0f} (tier={tier})"
+                    f"BLOCKED: Not enough real money — available "
+                    f"{free_disposable:,.0f} < minimum {min_allocation:,.0f} "
+                    f"required (balance ₹{available:,.0f}, "
+                    f"deployed ₹{open_positions_cost:,.0f})"
                 ),
                 available_funds=available,
                 deployed_capital=open_positions_cost,

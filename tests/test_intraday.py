@@ -355,7 +355,13 @@ def test_missing_ranges_only_fetches_tail_when_cache_covers_start():
 
 def test_load_intraday_backfills_older_window(monkeypatch, tmp_path):
     """20 din cache karke 60 din maango to purana hissa bhi fetch ho."""
-    save_cache(make_session("2026-08-31"), "NIFTY", "FIVE_MINUTE", str(tmp_path))
+    # Pin `end` and derive the cache day from it — otherwise the backfill gap
+    # shrinks by a day every day the wall clock advances and the >=40 assertion
+    # flips to 39 (brittle, date-dependent failure).
+    end = datetime(2026, 9, 21, 15, 30)
+    cache_day = end - timedelta(days=20)
+    save_cache(make_session(cache_day.strftime("%Y-%m-%d")),
+               "NIFTY", "FIVE_MINUTE", str(tmp_path))
     calls = []
 
     def fake_fetch(broker, exchange, token, interval, start, end):
@@ -363,7 +369,7 @@ def test_load_intraday_backfills_older_window(monkeypatch, tmp_path):
         return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
 
     monkeypatch.setattr(intraday, "_fetch_from_angel", fake_fetch)
-    load_intraday(interval="FIVE_MINUTE", days=60, cache_dir=str(tmp_path))
+    load_intraday(interval="FIVE_MINUTE", days=60, cache_dir=str(tmp_path), end=end)
 
     assert len(calls) == 2
     assert (calls[0][1] - calls[0][0]).days >= 40

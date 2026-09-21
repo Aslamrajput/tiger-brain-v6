@@ -206,8 +206,8 @@ def evaluate_exit(
 def execute_exit(position: dict, exit_signal: dict, broker=None) -> dict:
     """
     Converts an exit signal into a broker order.
-    Broker integration is currently like that in stage5_execution.py —
-    the real SmartAPI order flow will go there; this brain is the decision layer.
+    Real SmartAPI order flow is placed via automation/tiger_live.py
+    monitor_open_positions(); this brain is the decision layer.
     """
     if not exit_signal.get("exit"):
         return {"executed": False, "note": "no exit signal — nothing done"}
@@ -218,14 +218,14 @@ def execute_exit(position: dict, exit_signal: dict, broker=None) -> dict:
     )
 
     # Broker is currently a stub (the repo's existing honest position): real exit
-    # order placement will happen via stage5 once SmartAPI is integrated.
+    # order placement happens via tiger_live.py monitor_open_positions.
     return {
         "executed": True,
         "reason": exit_signal["reason"],
         "exit_price": exit_signal.get("exit_price"),
         "option_symbol": position.get("option_symbol"),
         "quantity": position.get("quantity"),
-        "note": "exit decision final — broker order flow via stage5_execution",
+        "note": "exit decision final — broker order flow via tiger_live.py",
     }
 
 

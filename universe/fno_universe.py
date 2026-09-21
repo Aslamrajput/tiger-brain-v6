@@ -430,7 +430,7 @@ LIQUIDITY_TIER = {
     "IRCTC": 3, "NAUKRI": 3, "DMART": 2, "TRENT": 3,
     "HINDUNILVR": 2, "DABUR": 3, "JSWSTEEL": 2,
     # MCX commodities — separate session, different spread regime
-    "CRUDEOIL": 2, "GOLD": 2, "SILVER": 2, "NATURALGAS": 3,
+    "CRUDEOIL": 2, "GOLDM": 2, "SILVERM": 2, "NATURALGAS": 3,
 }
 
 

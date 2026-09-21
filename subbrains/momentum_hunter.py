@@ -27,7 +27,7 @@ Never sells options. Pure momentum → rocket.
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, time
 
 import pandas as pd
 
@@ -94,7 +94,18 @@ def detect_orb_breakout(
     If price breaks below ORB low → SELL/PE signal.
 
     Volume must surge on breakout candle. Body must be strong.
+
+    Time window: 9:30 AM to 11:30 AM (first 2 hours after range forms).
+    ORB is a morning strategy — late-day range breaks are unreliable.
+    After 11:30, momentum_spike + vwap_reclaim handle breakouts.
     """
+    # === ORB TIME WINDOW — morning only (9:30-11:30 IST) ===
+    # The 9:15-9:30 range is the anchor; breakouts are most explosive in
+    # the first 2 hours. After 11:30, let momentum_spike/vwap_reclaim work.
+    cur_time = now.time()
+    if not (time(9, 30) <= cur_time <= time(11, 30)):
+        return None
+
     orb_range = _get_opening_range(df_1m, now) if df_1m is not None else None
     if orb_range is None:
         return None

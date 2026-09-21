@@ -173,18 +173,34 @@ class AngelBroker:
     def start_websocket(self):
         """Start SmartWebSocketV2 for real-time tick data.
 
-        After login, this creates a persistent WebSocket connection that
-        streams live ticks without hitting REST rate limits. The WS runs
-        in a background daemon thread.
+        Singleton guard: there must be EXACTLY ONE WebSocket connection.
+        Previously, re-login during a WS disconnect window created a new
+        TigerWebSocket while the old one's background thread was still
+        alive (sleeping in its reconnect backoff loop). The orphan thread
+        kept reconnecting with a stale token → N zombie connections.
+        Now the old WS is fully stopped before a new one is created.
         """
-        if self.websocket is not None and self.websocket.is_connected():
-            logger.info("📡 WS already connected — skip start")
-            return
+        # === SINGLETON GUARD — stop old WS before creating new (Bug fix) ===
+        if self.websocket is not None:
+            if self.websocket.is_connected():
+                logger.info("📡 WS already connected — skip start")
+                return
+            # Old WS exists but is disconnected — its background thread may
+            # still be alive (reconnect backoff). Kill it first, or it
+            # becomes an orphan holding a stale-token socket.
+            logger.warning("🧹 WS STALE — old instance disconnected, "
+                           "stopping it before new connect (singleton)")
+            try:
+                self.websocket.stop()
+            except Exception as exc:
+                logger.warning(f"⚠️ old WS stop fail (continuing): {exc}")
+            self.websocket = None
         try:
             from broker.tiger_websocket import TigerWebSocket
             self.websocket = TigerWebSocket(self, mode=3)  # SNAP_QUOTE
             self.websocket.start()
-            logger.info("🔥 TigerWebSocket V2 started — real-time ticks streaming")
+            logger.info("🔥 TigerWebSocket V2 started — real-time ticks streaming "
+                        "(WS Connection count: 1)")
         except Exception as exc:
             logger.warning(f"⚠️ WebSocket start fail (REST fallback active): {exc}")
             self.websocket = None

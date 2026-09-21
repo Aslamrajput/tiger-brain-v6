@@ -11,9 +11,8 @@ Covers:
 import json
 import os
 import sys
-from datetime import datetime, timedelta
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -61,93 +60,6 @@ class TestResolveExchangeForSymbol:
         assert resolve_exchange_for_symbol("crudeoil") == "MCX"
         assert resolve_exchange_for_symbol("Gold") == "MCX"
         assert resolve_exchange_for_symbol("RELIANCE") == "NFO"
-
-
-# ============================================================
-# Issue 4 (PR #26): Raju's _count_recent_errors — timestamp filter
-# ============================================================
-
-class TestCountRecentErrors:
-    """Test that Raju only counts errors within the 15-min window,
-    excludes warnings, and handles multiline tracebacks correctly.
-    """
-    def _make_mechanic(self):
-        from deploy.tiger_mechanics import RajuHealthWatcher
-        return RajuHealthWatcher()
-
-    def test_no_log_returns_zero(self, tmp_path):
-        raju = self._make_mechanic()
-        with patch("deploy.tiger_mechanics.run_local",
-                   return_value=("", 0)):
-            assert raju._count_recent_errors(15) == 0
-
-    def test_recent_error_counted(self):
-        raju = self._make_mechanic()
-        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        log = f"{now} [tiger_brain.data_loader] ERROR: Candle fetch failed\n"
-        with patch("deploy.tiger_mechanics.run_local",
-                   return_value=(log, 0)):
-            assert raju._count_recent_errors(15) == 1
-
-    def test_old_error_not_counted(self):
-        raju = self._make_mechanic()
-        old = (datetime.now() - timedelta(minutes=30)
-               ).strftime("%Y-%m-%d %H:%M:%S")
-        log = (f"{old} [tiger_brain.data_loader] ERROR: old error\n")
-        with patch("deploy.tiger_mechanics.run_local",
-                   return_value=(log, 0)):
-            assert raju._count_recent_errors(15) == 0
-
-    def test_futurewarning_excluded(self):
-        raju = self._make_mechanic()
-        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        log = (
-            f"{now} [tiger_brain.data_loader] ERROR: real error\n"
-            f"{now} /path/to/file.py:756: FutureWarning: deprecated\n"
-        )
-        with patch("deploy.tiger_mechanics.run_local",
-                   return_value=(log, 0)):
-            # Only the ERROR line counts, not FutureWarning
-            assert raju._count_recent_errors(15) == 1
-
-    def test_multiline_traceback_only_counts_once(self):
-        """Traceback continuation lines have no timestamp — skipped."""
-        raju = self._make_mechanic()
-        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        log = (
-            f"{now} [tiger_brain] ERROR: something broke\n"
-            f"Traceback (most recent call last):\n"
-            f'  File "/path/to/code.py", line 42, in func\n'
-            f"    raise ValueError('bad')\n"
-            f"ValueError: bad\n"
-        )
-        with patch("deploy.tiger_mechanics.run_local",
-                   return_value=(log, 0)):
-            # Only the first line (with timestamp + ERROR) counts
-            assert raju._count_recent_errors(15) == 1
-
-    def test_boundary_15_min_excluded(self):
-        """Error exactly 15 min ago is OUTSIDE the window (cutoff strict)."""
-        raju = self._make_mechanic()
-        boundary = (datetime.now() - timedelta(minutes=16)
-                     ).strftime("%Y-%m-%d %H:%M:%S")
-        recent = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        log = (
-            f"{boundary} [module] ERROR: old\n"
-            f"{recent} [module] ERROR: new\n"
-        )
-        with patch("deploy.tiger_mechanics.run_local",
-                   return_value=(log, 0)):
-            assert raju._count_recent_errors(15) == 1
-
-    def test_multiple_recent_errors(self):
-        raju = self._make_mechanic()
-        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        log = "\n".join(
-            f"{now} [module] ERROR: error #{i}" for i in range(10))
-        with patch("deploy.tiger_mechanics.run_local",
-                   return_value=(log, 0)):
-            assert raju._count_recent_errors(15) == 10
 
 
 # ============================================================

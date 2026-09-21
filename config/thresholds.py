@@ -45,7 +45,7 @@ OI = {
 VOLUME = {
     "SPIKE_MULTIPLIER": 2,
     "WEAK_VOLUME_PCT_OF_AVG": 50,
-    "OPENING_RANGE_MINUTES": 3,
+    "OPENING_RANGE_MINUTES": 0,
     "OPENING_RANGE_ACTIVE_MULTIPLIER": 1.5,
 }
 
@@ -238,6 +238,15 @@ AUTOMATION = {
     "NSE_SQUARE_OFF_TIME": "15:15",
     # MCX square-off — 23:15 (15 min before MCX close 23:30)
     "MCX_SQUARE_OFF_TIME": "23:15",
+    # === STALE DATA GUARD (Bug 1 fix) ===
+    # A signal is only valid for this many seconds after it is generated.
+    # If _place_live_orders picks up a signal older than this, it is rejected
+    # — no executing stale-buffer signals when the user changes score mid-scan.
+    "SIGNAL_MAX_AGE_SEC": 90,
+    # The latest 1m bar for a symbol must be newer than this many seconds for
+    # an entry to be allowed. If the WS feed stalled, Tiger skips the symbol
+    # rather than trading on stale ticks.
+    "DATA_MAX_AGE_SEC": 120,
 }
 
 # ============================================================
@@ -315,14 +324,20 @@ BRAIN3 = {
 }
 
 BRAIN4 = {
-    # Global daily trade counter limit across ALL markets (5-10 range).
-    "MAX_TRADES_PER_DAY_GLOBAL": 8,
-    "MAX_TRADES_PER_DAY_GLOBAL_MIN": 5,
-    "MAX_TRADES_PER_DAY_GLOBAL_MAX": 10,
-    # Commodity-market-specific daily trade counter limit (5-10 range).
-    "MAX_TRADES_PER_DAY_COMMODITY": 5,
-    "MAX_TRADES_PER_DAY_COMMODITY_MIN": 5,
-    "MAX_TRADES_PER_DAY_COMMODITY_MAX": 10,
+    # Global daily trade counter limit across ALL markets.
+    "MAX_TRADES_PER_DAY_GLOBAL": 20,
+    "MAX_TRADES_PER_DAY_GLOBAL_MIN": 10,
+    "MAX_TRADES_PER_DAY_GLOBAL_MAX": 20,
+    # Commodity-market-specific daily trade counter limit.
+    "MAX_TRADES_PER_DAY_COMMODITY": 10,
+    "MAX_TRADES_PER_DAY_COMMODITY_MIN": 10,
+    "MAX_TRADES_PER_DAY_COMMODITY_MAX": 20,
+    # === CAPITAL FIX (Sep 2026) — quality over quantity ===
+    # Account ₹29,453. Split into 2 slots of ₹14,500 each so every trade
+    # has enough for one lot (₹12,800+). Stops the 99% reject rate caused
+    # by conviction-multiplier allocating < one_lot_cost.
+    "MAX_OPEN_POSITIONS": 2,
+    "ALLOCATED_PER_TRADE": 14500.0,
     # Dynamic position sizing: full Angel One capital available for trading.
     "MAX_CAPITAL_PER_TRADE_PCT": 100.0,
     # Full capital deployable across trades (Angel One balance = 100% trading money).
@@ -384,8 +399,14 @@ SCALPER = {
     # Volume is highly sensitive: 1.3x-1.5x rolling average captures the
     # initial impulse wave without freezing. Body 65% allows bottom sweeps
     # and sharp wick turnarounds on 1m timeframe. Score>=75 keeps quality.
-    "MIN_SCORE": 75,              # high-conviction scalps only
-    "MIN_BODY_PCT": 65,           # dynamic — capture bottom sweeps + wick turnarounds
+    "MIN_SCORE": 65,              # high-conviction scalps only (default fallback)
+    # === EXCHANGE ISOLATION — NSE and MCX have different microstructure.
+    # A single global score caused NSE/MCX clashes (MCX commodities need a
+    # lower bar than NSE index/stock options). Each exchange now has its own
+    # scalper score threshold. Use get_scalper_min_score(segment).
+    "MIN_SCORE_NSE": 65,          # NSE equity/index — high-conviction scalps
+    "MIN_SCORE_MCX": 60,          # MCX commodity — lower bar (matches session brain)
+    "MIN_BODY_PCT": 30,           # 1m body ≥ 30% of range (relaxed for aggressive hunting)
     "MIN_VOLUME_SURGE": 1.4,      # dynamic — instantaneous vol 1.3x-1.5x of trailing avg
     "MIN_RSI_BUY": 60,            # CE: RSI >= 60 (bullish momentum)
     "MAX_RSI_SELL": 40,           # PE: RSI <= 40 (bearish momentum)
@@ -396,27 +417,106 @@ SCALPER = {
     "MAX_STOP_RUPEES": 1500,      # -₹1500 = absolute cap (protects capital, but gives room)
     "MIN_HOLD_SECONDS": 180,      # 3-min minimum hold before SL triggers (momentum needs time)
     "CATASTROPHIC_STOP_PCT": 12.0, # -12% = instant exit even during min hold (black swan protection)
-    "MAX_TRADES_PER_DAY": 6,      # was 2 — allow up to 6 quality scalps
+    "MAX_TRADES_PER_DAY": 20,     # aggressive hunting — 10-20 quality scalps per day
     # === VOLUME PROFILE (institutional intelligence — informational only) ===
     "VP_LOOKBACK": 50,            # bars for volume histogram
     "VP_BINS": 20,                # histogram resolution
     "VP_VALUE_AREA_PCT": 70.0,    # standard 70% Value Area
     # === RE-ENTRY (Tiger doesn't give up on a fish) ===
-    "REENTRY_COOLDOWN_MINUTES": 5,  # after SL, wait 5 min before re-entering SAME symbol+direction
-    "REENTRY_MAX_PER_SYMBOL": 2,    # max 2 re-entries per symbol per day (don't chase losses)
+    "REENTRY_COOLDOWN_MINUTES": 2,  # after SL, wait 2 min before re-entering SAME symbol+direction
+    "REENTRY_MAX_PER_SYMBOL": 3,    # max 3 re-entries per symbol per day (don't chase losses)
     # === ACTIVATION ===
-    "ACTIVATION_IDLE_MINUTES": 30,   # 30 min idle → activate
+    "ACTIVATION_IDLE_MINUTES": 3,    # 3 min idle → activate (aggressive hunting)
     "ACTIVATION_ZERO_TRADE_TIME": {  # OR: 0 trades at these times
         "NSE": "09:30",
         "MCX": "15:45",
     },
 }
 
+
+def get_scalper_min_score(segment: str) -> float:
+    """Exchange-isolated scalper score threshold (Bug 3 fix).
+
+    NSE and MCX no longer share one global MIN_SCORE. MCX commodities get
+    a lower bar (matches the session-brain thresholds); NSE stays strict.
+
+    Args:
+        segment: "nse", "mcx", "equity", or "commodity".
+    """
+    seg = (segment or "").lower()
+    if seg in ("mcx", "commodity"):
+        return float(SCALPER.get("MIN_SCORE_MCX", SCALPER["MIN_SCORE"]))
+    return float(SCALPER.get("MIN_SCORE_NSE", SCALPER["MIN_SCORE"]))
+
+
 # === RISK MANAGER — consecutive loss protection ===
-# Prevents death spirals: 2 losses → pause 30min, 3 losses → stop for day.
+# Prevents death spirals: 4 losses → pause 15min, 5 losses → stop for day.
 RISK_MANAGER = {
-    "MAX_CONSECUTIVE_LOSSES": 3,       # 3 losses in a row → STOP for the day
-    "PAUSE_AFTER_LOSSES": 2,           # 2 losses → pause 30 min
-    "PAUSE_DURATION_MINUTES": 30,      # pause length
-    "MAX_TRADES_PER_DAY": 6,           # hard daily cap (all strategies combined)
+    "MAX_CONSECUTIVE_LOSSES": 5,       # 5 losses in a row → STOP for the day
+    "PAUSE_AFTER_LOSSES": 4,           # 4 losses → pause 15 min
+    "PAUSE_DURATION_MINUTES": 15,      # pause length (shorter — more aggressive)
+    "MAX_TRADES_PER_DAY": 20,          # hard daily cap (all strategies combined)
+}
+
+# === ML ENGINE — LightGBM win-probability gate ===
+# Trained nightly via jobs/retrain_model.py using TimeSeriesSplit (no leakage).
+# Inference gate: if win_probability < ML_MIN_WIN_PROB, reject trade instantly.
+ML_ENGINE = {
+    "MODEL_PATH": "models/tiger_lgbm.joblib",   # nightly-retrained artifact
+    "MIN_WIN_PROB": 0.70,                        # hard reject below this (legacy)
+    "SNIPER_MIN_WIN_PROB": 0.80,                 # sniper-only: high conviction
+    "FEATURE_COLUMNS": [
+        "zone_strength", "volume_velocity", "option_chain_pcr", "live_iv_skew",
+        "setup_score", "body_pct", "vol_surge_ratio", "rsi", "brain_alignment",
+        "is_scalper", "is_momentum_hunter",
+        "sensex_trend", "vix_level",
+        # --- sniper features (14-16) ---
+        "sniper_zone_strength", "fvg_size", "commodity_volatility",
+    ],
+    "TRAINING": {
+        "N_SPLITS": 5,           # TimeSeriesSplit folds
+        "PURGE_BARS": 5,         # purge labels within N bars of train/test boundary
+        "MIN_SAMPLES": 50,       # minimum samples to train (lowered — faster learning)
+        "VALIDATED_ACC_MIN": 0.55,  # reject retrain if OOS accuracy below this
+        "SNIPER_ONLY": True,     # train only on sniper trades (pnl>30% + SNIPER_TRAILING_EXIT)
+        "SNIPER_MIN_PNL_PCT": 30.0,   # only learn from big sniper winners
+        "SNIPER_EXIT_REASON": "SNIPER_TRAILING_EXIT",
+    },
+}
+
+# ============================================================
+# TIGER SNIPER ADVANCED V2 — pure SMC sniper engine.
+# Pure SMC + Supply/Demand. No fixed targets. Trailing momentum ride.
+# Runs on BOTH MCX commodities AND NSE index/stock options.
+# ============================================================
+SNIPER = {
+    "MAX_TRADES_PER_DAY": 3,        # sniper doesn't overtrade
+    "MIN_ZONE_STRENGTH": 80.0,      # only zones with SMC confluence > 80
+    "MIN_WIN_PROB": 0.80,           # ML conviction gate (high only)
+    # === MCX high-volume session — 10:30 AM to 11:30 PM IST ===
+    "SESSION_START": "10:30",
+    "SESSION_END": "23:30",
+    # === NSE index/stock session — 9:15 AM to 3:00 PM IST (entry cutoff) ===
+    "NSE_SESSION_START": "09:15",
+    "NSE_SESSION_END": "15:00",     # entry cutoff (square-off 15:15 separate)
+    # Entry: OB retest + CHOCH + wick rejection on 1m
+    "OB_BUFFER_PCT": 0.35,          # SL = OB edge +/- 0.35% buffer
+    "CHOCH_LOOKBACK": 20,           # 1m structure-shift lookback
+    "WICK_REJECTION_MIN": 0.50,     # min wick/range ratio for rejection candle
+    # Scanner: require 3+ agreeing SMC components for a true rocket setup
+    "MIN_CONFLUENCE_COMPONENTS": 2,     # MCX — 2+ SMC components (was 3, too strict)
+    "NSE_MIN_CONFLUENCE_COMPONENTS": 2, # NSE — 2+ SMC components
+    # Exit: NO FIXED TARGET. Pure momentum ride — let the rocket run.
+    #   1. Give the rocket room first: trail activates only after +10% profit
+    #      (options real moves are +10-15%; 25% was too high — never armed,
+    #      rockets died on BOS exit before takeoff).
+    #   2. Once active, trail = 50% of peak (lock half, ride the rest).
+    #   3. OB hard stop survives the pre-rocket pullback (entry*0.88 = -12%).
+    #   4. 5m opposite BOS = structure reversal exit — but ONLY checked AFTER
+    #      the trail arms (before that, first pullbacks must not kill the rocket).
+    "ATR_PERIOD": 14,
+    "TRAIL_ACTIVATE_PCT": 10.0,     # rocket must be +10% before trail arms
+    "TRAIL_LOCK_PCT_OF_PEAK": 50.0, # lock 50% of peak once armed (rocket room)
+    "OB_STOP_PCT": 12.0,            # OB stop at -12% (survive pre-rocket noise)
+    "EXIT_REASON": "SNIPER_TRAILING_EXIT",
 }

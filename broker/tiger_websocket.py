@@ -166,6 +166,40 @@ class TigerWebSocket:
       - Balance / positions (RMS API)
     """
 
+    # === CONNECTION COUNTER (singleton verification) ===
+    # Tracks how many WS connections are currently OPEN across all
+    # instances. Must stay 1. If it grows, an orphan thread spawned a
+    # second socket — grep "WS Connection count" in logs to verify.
+    _active_connections: int = 0
+
+    # === SINGLETON GUARD ===
+    # Ensures only ONE TigerWebSocket instance exists per process.
+    # Multiple WS connections to Angel One cause duplicate tick floods,
+    # rate-limit violations, and race conditions in the candle builder.
+    # This is especially critical for MCX: the MCX feed opens at 9:00 AM
+    # and runs until 11:30 PM — if a second WS spawns during the NSE→MCX
+    # handoff, both sockets subscribe to the same MCX tokens, doubling
+    # every tick and corrupting volume calculations.
+    _singleton_instance: Optional["TigerWebSocket"] = None
+    _singleton_lock = threading.Lock()
+
+    def __new__(cls, *args, **kwargs):
+        """Enforce singleton — return existing instance if one is alive."""
+        with cls._singleton_lock:
+            existing = cls._singleton_instance
+            if existing is not None and existing.is_healthy():
+                logger.info(
+                    "🛡️ WS SINGLETON GUARD — reusing existing healthy WS "
+                    "(ticks=%d, age=%.0fs)",
+                    existing.tick_count(),
+                    existing.last_tick_age_seconds(),
+                )
+                return existing
+            # Existing instance is dead/None → create new
+            instance = super().__new__(cls)
+            cls._singleton_instance = instance
+            return instance
+
     def __init__(self, broker, mode: int = 3):
         """Initialize TigerWebSocket.
 
@@ -176,6 +210,14 @@ class TigerWebSocket:
                   2 = Quote (price + OHLC day + volume + OI)
                   3 = Snap Quote (full — quote + best 5 bids/asks + OI)
         """
+        # === SINGLETON INIT GUARD ===
+        # __new__ returns the existing healthy instance, but Python calls
+        # __init__ on it again. Skip re-init if already initialized.
+        if getattr(self, "_initialized", False):
+            logger.debug("🛡️ WS SINGLETON — __init__ skipped (already initialized)")
+            return
+        self._initialized = True
+
         self.broker = broker
         self.mode = mode
 
@@ -239,7 +281,9 @@ class TigerWebSocket:
     def _on_open(self, wsapp):
         """WebSocket connected — subscribe to tokens."""
         self._connected.set()
-        logger.info("🔥 TIGER WEBSOCKET CONNECTED — zero rate limits active!")
+        TigerWebSocket._active_connections += 1
+        logger.info(f"🔥 TIGER WEBSOCKET CONNECTED — zero rate limits active! "
+                    f"(WS Connection count: {TigerWebSocket._active_connections})")
         if self._subscribed_tokens:
             self._do_subscribe(list(self._subscribed_tokens))
 
@@ -260,11 +304,16 @@ class TigerWebSocket:
         self.last_error = str(error)
         self._connected.clear()
         logger.error(f"❌ WS error: {error}")
+        logger.warning("⚠️ WS STALL detected — WS error, will attempt reconnect.")
 
     def _on_close(self, wsapp):
         """WebSocket closed."""
         self._connected.clear()
-        logger.warning("⚠️ WS connection closed — will attempt reconnect.")
+        if TigerWebSocket._active_connections > 0:
+            TigerWebSocket._active_connections -= 1
+        logger.warning(f"⚠️ WS connection closed — will attempt reconnect. "
+                       f"(WS Connection count: {TigerWebSocket._active_connections})")
+        logger.warning("⚠️ WS STALL detected — WS disconnected, awaiting reconnect.")
 
     # ============================================================
     # TICK PROCESSING
@@ -573,7 +622,10 @@ class TigerWebSocket:
         if self._thread is not None:
             self._thread.join(timeout=5)
         self._connected.clear()
-        logger.info("🛑 TigerWebSocket stopped.")
+        if TigerWebSocket._active_connections > 0:
+            TigerWebSocket._active_connections -= 1
+        logger.info(f"🛑 TigerWebSocket stopped. "
+                    f"(WS Connection count: {TigerWebSocket._active_connections})")
 
     def reconnect(self):
         """Force a reconnect (e.g. after session token refresh)."""

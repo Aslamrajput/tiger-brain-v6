@@ -18,6 +18,7 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from risk.capital_manager import CapitalManager, CapitalCheck
+from config.thresholds import BRAIN4
 
 
 class MockBroker:
@@ -118,93 +119,108 @@ class TestConvictionTiers(unittest.TestCase):
         self.assertEqual(tier, "DECENT")
         self.assertAlmostEqual(mult, 0.6)
 
-    def test_weak_tier_blocks(self):
-        """Score < 75 = WEAK (0% = blocked)."""
+    def test_weak_tier_advisory_only(self):
+        """Score < 75 = WEAK (0%) — ADVISORY only, never blocks the trade.
+        Tiger decides whether to proceed."""
         tier, mult = CapitalManager.conviction_tier(
             setup_score=70.0, brain_alignment=4)
         self.assertEqual(tier, "WEAK")
         self.assertAlmostEqual(mult, 0.0)
 
     def test_sure_shot_allocation(self):
-        """RULE A: Sure Shot allocates 100% of margin, capped by free."""
+        """Advisory: SURE_SHOT allocates full free disposable (Tiger's money)."""
         broker = MockBroker(balance=100000.0)
         cm = CapitalManager(broker)
         check = cm.check_and_allocate(
             setup_score=95.0,
             brain_alignment=7,
-            trade_cost_estimate=50000,
+            trade_cost_estimate=5000,
             open_positions_cost=0,
         )
         self.assertTrue(check.allowed)
         self.assertEqual(check.conviction_tier, "SURE_SHOT")
+        # allocated = free_disposable (Tiger takes what it needs, no arbitrary cap)
         self.assertAlmostEqual(check.allocated_capital, 100000.0)
-        self.assertAlmostEqual(check.allocation_pct, 100.0)
 
     def test_sure_shot_capped_by_free_disposable(self):
-        """Sure Shot allocation capped when free disposable < 100%."""
+        """Allocation = free_disposable when partially deployed."""
         broker = MockBroker(balance=100000.0)
         cm = CapitalManager(broker)
         check = cm.check_and_allocate(
             setup_score=95.0,
             brain_alignment=7,
-            trade_cost_estimate=30000,
+            trade_cost_estimate=3000,
             open_positions_cost=60000.0,  # 60k deployed, 40k free
         )
         self.assertTrue(check.allowed)
         self.assertEqual(check.free_disposable, 40000.0)
-        self.assertLessEqual(check.allocated_capital, 40000.0)
+        self.assertAlmostEqual(check.allocated_capital, 40000.0)
 
 
 class TestOrderBlocking(unittest.TestCase):
-    """RULE B: Order blocking when insufficient margin."""
+    """RULE B: Block ONLY when trade_cost > free_disposable (not enough real money)."""
 
-    def test_trade_cost_exceeds_allocation_blocks(self):
-        """Trade cost > allocated capital = blocked."""
+    def test_trade_cost_exceeds_free_disposable_blocks(self):
+        """Trade cost > free disposable = blocked (not enough REAL money)."""
         broker = MockBroker(balance=50000.0)
         cm = CapitalManager(broker)
         check = cm.check_and_allocate(
-            setup_score=77.0,  # DECENT tier = 60% = 30k
+            setup_score=77.0,  # DECENT tier — advisory only
             brain_alignment=5,
-            trade_cost_estimate=40000,  # > 30k allocated
+            trade_cost_estimate=60000,  # > 50k free disposable
             open_positions_cost=0,
         )
         self.assertFalse(check.allowed)
         self.assertTrue(check.blocked)
-        self.assertIn("Trade cost", check.reason)
+        self.assertIn("Not enough real money", check.reason)
 
     def test_min_allocation_not_met_blocks(self):
-        """Allocated < minimum required = blocked."""
+        """When free_disposable < min_allocation → blocked (real money check)."""
         broker = MockBroker(balance=50000.0)
         cm = CapitalManager(broker)
         check = cm.check_and_allocate(
-            setup_score=77.0,  # DECENT = 60% = 30k
+            setup_score=77.0,
             brain_alignment=5,
             trade_cost_estimate=10000,
             open_positions_cost=0,
-            min_allocation=35000,  # > 30k allocated
+            min_allocation=60000,  # > 50k available
         )
         self.assertFalse(check.allowed)
         self.assertTrue(check.blocked)
-        self.assertIn("minimum", check.reason)
+        self.assertIn("Not enough real money", check.reason)
+
+    def test_low_conviction_does_not_block(self):
+        """WEAK conviction is ADVISORY only — trade still allowed if real money OK."""
+        broker = MockBroker(balance=100000.0)
+        cm = CapitalManager(broker)
+        check = cm.check_and_allocate(
+            setup_score=70.0,  # WEAK tier
+            brain_alignment=4,
+            trade_cost_estimate=5000,
+            open_positions_cost=0,
+        )
+        self.assertTrue(check.allowed)  # NOT blocked — advisory only
+        self.assertEqual(check.conviction_tier, "WEAK")
 
 
 class TestFullFlow(unittest.TestCase):
     """Full integration: 7-brain alignment → capital check → allocation."""
 
     def test_sure_shot_full_flow(self):
-        """7 brains aligned, high score, enough capital = ALLOWED."""
+        """7 brains aligned, high score, enough capital = ALLOWED (full free disposable)."""
         broker = MockBroker(balance=150000.0)
         cm = CapitalManager(broker)
         check = cm.check_and_allocate(
             setup_score=95.0,
             brain_alignment=7,
-            trade_cost_estimate=120000,
+            trade_cost_estimate=5000,
             open_positions_cost=0,
         )
         self.assertTrue(check.allowed)
         self.assertEqual(check.conviction_tier, "SURE_SHOT")
         self.assertGreater(check.allocated_capital, 0)
-        self.assertLessEqual(check.allocated_capital, 150000.0)
+        # allocated = free_disposable (no arbitrary cap)
+        self.assertAlmostEqual(check.allocated_capital, 150000.0)
 
     def test_secondary_trade_with_primary_open(self):
         """Primary trade running, enough free margin for secondary."""
@@ -213,7 +229,7 @@ class TestFullFlow(unittest.TestCase):
         check = cm.check_and_allocate(
             setup_score=95.0,
             brain_alignment=7,
-            trade_cost_estimate=30000,
+            trade_cost_estimate=5000,  # within the fixed slot
             open_positions_cost=50000.0,  # 50k deployed, 50k free
         )
         self.assertTrue(check.allowed)
@@ -235,6 +251,40 @@ class TestFullFlow(unittest.TestCase):
         # so it passes if trade_cost (5k) <= allocated (2k)?
         # No — trade_cost > allocated → blocked
         self.assertFalse(check.allowed)
+
+    def test_max_open_positions_blocks_third_trade(self):
+        """CAPITAL FIX: MAX_OPEN_POSITIONS=2 blocks the 3rd concurrent trade."""
+        broker = MockBroker(balance=100000.0)
+        cm = CapitalManager(broker)
+        check = cm.check_and_allocate(
+            setup_score=95.0,
+            brain_alignment=7,
+            trade_cost_estimate=5000,
+            open_positions_cost=29000.0,
+            open_position_count=2,  # already 2 open = max
+        )
+        self.assertFalse(check.allowed)
+        self.assertTrue(check.blocked)
+        self.assertIn("MAX_OPEN_POSITIONS", check.reason)
+
+    def test_full_account_deployable_no_arbitrary_cap(self):
+        """Tiger can deploy full account balance — no ALLOCATED_PER_TRADE cap.
+        ₹29k account: allocated = free_disposable = full balance."""
+        broker = MockBroker(balance=29453.0)
+        cm = CapitalManager(broker)
+        check = cm.check_and_allocate(
+            setup_score=85.0,
+            brain_alignment=6,
+            trade_cost_estimate=12000,  # one lot ~₹12,800
+            open_positions_cost=0,
+            min_allocation=12800,
+            open_position_count=0,
+        )
+        self.assertTrue(check.allowed)
+        # allocated = free_disposable = full balance (no arbitrary cap)
+        self.assertAlmostEqual(check.allocated_capital, 29453.0)
+        # must cover the minimum one-lot cost
+        self.assertGreaterEqual(check.allocated_capital, 12800)
 
 
 if __name__ == "__main__":
