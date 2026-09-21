@@ -48,6 +48,9 @@ def no_real_sleep(monkeypatch):
     """Test suite ko backoff ka asli intezaar nahi karna chahiye."""
     slept = []
     monkeypatch.setattr(loader.time, "sleep", slept.append)
+    # Neutralise the process-wide candle gate so call-count / backoff
+    # assertions stay deterministic; the gate is tested separately below.
+    monkeypatch.setattr(loader, "ANGEL_MIN_CALL_INTERVAL_SEC", 0.0)
     return slept
 
 
@@ -151,3 +154,41 @@ def test_chunk_ranges_cover_boundary_sessions(no_real_sleep):
     # agla chunk bina gap ke agle din ki subah se
     assert second["fromdate"] == "2026-07-01 00:00"
     assert second["todate"] == "2026-07-30 15:30"
+
+
+class TestGlobalCandleRateGate:
+    """Process-wide spacing so sequential (cross-symbol) candle calls stay
+    under Angel's ~2 req/sec limit instead of bursting and getting denied."""
+
+    def test_constants_keep_under_two_per_second(self):
+        # interval must be >= 0.5s to stay strictly below 2 requests/sec.
+        # Read the real value from source (the autouse fixture zeroes it).
+        import re
+        from pathlib import Path
+        src = (Path(__file__).resolve().parent.parent / "data" / "loader.py").read_text()
+        m = re.search(r"^ANGEL_MIN_CALL_INTERVAL_SEC\s*=\s*([0-9.]+)", src, re.M)
+        assert m, "ANGEL_MIN_CALL_INTERVAL_SEC not found"
+        assert float(m.group(1)) >= 0.5
+
+    def test_gate_spaces_consecutive_calls(self, monkeypatch):
+        slept = []
+        monkeypatch.setattr(loader.time, "sleep", slept.append)
+        monkeypatch.setattr(loader, "ANGEL_MIN_CALL_INTERVAL_SEC", 0.5)
+        monkeypatch.setattr(loader, "_angel_last_call_ts", 0.0)
+        # First call records a slot without waiting (no prior call).
+        loader._angel_rate_limit_gate()
+        assert slept == []
+        # Second call immediately after must wait ~the full interval.
+        loader._angel_rate_limit_gate()
+        assert slept and slept[-1] == pytest.approx(0.5, abs=0.2)
+
+    def test_gate_does_not_sleep_when_interval_elapsed(self, monkeypatch):
+        slept = []
+        monkeypatch.setattr(loader.time, "sleep", slept.append)
+        monkeypatch.setattr(loader, "ANGEL_MIN_CALL_INTERVAL_SEC", 0.5)
+        # Pretend last call was long ago.
+        monkeypatch.setattr(loader, "_angel_last_call_ts", -1000.0)
+        loader._angel_rate_limit_gate()
+        assert slept == []
+        monkeypatch.setattr(loader, "_angel_last_call_ts", 0.0)
+

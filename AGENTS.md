@@ -549,3 +549,50 @@ VERIFY after cleanup:
   - PEM shredded (3-pass) + removed after cleanup. 🔐
 NSE/MCX isolation confirmed intact (separate score thresholds + square-off
 times). No duplicate/conflicting code. Tiger runs full power.
+
+## EMERGENCY FIX DEPLOY (2026-09-22, commit 93e7cc1)
+Branch `cleanup-dead-code-ml-advisory`, pushed + CI green + PR #28 (branch→main).
+Production EC2 (3.108.53.100, ec2-user, /home/ec2-user/tiger-brain-v6) deployed:
+  - Rollback point: `ede135f`; live HEAD now `93e7cc1`; service restarted 01:42:04 IST.
+  - Server Python is 3.9.25 (CI runs 3.10) — keep code 3.9-compatible.
+  - Server ML deps already present (lightgbm 4.6.0, xgboost 2.1.4, sklearn 1.6.1,
+    joblib 1.5.3); models/tiger_lgbm*.joblib absent → ML gate is advisory
+    pass-through (win_prob 1.0), never blocks. Not a blocker.
+Fixes in this commit:
+  1. flake8: `from typing import Optional` + `option_type` resolved from tracker
+     (`tracker.get("option_type")` with CE/PE suffix fallback), stamped at entry.
+  2. CI workflow: was calling conda env update after setup-python (no conda) and
+     appending empty `$CONDA/bin`; now conda-incubator/setup-miniconda@v3,
+     explicit env, `shell: bash -el {0}`, pytest scoped to tests/.
+  3. MCX score gate: fixed MIN_ZONE_STRENGTH=80 was above the 2-component max
+     (50, each SMC component=25pts) → dead gate. Now scales:
+     `required_score = MIN_ZONE_STRENGTH * min_components / 4.0`.
+  4. scan_sniper_signals: NSE signal no longer suppresses MCX — both markets
+     scanned independently, truncated to shared daily cap.
+  5. deploy/aws_deploy.sh: branch-aware (`bash deploy/aws_deploy.sh <branch>`) +
+     chrony NTP sync + pip install -r requirements.txt.
+Verified on server: 559 tests passed, imports OK.
+
+
+## SQUARE-OFF CRASH FIX (2026-09-22, commit 2879df5, PR #29)
+Live log showed `❌ NSE square-off error: 'NoneType' object is not iterable` at
+15:15 and the same for MCX at 23:15 — no positions closed.
+Root cause: `AngelBroker.get_positions()` did `pos.get("data", [])`; Angel
+returns `{"data": null}` when there are no positions, and the key exists with
+value None so the `[]` default never applied → returned None → `for p in
+positions` in `square_off_all()` raised. Fixed with `(pos.get("data") or [])`
+in both the primary and re-login paths + `self.get_positions() or []` guard.
+5 regression tests in tests/test_pr_review_fixes.py (TestGetPositionsNoneSafety).
+Full suite now 564 passed. Server deployed + restarted.
+Note: CI conda workflow had only 1 run (on push); PR merge triggers no
+re-run, so CI status on main is not automatically refreshed after merge.
+
+## Live market facts (server, 2026-09-22)
+- TIGER_BRAIN_DRY_RUN=false (real orders), TIGER_WEBSOCKET=true, TZ=Asia/Kolkata.
+- Clock: chrony, stratum 4, offset <1µs; TOTP secret configured (26 chars),
+  pyotp produces valid 6-digit codes. Last pre-market login 2026-09-21 09:00:00.
+- Data-rate limit error seen: "Access denied because of exceeding access rate"
+  (Angel candle fetch) — throttle candle fetches at open.
+- Benign: SmartWebSocketV2 `_on_close() takes 2 positional args but 4 given`
+  on close; nightly ML logs "ensemble partial" (models absent, advisory only).
+

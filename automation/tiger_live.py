@@ -136,6 +136,11 @@ class TigerLiveRunner:
         # every 5 min. SmartWebSocketV2 live ticks fill the gap between refreshes.
         self._last_data_refresh: datetime | None = None
         self._last_15m_fetch: datetime | None = None
+        # Dedup guard — apscheduler job AND the 60s heartbeat both call
+        # intraday_scan(), so the same minute could scan twice (doubling
+        # REST candle calls and risking duplicate entries). One scan/min max.
+        self._last_scan_ts: datetime | None = None
+        self._scan_min_interval_sec: float = 55.0
         # === ML INFERENCE GATE — LightGBM win-probability gate ===
         self.ml_gate = TigerMLGate(
             model_path=ML_ENGINE["MODEL_PATH"],
@@ -1721,6 +1726,19 @@ class TigerLiveRunner:
             logger.debug("Scan already running — skip this cycle.")
             return
         try:
+            # Dedup: heartbeat and the 1-min scheduler job both trigger a
+            # scan. Skip if a scan already ran within the min interval so a
+            # single minute never scans twice (was doubling REST/REST-like
+            # candle calls and could place duplicate entries).
+            now_ts = datetime.now()
+            if self._last_scan_ts is not None:
+                since = (now_ts - self._last_scan_ts).total_seconds()
+                if since < self._scan_min_interval_sec:
+                    logger.debug(
+                        "Scan dedup — ran %.0fs ago (<%.0fs), skip.",
+                        since, self._scan_min_interval_sec)
+                    return
+            self._last_scan_ts = now_ts
             self._intraday_scan_inner()
         finally:
             self._scan_lock.release()

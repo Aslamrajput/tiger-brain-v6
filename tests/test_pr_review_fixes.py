@@ -203,3 +203,107 @@ class TestMCXSessionThresholds:
         names = {SESSION_COMMODITY_DAY, SESSION_COMMODITY_OPEN, SESSION_NIGHT_RUSH}
         for cfg in [s for s in SESSION_SCHEDULE if s.name in names]:
             assert cfg.score_threshold <= ROCKET_MIN_SCORE
+
+
+# ============================================================
+# Issue 1b: get_positions None-safety (square-off crash)
+# ============================================================
+
+class TestGetPositionsNoneSafety:
+    """Angel One returns {"data": null} when there are no open positions.
+    `pos.get("data", [])` does NOT fall back (the key exists with value None),
+    so get_positions() returned None and square_off_all crashed with
+    "'NoneType' object is not iterable" — leaving positions unclosed.
+    """
+
+    def _broker_with_position_response(self, response):
+        from broker.angel_connect import AngelBroker
+        b = AngelBroker.__new__(AngelBroker)
+        b._token_healthy = True
+        b._last_relogin_attempt = None
+        b.ensure_logged_in = lambda: None
+        b.smart_api = MagicMock()
+        b.smart_api.position.return_value = response
+        return b
+
+    def test_null_data_returns_empty_list(self):
+        b = self._broker_with_position_response({"data": None})
+        assert b.get_positions() == []
+
+    def test_missing_data_key_returns_empty_list(self):
+        b = self._broker_with_position_response({})
+        assert b.get_positions() == []
+
+    def test_empty_response_returns_empty_list(self):
+        b = self._broker_with_position_response(None)
+        assert b.get_positions() == []
+
+    def test_real_positions_returned_intact(self):
+        pos = [{"tradingsymbol": "X", "symboltoken": "1",
+                "exchange": "NFO", "netqty": 10, "producttype": "INTRADAY"}]
+        b = self._broker_with_position_response({"data": pos})
+        assert b.get_positions() == pos
+
+    def test_square_off_all_no_crash_on_null_data(self):
+        from broker.angel_connect import AngelBroker
+        b = self._broker_with_position_response({"data": None})
+        b.place_option_order = MagicMock()
+        # Must not raise "'NoneType' object is not iterable"
+        assert b.square_off_all() == 0
+        b.place_option_order.assert_not_called()
+
+
+# ============================================================
+# Scan dedup — heartbeat + scheduler both trigger intraday_scan
+# ============================================================
+
+class TestScanDedup:
+    """apscheduler's 1-min job and the 60s heartbeat loop both call
+    intraday_scan(). Live log showed two full scans in one minute
+    (e.g. 12:01:00 heartbeat + 12:01:21 scheduler). The dedup guard must
+    allow at most one scan per minute so REST candle calls don't double.
+    """
+
+    def _runner(self):
+        from automation.tiger_live import TigerLiveRunner
+        import threading
+        r = TigerLiveRunner.__new__(TigerLiveRunner)
+        r._scan_lock = threading.Lock()
+        r._last_scan_ts = None
+        r._scan_min_interval_sec = 55.0
+        r.calls = 0
+
+        def fake_inner():
+            r.calls += 1
+        r._intraday_scan_inner = fake_inner
+        return r
+
+    def test_first_scan_runs(self):
+        r = self._runner()
+        r.intraday_scan()
+        assert r.calls == 1
+
+    def test_second_scan_within_interval_is_skipped(self):
+        r = self._runner()
+        r.intraday_scan()
+        r.intraday_scan()  # immediately again — must be deduped
+        assert r.calls == 1
+
+    def test_scan_runs_again_after_interval_elapses(self):
+        from datetime import datetime, timedelta
+        r = self._runner()
+        r.intraday_scan()
+        r._last_scan_ts = datetime.now() - timedelta(seconds=60)
+        r.intraday_scan()
+        assert r.calls == 2
+
+    def test_concurrent_scan_is_skipped_by_lock(self):
+        import threading
+        r = self._runner()
+        r._scan_lock.acquire()  # simulate an in-flight scan
+        try:
+            r.intraday_scan()
+        finally:
+            r._scan_lock.release()
+        assert r.calls == 0
+
