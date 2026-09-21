@@ -203,3 +203,52 @@ class TestMCXSessionThresholds:
         names = {SESSION_COMMODITY_DAY, SESSION_COMMODITY_OPEN, SESSION_NIGHT_RUSH}
         for cfg in [s for s in SESSION_SCHEDULE if s.name in names]:
             assert cfg.score_threshold <= ROCKET_MIN_SCORE
+
+
+# ============================================================
+# Issue 1b: get_positions None-safety (square-off crash)
+# ============================================================
+
+class TestGetPositionsNoneSafety:
+    """Angel One returns {"data": null} when there are no open positions.
+    `pos.get("data", [])` does NOT fall back (the key exists with value None),
+    so get_positions() returned None and square_off_all crashed with
+    "'NoneType' object is not iterable" — leaving positions unclosed.
+    """
+
+    def _broker_with_position_response(self, response):
+        from broker.angel_connect import AngelBroker
+        b = AngelBroker.__new__(AngelBroker)
+        b._token_healthy = True
+        b._last_relogin_attempt = None
+        b.ensure_logged_in = lambda: None
+        b.smart_api = MagicMock()
+        b.smart_api.position.return_value = response
+        return b
+
+    def test_null_data_returns_empty_list(self):
+        b = self._broker_with_position_response({"data": None})
+        assert b.get_positions() == []
+
+    def test_missing_data_key_returns_empty_list(self):
+        b = self._broker_with_position_response({})
+        assert b.get_positions() == []
+
+    def test_empty_response_returns_empty_list(self):
+        b = self._broker_with_position_response(None)
+        assert b.get_positions() == []
+
+    def test_real_positions_returned_intact(self):
+        pos = [{"tradingsymbol": "X", "symboltoken": "1",
+                "exchange": "NFO", "netqty": 10, "producttype": "INTRADAY"}]
+        b = self._broker_with_position_response({"data": pos})
+        assert b.get_positions() == pos
+
+    def test_square_off_all_no_crash_on_null_data(self):
+        from broker.angel_connect import AngelBroker
+        b = self._broker_with_position_response({"data": None})
+        b.place_option_order = MagicMock()
+        # Must not raise "'NoneType' object is not iterable"
+        assert b.square_off_all() == 0
+        b.place_option_order.assert_not_called()
+

@@ -586,7 +586,7 @@ class AngelBroker:
                 self._token_healthy = False
                 if self._auto_relogin():
                     pos = self.smart_api.position()
-            return pos.get("data", []) if pos else []
+            return (pos.get("data") or []) if pos else []
         except Exception as exc:
             if self._is_token_error(exc):
                 logger.warning("Positions exception is token error — auto re-login...")
@@ -594,7 +594,7 @@ class AngelBroker:
                 if self._auto_relogin():
                     try:
                         pos = self.smart_api.position()
-                        return pos.get("data", []) if pos else []
+                        return (pos.get("data") or []) if pos else []
                     except Exception as exc2:
                         logger.warning(f"Positions retry fail: {exc2}")
             logger.warning(f"Position fetch fail: {exc}")
@@ -613,7 +613,7 @@ class AngelBroker:
 
         Returns: how many positions were attempted to be closed.
         """
-        positions = self.get_positions()
+        positions = self.get_positions() or []
         closed = 0
         for p in positions:
             sym = p.get("tradingsymbol", "")
