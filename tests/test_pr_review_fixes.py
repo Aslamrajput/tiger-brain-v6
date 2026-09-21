@@ -252,3 +252,58 @@ class TestGetPositionsNoneSafety:
         assert b.square_off_all() == 0
         b.place_option_order.assert_not_called()
 
+
+# ============================================================
+# Scan dedup — heartbeat + scheduler both trigger intraday_scan
+# ============================================================
+
+class TestScanDedup:
+    """apscheduler's 1-min job and the 60s heartbeat loop both call
+    intraday_scan(). Live log showed two full scans in one minute
+    (e.g. 12:01:00 heartbeat + 12:01:21 scheduler). The dedup guard must
+    allow at most one scan per minute so REST candle calls don't double.
+    """
+
+    def _runner(self):
+        from automation.tiger_live import TigerLiveRunner
+        import threading
+        r = TigerLiveRunner.__new__(TigerLiveRunner)
+        r._scan_lock = threading.Lock()
+        r._last_scan_ts = None
+        r._scan_min_interval_sec = 55.0
+        r.calls = 0
+
+        def fake_inner():
+            r.calls += 1
+        r._intraday_scan_inner = fake_inner
+        return r
+
+    def test_first_scan_runs(self):
+        r = self._runner()
+        r.intraday_scan()
+        assert r.calls == 1
+
+    def test_second_scan_within_interval_is_skipped(self):
+        r = self._runner()
+        r.intraday_scan()
+        r.intraday_scan()  # immediately again — must be deduped
+        assert r.calls == 1
+
+    def test_scan_runs_again_after_interval_elapses(self):
+        from datetime import datetime, timedelta
+        r = self._runner()
+        r.intraday_scan()
+        r._last_scan_ts = datetime.now() - timedelta(seconds=60)
+        r.intraday_scan()
+        assert r.calls == 2
+
+    def test_concurrent_scan_is_skipped_by_lock(self):
+        import threading
+        r = self._runner()
+        r._scan_lock.acquire()  # simulate an in-flight scan
+        try:
+            r.intraday_scan()
+        finally:
+            r._scan_lock.release()
+        assert r.calls == 0
+
