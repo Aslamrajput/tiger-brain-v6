@@ -365,9 +365,16 @@ def scan_mcx(data_map_5m: dict[str, pd.DataFrame],
         fvg = detect_fvg(df, i)
 
         score, zone_type, option_type, direction = _score_zone(bos, sweep, ob, fvg)
-        if score < MIN_ZONE_STRENGTH:
+
+        # Score gate scales with the required component count. Each SMC
+        # component is worth 25 points, so a 2-component setup tops out at 50:
+        # a fixed 80 threshold would make min_components=2 unreachable and the
+        # confluence gate dead config. Required score = full strength * (n/4).
+        components = sum(1 for x in (bos, sweep, ob, fvg) if x is not None)
+        required_score = MIN_ZONE_STRENGTH * min_components / 4.0
+        if score < required_score:
             logger.debug("mcx_scanner: %s score %.0f < %.0f — skip",
-                         symbol, score, MIN_ZONE_STRENGTH)
+                         symbol, score, required_score)
             continue
 
         # === DUAL-MARKET CONFLUENCE GATE ===
@@ -386,9 +393,8 @@ def scan_mcx(data_map_5m: dict[str, pd.DataFrame],
                     "Y" if ob else "N", "Y" if fvg else "N", "Y" if sweep else "N")
                 continue
         else:
-            # MCX: count-based — 3+ of {BOS, sweep, OB, FVG} agreeing.
-            # A true rocket setup needs full confluence, not a weak coincidence.
-            components = sum(1 for x in (bos, sweep, ob, fvg) if x is not None)
+            # MCX: count-based — min_components of {BOS, sweep, OB, FVG} agreeing.
+            # A true rocket setup needs confluence, not a weak coincidence.
             if components < min_components:
                 logger.debug("mcx_scanner[MCX]: %s score %.0f but only %d/%d components — skip (no rocket)",
                              symbol, score, components, min_components)

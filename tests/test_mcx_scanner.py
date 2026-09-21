@@ -350,6 +350,39 @@ class TestScanMCX:
 
 
 # ─────────────────────────────────────────────────────────
+# SCORE-GATE SCALING (2-component confluence reachability)
+# ─────────────────────────────────────────────────────────
+class TestScoreGateScaling:
+    """Regression: a fixed MIN_ZONE_STRENGTH=80 gate runs BEFORE the confluence
+    count gate, but each SMC component is worth only 25 points — so a
+    2-component setup tops out at 50 and could never satisfy 80. That made
+    min_components=2 dead config and blocked every MCX commodity entry. The
+    score gate must scale with the required component count."""
+
+    def test_two_components_score_below_legacy_gate(self):
+        from subbrains.mcx_scanner import _score_zone
+        d = {"direction": "bullish", "top": 10, "bottom": 9, "size": 0.5}
+        score, _, _, _ = _score_zone(None, None, d, d)
+        assert score == 50.0  # OB+FVG only — below the old fixed 80 gate
+
+    def test_two_component_zone_reachable_on_mcx_path(self):
+        """The MCX path (config MIN_CONFLUENCE_COMPONENTS=2) must let a
+        2-component zone through. Before the scaling fix a score of 50 was
+        rejected by the fixed 80 gate, so no commodity ever triggered."""
+        from subbrains.mcx_scanner import scan_mcx
+        df = _synthetic_5m(n=40, start=7000, seed=11)
+        last = df.index[-1]
+        # 2-component setup: BOS + FVG only (no sweep, no OB)
+        df.loc[last, "close"] = df.iloc[:-1]["high"].max() + 50  # BOS up
+        df.loc[last, "high"] = df.iloc[:-1]["high"].max() + 55
+        df.iloc[-3, df.columns.get_loc("high")] = df.iloc[-3]["low"]
+        df.iloc[-1, df.columns.get_loc("low")] = df.iloc[-3]["high"] + 10
+        zone = scan_mcx({"CRUDEOIL": df}, allowed={"CRUDEOIL"}, market="MCX")
+        assert zone is not None
+        assert zone.zone_strength == 50.0
+
+
+# ─────────────────────────────────────────────────────────
 # MCX universe
 # ─────────────────────────────────────────────────────────
 class TestMCXUniverse:

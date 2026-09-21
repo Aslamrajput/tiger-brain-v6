@@ -21,6 +21,7 @@ import signal
 import sys
 import time
 from datetime import datetime, timedelta
+from typing import Optional
 
 import pandas as pd
 
@@ -1455,6 +1456,9 @@ class TigerLiveRunner:
             if tracker.get("is_sniper", False) or tsym in getattr(self, "_sniper_positions", set()):
                 from config.thresholds import SNIPER as _SNIPER_CFG
                 from subbrains.mcx_scanner import detect_bos as _sniper_detect_bos
+                # Option type for the 5m opposite-BOS check — derived from the
+                # tradingsymbol (…CE/…PE) since the exit loop has no signal dict.
+                option_type = "PE" if tsym.upper().endswith("PE") else "CE"
                 exit_reason = None
                 exit_qty = qty
 
