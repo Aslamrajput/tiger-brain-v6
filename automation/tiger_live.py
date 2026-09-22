@@ -2531,7 +2531,12 @@ class TigerLiveRunner:
 
             # LIMIT order at LTP + small buffer for fill — prevents overpaying.
             # MARKET orders on low-liquidity options fill at worst price.
-            limit_price = round(real_ltp * 1.02, 2)  # 2% buffer for fill
+            # Round to tick size — exchange rejects prices not matching tick.
+            _tick = 0.05 if contract["exchange"] == "NFO" else 0.10
+            _raw = real_ltp * 1.02
+            limit_price = round(_raw / _tick) * _tick
+            # Fix float precision (221.54000... → 221.5)
+            limit_price = round(limit_price, 2)
             result = self.broker.place_option_order(
                 tradingsymbol=contract["tradingsymbol"],
                 symboltoken=contract["symboltoken"],
