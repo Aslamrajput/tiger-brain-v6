@@ -624,10 +624,19 @@ class TigerLiveRunner:
         o = float(row.get("open", 0) or 0)
         c = float(row.get("close", 0) or 0)
 
-        # Direction check: CE needs green candle, PE needs red candle
+        # Direction check: CE needs green candle, PE needs red candle.
+        # A doji/neutral candle (open≈close) does NOT block — only an
+        # OPPOSITE-direction candle blocks. This prevents Tiger from
+        # dying on flat 1m bars that are neither green nor red.
         is_ce = option_type.upper() == "CE"
         candle_green = c > o
         candle_red = c < o
+        is_neutral = not candle_green and not candle_red
+
+        if is_neutral:
+            # Neutral candle — don't block, let the signal through
+            return True
+
         direction_ok = (is_ce and candle_green) or (not is_ce and candle_red)
 
         if not direction_ok:
@@ -719,13 +728,16 @@ class TigerLiveRunner:
 
         is_ce = option_type.upper() == "CE"
 
-        # 1) OB RETEST — recent 1m low (CE) / high (PE) must have touched the OB
+        # 1) OB RETEST — recent 1m low (CE) / high (PE) must have touched the OB.
+        # Tolerance widened from 0.2 to 0.5 (50% of OB height) — the tight 20%
+        # tolerance rarely matched in live MCX data, killing valid entries.
         recent_lows = window["low"].astype(float)
         recent_highs = window["high"].astype(float)
+        ob_height = max(ob_top - ob_bottom, 0.001)
         if is_ce:
-            retested = bool((recent_lows <= ob_top + (ob_top - ob_bottom) * 0.2).any())
+            retested = bool((recent_lows <= ob_top + ob_height * 0.5).any())
         else:
-            retested = bool((recent_highs >= ob_bottom - (ob_top - ob_bottom) * 0.2).any())
+            retested = bool((recent_highs >= ob_bottom - ob_height * 0.5).any())
         if not retested:
             return False, "OB not retested on 1m"
 

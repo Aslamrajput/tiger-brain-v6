@@ -495,7 +495,7 @@ ML_ENGINE = {
 # ============================================================
 SNIPER = {
     "MAX_TRADES_PER_DAY": 3,        # sniper doesn't overtrade
-    "MIN_ZONE_STRENGTH": 80.0,      # only zones with SMC confluence > 80
+    "MIN_ZONE_STRENGTH": 50.0,      # was 80 — too strict, killed all live MCX zones
     "MIN_WIN_PROB": 0.80,           # ML conviction gate (high only)
     # === MCX high-volume session — 10:30 AM to 11:30 PM IST ===
     "SESSION_START": "10:30",

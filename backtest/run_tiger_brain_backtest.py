@@ -1112,9 +1112,15 @@ def find_tiger_brain_entry_15m(df_15m, i_15m, seg, is_expiry, symbol, vix_val,
         if is_compressed: confluence_count += 1
 
         # Relaxed rocket gate for 15m-only path
+        # ROCKET GATE → ADVISORY: is_rocket adds to score, doesn't block.
+        # Zone touch + volume confirmation is sufficient to generate a signal.
+        # The hard 'continue' killed nearly all live signals — Tiger was
+        # paralyzed waiting for perfect multi-confluence setups that rarely
+        # align in real-time. Now Tiger trades on zone+vol, rocket is a bonus.
         is_rocket = confluence_count >= 3
-        if not is_rocket and not force_hunt:
-            continue
+        if is_rocket:
+            score += 10  # rocket bonus boosts ranking, not gates
+            score_details.append(f"rocket-15m(+10)")
         if score < min_score - 6:  # relaxed by 6 for 15m-only
             continue
 
@@ -1317,13 +1323,16 @@ def find_tiger_brain_entry(df_15m, i_15m, df_1m, seg, is_expiry, symbol,
                 confluence_count = 0
                 is_rocket = False
 
-            # === ROCKET GATE: only true rockets pass (50/100 filter) ===
-            if not is_rocket and not force_hunt:
-                continue
-            if score < min_score:
-                continue
-
-            # === MINIMUM SCORE CHECK (legacy floor, now superseded by rocket gate) ===
+            # === ROCKET GATE → ADVISORY (was hard block — #1 trade killer) ===
+            # is_rocket is now a score booster, NOT a gate. Zone touch +
+            # volume confirmation is sufficient to generate a signal. The
+            # hard 'continue' here killed nearly all live signals because
+            # multi-confluence setups rarely align perfectly in real-time.
+            # Tiger trades on zone+vol; rocket confluence boosts the score
+            # for ranking but never blocks.
+            if is_rocket:
+                score += 10
+                score_details.append("rocket-confirmed(+10)")
             if score < min_score:
                 continue
 

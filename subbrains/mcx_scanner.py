@@ -46,7 +46,7 @@ MCX_SYMBOLS: dict[str, str] = {
 
 # Confluence weights — sum to 100.
 _WEIGHTS = {"bos": 25, "sweep": 25, "ob": 25, "fvg": 25}
-MIN_ZONE_STRENGTH = 80.0
+MIN_ZONE_STRENGTH = 50.0  # was 80 — too strict for live, killed all MCX zones
 
 
 # ─────────────────────────────────────────────────────────────────
