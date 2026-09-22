@@ -2262,13 +2262,25 @@ class TigerLiveRunner:
             # it catches CHEAP strikes that rocket (₹36 → ₹160).
             # ADAPTIVE steps: large-lot commodities (CRUDEOIL lot=100,
             # NATURALGAS lot=1250) need deeper OTM for affordability.
+            # CAPITAL PRE-CHECK: use REAL free disposable (not total balance)
+            # so the OTM fallback finds strikes that fit the actual free margin.
+            _pre_cap = CapitalManager(self.broker).check_and_allocate(
+                setup_score=t.get("setup_score", 50.0),
+                brain_alignment=count_aligned_brains(t),
+                trade_cost_estimate=one_lot_cost,
+                open_positions_cost=current_exposure,
+                min_allocation=one_lot_cost,
+                open_position_count=open_position_count,
+            )
+            _free_capital = _pre_cap.free_disposable if _pre_cap else available_balance
+            _trade_capital = min(_free_capital, available_balance) if _free_capital > 0 else available_balance
             otm_steps = 3 if real_lot_size <= 50 else 20
-            if one_lot_cost > available_balance:
+            if one_lot_cost > _trade_capital:
                 affordable = find_affordable_option(
                     underlying=symbol,
                     atm_strike=float(strike),
                     option_type=option_type,
-                    balance=available_balance * 0.92,  # 8% buffer for broker margin/charges
+                    balance=_trade_capital * 0.92,  # 8% buffer for broker margin/charges
                     broker=self.broker,
                     max_otm_steps=otm_steps,
                     min_delta=0.02,  # deep OTM cheap options — user wants cheap, not high-delta
@@ -2292,7 +2304,7 @@ class TigerLiveRunner:
                 else:
                     logger.info(
                         f"   ❌ NO AFFORDABLE STRIKE — {symbol} {strike}{option_type} "
-                        f"min 1 lot ₹{one_lot_cost:,.0f} > balance ₹{available_balance:,.0f}, "
+                        f"min 1 lot ₹{one_lot_cost:,.0f} > free capital ₹{_trade_capital:,.0f}, "
                         f"no OTM strike affordable within {otm_steps} steps")
 
             # 🔥 FUND BRAIN LIVE SIZING — real balance + real LTP + real lot
