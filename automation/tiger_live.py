@@ -2268,7 +2268,7 @@ class TigerLiveRunner:
                     underlying=symbol,
                     atm_strike=float(strike),
                     option_type=option_type,
-                    balance=available_balance,
+                    balance=available_balance * 0.92,  # 8% buffer for broker margin/charges
                     broker=self.broker,
                     max_otm_steps=otm_steps,
                 )
