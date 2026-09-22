@@ -318,6 +318,17 @@ def size_trade_with_fund_brain(
     loss_per_lot = stop_per_unit * lot
     lots = max(1, int(capital_available // (entry_premium * lot)))
 
+    # EXCHANGE FREEZE QUANTITY GUARD — Angel rejects orders exceeding
+    # exchange max (SILVERM max=600 qty, CRUDEOIL max=600, etc.).
+    # Cap lots at 20 for MCX commodities, 50 for NSE indices/stocks.
+    # Without this, Tiger sizes 1600+ lots → "exceeds maximum limit" reject.
+    max_lots = 50 if lot <= 50 else 20  # NSE small lots → 50; MCX big lots → 20
+    if lots > max_lots:
+        logger.info(
+            f"   ⚠️ Exchange qty guard: {lots} lots → capped to {max_lots} "
+            f"(lot={lot}, exchange freeze limit)")
+        lots = max_lots
+
     quantity = lots * lot
     allocated_capital = quantity * entry_premium
     max_loss = stop_per_unit * quantity

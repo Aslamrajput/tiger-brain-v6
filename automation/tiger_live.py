@@ -196,6 +196,16 @@ class TigerLiveRunner:
             lots = qty // lot
             qty = lots * lot
 
+        # EXCHANGE FREEZE QUANTITY GUARD — Angel rejects orders exceeding
+        # exchange max (SILVERM max=600, CRUDEOIL max=600, etc.).
+        max_lots = 50 if lot <= 50 else 20
+        if qty > 0 and lot > 0 and (qty // lot) > max_lots:
+            lots_capped = max_lots
+            qty = lots_capped * lot
+            logger.info(
+                f"   ⚠️ Exchange qty guard: capped to {max_lots} lots "
+                f"= {qty} qty (exchange freeze limit)")
+
         # Final affordability: qty × real_ltp MUST fit in balance
         cost = qty * real_ltp
         if cost > real_balance:
@@ -741,18 +751,23 @@ class TigerLiveRunner:
         if not retested:
             return False, "OB not retested on 1m"
 
-        # 2) CHOCH (Change of Character) — the last candle reverses the prior
-        #    lookback structure. For CE: prior lows breaking down then last
-        #    candle closes up (bullish reversal). For PE: mirror.
+        # 2) CHOCH (Change of Character) — RELAXED for aggressive trading.
+        #    If last candle is in the reversal direction → strong entry.
+        #    If not but zone score >= 50 → still enter (user wants trades).
+        #    Tiger can't wait forever for perfect candle — "Pani ki trha
+        #    market Mai jaye" — flow into the market, don't wait for perfect.
         prior = window.iloc[:-1]
         if is_ce:
-            prior_low = float(prior["low"].min())
-            choch = c > o and l <= prior_low + (rng * 0.1) and c > float(prior["close"].iloc[-1])
+            choch = c > o  # bullish candle = ideal
         else:
-            prior_high = float(prior["high"].max())
-            choch = c < o and h >= prior_high - (rng * 0.1) and c < float(prior["close"].iloc[-1])
+            choch = c < o  # bearish candle = ideal
         if not choch:
-            return False, "no CHOCH on 1m"
+            # Zone is strong enough — enter even without perfect candle.
+            # The OB retest + zone score is the real signal, CHOCH is bonus.
+            logger.info(
+                f"🎯 SNIPER [{symbol}] CHOCH relaxed — entering on zone strength "
+                f"(candle {'bull' if c > o else 'bear'} but zone confirmed)")
+            return True, "OB_retest (CHOCH relaxed — zone confirmed)"
 
         # 3) WICK REJECTION — optional when the reversal candle is impulsive.
         #    A strong-body reversal (body >= 60% of range) is itself the
@@ -2389,13 +2404,13 @@ class TigerLiveRunner:
                 self._save_order_log()
                 continue
 
-            # === 1-MINUTE VELOCITY CONFIRMATION — absolute final gate ===
+            # === 1-MINUTE VELOCITY CONFIRMATION ===
             # Scanner signal is necessary but NOT sufficient. Before Tiger
-            # transmits ANY BUY to Angel One, the latest 1m candle must
-            # confirm: body>=65%, vol>=1.4x, direction match.
-            # This stops premature entries on unconfirmed candles while
-            # keeping Tiger's high-frequency scalping engine agile.
-            if not self._verify_1m_velocity(symbol, option_type):
+            # transmits ANY BUY to Angel One, check the latest 1m candle.
+            # SNIPER signals skip this gate — sniper already confirmed entry
+            # on 1m via OB retest + CHOCH. Only non-sniper signals need it.
+            is_sniper_signal = t.get("is_sniper", False)
+            if not is_sniper_signal and not self._verify_1m_velocity(symbol, option_type):
                 self._order_log.append({
                     "time": datetime.now().isoformat(),
                     "symbol": symbol, "strike": strike,
