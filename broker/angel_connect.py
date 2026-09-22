@@ -347,6 +347,14 @@ class AngelBroker:
         """
         self.ensure_logged_in()
         try:
+            # Rate-limit gate — Angel REST ke 3 req/sec limit ke neeche raho.
+            # find_affordable_option multiple strikes ke liye get_ltp call karta
+            # hai — ek saath 4-5 calls rate limit tod dete the.
+            try:
+                from data.loader import _angel_rate_limit_gate
+                _angel_rate_limit_gate()
+            except Exception:
+                pass  # import fail = no throttle (best effort)
             resp = self.smart_api.ltpData(
                 exchange, tradingsymbol, str(symboltoken))
             if not resp or not resp.get("data"):

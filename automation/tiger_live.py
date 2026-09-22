@@ -861,27 +861,43 @@ class TigerLiveRunner:
 
         # Build 5m candles from 1m data (resample) for each symbol in universe
         data_map_5m: dict = {}
+        skipped = 0
         for sym in universe:
             df_1m = self.data_map_1m.get(sym)
-            if df_1m is not None and not df_1m.empty and len(df_1m) >= 30:
-                try:
-                    df_5m = df_1m.resample("5min").agg({
-                        "open": "first", "high": "max",
-                        "low": "min", "close": "last",
-                        "volume": "sum",
-                    }).dropna()
-                    if len(df_5m) >= 25:
-                        data_map_5m[sym] = df_5m
-                except Exception:
-                    pass
+            if df_1m is None or df_1m.empty:
+                skipped += 1
+                continue
+            if len(df_1m) < 30:
+                skipped += 1
+                continue
+            try:
+                # Ensure DatetimeIndex for resample (tz fix: some 1m DataFrames
+                # have plain Index after merge — resample silently fails).
+                if not hasattr(df_1m.index, 'freq') and not isinstance(df_1m.index, pd.DatetimeIndex):
+                    df_1m = df_1m.copy()
+                    df_1m.index = pd.to_datetime(df_1m.index, errors='coerce')
+                    df_1m = df_1m.dropna()  # drop rows with NaT index
+                df_5m = df_1m.resample("5min").agg({
+                    "open": "first", "high": "max",
+                    "low": "min", "close": "last",
+                    "volume": "sum",
+                }).dropna()
+                if len(df_5m) >= 25:
+                    data_map_5m[sym] = df_5m
+            except Exception as exc:
+                logger.debug(f"🎯 SNIPER [{market}] 5m build fail {sym}: {exc}")
         if not data_map_5m:
-            logger.debug(f"🎯 SNIPER [{market}]: no 5m data built this cycle")
+            logger.info(f"🎯 SNIPER [{market}]: no 5m data ({len(universe)} symbols, "
+                        f"{skipped} skipped, 0 built) — waiting for WS 1m")
             return None
 
         zone = scan_mcx_sniper(data_map_5m, now_ts=datetime.now().isoformat(),
                                min_components=min_components, allowed=universe,
                                market=market)
         if zone is None:
+            logger.info(f"🎯 SNIPER [{market}]: NO_TRADE — "
+                        f"{len(data_map_5m)} symbols scanned, no zone > "
+                        f"{SNIPER.get('MIN_ZONE_STRENGTH', 50):.0f}")
             return None
 
         sig = zone.to_signal()
