@@ -2271,6 +2271,7 @@ class TigerLiveRunner:
                     balance=available_balance * 0.92,  # 8% buffer for broker margin/charges
                     broker=self.broker,
                     max_otm_steps=otm_steps,
+                    min_delta=0.02,  # deep OTM cheap options — user wants cheap, not high-delta
                 )
                 if affordable is not None:
                     logger.info(
