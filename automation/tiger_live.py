@@ -734,7 +734,18 @@ class TigerLiveRunner:
         h, l = float(last["high"]), float(last["low"])
         rng = h - l
         if rng <= 0:
-            return False, "zero-range 1m candle"
+            # Zero-range candle = no WS tick yet for this minute.
+            # Don't block — use the PREVIOUS candle instead.
+            if len(window) >= 2:
+                last = window.iloc[-2]
+                o, c = float(last["open"]), float(last["close"])
+                h, l = float(last["high"]), float(last["low"])
+                rng = h - l
+            if rng <= 0:
+                # Still zero — skip retest/CHOCH, enter on zone strength alone
+                logger.info(
+                    f"🎯 SNIPER [{symbol}] zero-range 1m — entering on zone strength")
+                return True, "zone confirmed (1m flat — no tick yet)"
 
         is_ce = option_type.upper() == "CE"
 
@@ -2249,6 +2260,9 @@ class TigerLiveRunner:
             # walk OTM strikes until we find one that fits the balance.
             # This is how Tiger trades MCX with a small account — and how
             # it catches CHEAP strikes that rocket (₹36 → ₹160).
+            # ADAPTIVE steps: large-lot commodities (CRUDEOIL lot=100,
+            # NATURALGAS lot=1250) need deeper OTM for affordability.
+            otm_steps = 3 if real_lot_size <= 50 else 10
             if one_lot_cost > available_balance:
                 affordable = find_affordable_option(
                     underlying=symbol,
@@ -2256,6 +2270,7 @@ class TigerLiveRunner:
                     option_type=option_type,
                     balance=available_balance,
                     broker=self.broker,
+                    max_otm_steps=otm_steps,
                 )
                 if affordable is not None:
                     logger.info(
@@ -2277,7 +2292,7 @@ class TigerLiveRunner:
                     logger.info(
                         f"   ❌ NO AFFORDABLE STRIKE — {symbol} {strike}{option_type} "
                         f"min 1 lot ₹{one_lot_cost:,.0f} > balance ₹{available_balance:,.0f}, "
-                        f"no OTM strike affordable within 3 steps")
+                        f"no OTM strike affordable within {otm_steps} steps")
 
             # 🔥 FUND BRAIN LIVE SIZING — real balance + real LTP + real lot
             re_size = self._live_re_size(
