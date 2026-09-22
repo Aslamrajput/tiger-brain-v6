@@ -4,6 +4,22 @@
 Algorithmic trading platform for pure intraday Call/Put options buying on NSE/MCX.
 Core strategy: pure Supply/Demand zones (no VWAP/RS/EMA/Black-Scholes).
 
+## Angel Rate-Limit Hardening (Sep 22 2026 - permanent fix)
+Root cause of the recurring "VELOCITY BLOCK + 429 burst": the startup REST
+candle fetch covers the full 27-symbol NSE+MCX universe (2 calls/symbol),
+whose burst trips Angel's rate limit; when the final symbol's 1m fetch
+failed it was velocity-blocked on every scan (55x KOTAKBANK on Sep 22).
+- ANGEL_MIN_CALL_INTERVAL_SEC = 0.45 (~2.2 req/sec, safe under 3/sec).
+- ANGEL_MAX_RETRIES = 4, ANGEL_RETRY_BACKOFF_SEC = 1.0 -> exponential
+  backoff 1s/2s/4s on 429 (never an immediate retry).
+- MAX_CANDLES_PER_SCAN = 15 (config/thresholds.py): caps the per-scan REST
+  burst, indices first (4 index + 11 stocks). WS still streams all symbols.
+- _backfill_1m_for_symbol() in tiger_live.py: on-demand gated single-symbol
+  1m fetch (once/day/symbol) so a missing-1m symbol never dies at the
+  velocity gate again.
+- Log labels are unambiguous: RATE_LIMIT_HIT (retryable) vs NO_DATA (empty).
+Evidence: rate errors occur only in restart bursts (~0/min steady state).
+
 ## Momentum Hunter (Sep 2026)
 New module `subbrains/momentum_hunter.py` — Tiger's 3rd hunting layer:
 - ORB Breakout (9:15-9:30 range breakout with volume)

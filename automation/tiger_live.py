@@ -142,6 +142,9 @@ class TigerLiveRunner:
         # scan per _scan_min_interval_sec.
         self._last_scan_ts: datetime | None = None
         self._scan_min_interval_sec: float = 30.0
+        # On-demand 1m backfill ledger: symbol -> date of last attempt, so a
+        # symbol missing 1m data is fetched at most once per day.
+        self._1m_backfill_attempted: dict = {}
         # === ML INFERENCE GATE — LightGBM win-probability gate ===
         self.ml_gate = TigerMLGate(
             model_path=ML_ENGINE["MODEL_PATH"],
@@ -564,6 +567,34 @@ class TigerLiveRunner:
     # ============================================================
     # 1-MINUTE VELOCITY CONFIRMATION — final gate before order
     # ============================================================
+    def _backfill_1m_for_symbol(self, symbol: str):
+        """Fetch this symbol's 1m candles on demand (rate-gated, single call).
+
+        Returns the fetched DataFrame (also cached into data_map_1m) or None.
+        Returns None after the first failed attempt for the day so a symbol
+        with genuinely no data doesn't burn a REST call on every scan.
+        """
+        today = datetime.now().date()
+        if self._1m_backfill_attempted.get(symbol) == today:
+            return None
+        self._1m_backfill_attempted[symbol] = today
+        if self.broker is None or self.broker.smart_api is None:
+            return None
+        try:
+            from data.loader import fetch_angel_underlying_candles
+            df = fetch_angel_underlying_candles(
+                self.broker, symbol, "ONE_MINUTE", days=2)
+            if df is not None and not df.empty:
+                from backtest.run_tiger_brain_backtest import _normalize_cols
+                df = _normalize_cols(df)
+                self.data_map_1m[symbol] = df
+                logger.info("1m backfill OK %s (%d rows)", symbol, len(df))
+                return df
+            logger.info("NO_DATA 1m backfill empty %s", symbol)
+        except Exception as exc:
+            logger.warning("1m backfill fail %s: %s", symbol, exc)
+        return None
+
     def _verify_1m_velocity(self, symbol: str, option_type: str) -> bool:
         """Final entry-confirmation gate using the LATEST 1-minute candle.
 
@@ -577,8 +608,14 @@ class TigerLiveRunner:
         """
         df_1m = self.data_map_1m.get(symbol)
         if df_1m is None or df_1m.empty:
+            # Last-chance on-demand backfill: startup REST fetch may have
+            # skipped this symbol (rate-limit cap/burst). A single gated
+            # 1m fetch here permanently prevents the "no 1m data" block
+            # instead of letting the signal die every scan.
+            df_1m = self._backfill_1m_for_symbol(symbol)
+        if df_1m is None or df_1m.empty:
             logger.info(
-                f"🚫 VELOCITY BLOCK {symbol} — no 1m data available, "
+                f"NO_DATA VELOCITY BLOCK {symbol} — no 1m data available, "
                 f"cannot confirm entry")
             return False
 

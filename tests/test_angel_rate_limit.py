@@ -89,8 +89,8 @@ def test_backoff_grows_exponentially(no_real_sleep):
             broker, {"fromdate": "a", "todate": "b"}, max_retries=4
         )
 
-    # backoff_sec * 2^attempt → 3.0, 6.0, 12.0 (ANGEL_RETRY_BACKOFF_SEC=3.0)
-    assert no_real_sleep == [3.0, 6.0, 12.0]
+    # backoff_sec * 2^attempt → 1.0, 2.0, 4.0 (ANGEL_RETRY_BACKOFF_SEC=1.0)
+    assert no_real_sleep == [1.0, 2.0, 4.0]
 
 
 def test_non_rate_limit_error_is_not_retried(no_real_sleep):
@@ -161,14 +161,28 @@ class TestGlobalCandleRateGate:
     under Angel's ~3 req/sec limit instead of bursting and getting denied."""
 
     def test_constants_keep_under_three_per_second(self):
-        # interval must be >= 0.34s to stay under ~3 requests/sec.
+        # interval must stay >= 0.30s to remain under ~3 requests/sec, and
+        # is tuned to 0.45s (~2.2 req/sec) as the safe sweet spot.
         # Read the real value from source (the autouse fixture zeroes it).
         import re
         from pathlib import Path
         src = (Path(__file__).resolve().parent.parent / "data" / "loader.py").read_text()
         m = re.search(r"^ANGEL_MIN_CALL_INTERVAL_SEC\s*=\s*([0-9.]+)", src, re.M)
         assert m, "ANGEL_MIN_CALL_INTERVAL_SEC not found"
-        assert float(m.group(1)) >= 0.34
+        assert float(m.group(1)) == pytest.approx(0.45)
+
+    def test_backoff_is_exponential_and_starts_at_one_second(self):
+        # Rate-limit retries must back off exponentially from 1s (1,2,4),
+        # never hammer the API immediately after a 429.
+        import re
+        from pathlib import Path
+        src = (Path(__file__).resolve().parent.parent / "data" / "loader.py").read_text()
+        m = re.search(r"^ANGEL_RETRY_BACKOFF_SEC\s*=\s*([0-9.]+)", src, re.M)
+        assert m, "ANGEL_RETRY_BACKOFF_SEC not found"
+        assert float(m.group(1)) == pytest.approx(1.0)
+        n = re.search(r"^ANGEL_MAX_RETRIES\s*=\s*(\d+)", src, re.M)
+        assert n, "ANGEL_MAX_RETRIES not found"
+        assert int(n.group(1)) == 4  # attempts at 0s, 1s, 2s, 4s
 
     def test_gate_spaces_consecutive_calls(self, monkeypatch):
         slept = []
@@ -191,4 +205,28 @@ class TestGlobalCandleRateGate:
         loader._angel_rate_limit_gate()
         assert slept == []
         monkeypatch.setattr(loader, "_angel_last_call_ts", 0.0)
+
+
+class TestCandleScanCap:
+    """MAX_CANDLES_PER_SCAN caps the per-scan REST candle burst."""
+
+    def test_cap_trims_to_15_with_indices_first(self):
+        from config.thresholds import UNIVERSE
+        from universe.fno_universe import INDEX_SYMBOLS, _apply_candle_cap
+        assert int(UNIVERSE["MAX_CANDLES_PER_SCAN"]) == 15
+
+        symbols = dict(INDEX_SYMBOLS)
+        for i in range(20):
+            symbols[f"STOCK{i}"] = f"STOCK{i}.NS"
+
+        capped = _apply_candle_cap(symbols)
+        assert len(capped) == 15
+        # Every index symbol survives the cap (highest priority).
+        assert all(idx in capped for idx in INDEX_SYMBOLS)
+
+    def test_cap_is_noop_when_under_limit(self):
+        from universe.fno_universe import _apply_candle_cap
+        symbols = {f"S{i}": f"S{i}.NS" for i in range(5)}
+        assert _apply_candle_cap(symbols) == symbols
+
 
