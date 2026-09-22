@@ -1135,12 +1135,21 @@ class TigerLiveRunner:
                 hist_df = self.data_map_1m[sym]
                 ws_idx = ws_df.index
                 hist_idx = hist_df.index
-                if ws_idx.tz is not None and hist_idx.tz is None:
-                    hist_idx = hist_idx.tz_localize(ws_idx.tz)
-                elif ws_idx.tz is None and hist_idx.tz is not None:
-                    ws_idx = ws_idx.tz_localize(hist_idx.tz)
-                elif ws_idx.tz is not None and hist_idx.tz is not None and ws_idx.tz != hist_idx.tz:
-                    ws_idx = ws_idx.tz_convert(hist_idx.tz)
+                # Safe tz handling — some indices may not be DatetimeIndex
+                # (plain Index has no .tz attr → AttributeError crash).
+                # This was the #1 live bug: 677 crashes/day, WS 1m never merged.
+                def _get_tz(idx):
+                    if hasattr(idx, 'tz'):
+                        return idx.tz
+                    return None
+                ws_tz = _get_tz(ws_idx)
+                hist_tz = _get_tz(hist_idx)
+                if ws_tz is not None and hist_tz is None:
+                    hist_idx = hist_idx.tz_localize(ws_tz)
+                elif ws_tz is None and hist_tz is not None:
+                    ws_idx = ws_idx.tz_localize(hist_tz)
+                elif ws_tz is not None and hist_tz is not None and ws_tz != hist_tz:
+                    ws_idx = ws_idx.tz_convert(hist_tz)
                 last_hist_ts = hist_idx[-1]
                 new_bars = ws_df[ws_idx > last_hist_ts]
                 if not new_bars.empty:
