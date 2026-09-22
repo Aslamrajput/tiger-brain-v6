@@ -2262,7 +2262,7 @@ class TigerLiveRunner:
             # it catches CHEAP strikes that rocket (₹36 → ₹160).
             # ADAPTIVE steps: large-lot commodities (CRUDEOIL lot=100,
             # NATURALGAS lot=1250) need deeper OTM for affordability.
-            otm_steps = 3 if real_lot_size <= 50 else 10
+            otm_steps = 3 if real_lot_size <= 50 else 20
             if one_lot_cost > available_balance:
                 affordable = find_affordable_option(
                     underlying=symbol,
