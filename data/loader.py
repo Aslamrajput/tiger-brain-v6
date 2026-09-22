@@ -963,7 +963,7 @@ def find_affordable_option(
     balance: float,
     broker=None,
     max_otm_steps: int = 15,
-    min_delta: float = 0.35,
+    min_delta: float = 0.10,
     iv_crush_warning_pct: float = 50.0,
 ) -> dict | None:
     """Find an affordable option strike — walks OTM until 1 lot fits balance.
@@ -974,7 +974,8 @@ def find_affordable_option(
 
     QUANT GREEKS LAYER:
       - Fetches live IV + Delta from Angel One optionGreek API
-      - Rejects contracts with Delta < min_delta (0.35) — dead zero-delta junk
+      - Rejects contracts with Delta < min_delta (0.10) — only truly dead options rejected
+      - Lower threshold allows cheap OTM options (delta 0.10-0.30) that rocket 200%+
       - Reads ATM IV to measure instant IV crush risk before placement
       - If ATM IV > iv_crush_warning_pct, logs IV crush risk warning
       - Max 15 OTM steps — dynamically balances small accounts (₹4,000-₹8,000)
@@ -987,7 +988,7 @@ def find_affordable_option(
         balance: available capital (₹)
         broker: broker instance for LTP + greeks fetch
         max_otm_steps: max OTM strikes to try before giving up (hard cap 15)
-        min_delta: minimum delta threshold (default 0.35)
+        min_delta: minimum delta threshold (default 0.10 — allows cheap OTM)
         iv_crush_warning_pct: ATM IV % above which IV crush risk is flagged
 
     Returns:

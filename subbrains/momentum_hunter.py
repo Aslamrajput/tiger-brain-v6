@@ -49,12 +49,12 @@ VWAP_RECLAIM_MAX_DIST_PCT = 1.5  # within 1.5% of VWAP after reclaiming
 VWAP_RECLAIM_MIN_VOL_MULT = 1.5  # reclaim candle volume >= 1.5x avg
 
 # === OPTIONS MATH GATE ===
-IV_EXPENSIVE_PERCENTILE = 65.0   # IV > 65th percentile = BLOCKED (overpriced)
+IV_EXPENSIVE_PERCENTILE = 85.0   # IV > 85th percentile = BLOCKED (was 65 — too strict)
 IV_DISCOUNT_BONUS = 5.0          # IV < 35th percentile = +5 score bonus
-DELTA_MIN_BUY = 0.40             # CE delta must be >= 0.40
-DELTA_MAX_BUY = 0.75             # CE delta must be <= 0.75
-DELTA_MIN_SELL = 0.40            # |PE delta| must be >= 0.40
-DELTA_MAX_SELL = 0.75            # |PE delta| must be <= 0.75
+DELTA_MIN_BUY = 0.10             # CE delta must be >= 0.10 (was 0.40 — allows cheap OTM)
+DELTA_MAX_BUY = 0.85             # CE delta must be <= 0.85 (was 0.75 — wider band)
+DELTA_MIN_SELL = 0.10            # |PE delta| must be >= 0.10 (was 0.40)
+DELTA_MAX_SELL = 0.85            # |PE delta| must be <= 0.85 (was 0.75)
 
 
 def _get_opening_range(df_1m: pd.DataFrame, now: datetime) -> tuple[float, float] | None:

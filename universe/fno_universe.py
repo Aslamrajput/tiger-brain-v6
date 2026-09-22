@@ -336,12 +336,10 @@ def get_active_scan_symbols(now=None) -> tuple[dict, str]:
     mcx_active = mcx_open <= current <= mcx_close
 
     if nse_open <= current <= nse_close:
-        # NSE session — scan NSE + MCX simultaneously (MCX already open)
+        # NSE session — scan NSE ONLY (user mandate: don't mix markets).
+        # MCX gets full capital attention after NSE closes at 15:15.
+        # Previously scanned NSE+MCX together — split focus, split capital.
         nse_syms = _apply_candle_cap(nse_scan_symbols())
-        if mcx_active:
-            combined = dict(nse_syms)
-            combined.update(mcx_scan_symbols())
-            return combined, "NSE+MCX"
         return nse_syms, "NSE"
 
     if mcx_active:
