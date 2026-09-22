@@ -962,7 +962,7 @@ def find_affordable_option(
     option_type: str,
     balance: float,
     broker=None,
-    max_otm_steps: int = 15,
+    max_otm_steps: int = 3,
     min_delta: float = 0.10,
     iv_crush_warning_pct: float = 50.0,
 ) -> dict | None:

@@ -2493,6 +2493,9 @@ class TigerLiveRunner:
             except Exception as exc:
                 logger.warning(f"ML gate error (pass-through): {exc}")
 
+            # LIMIT order at LTP + small buffer for fill — prevents overpaying.
+            # MARKET orders on low-liquidity options fill at worst price.
+            limit_price = round(real_ltp * 1.02, 2)  # 2% buffer for fill
             result = self.broker.place_option_order(
                 tradingsymbol=contract["tradingsymbol"],
                 symboltoken=contract["symboltoken"],
@@ -2500,7 +2503,8 @@ class TigerLiveRunner:
                 transaction_type=transaction_type,
                 quantity=quantity,
                 product_type=product_type,
-                order_type="MARKET",
+                order_type="LIMIT",
+                price=limit_price,
             )
 
             if result.get("success"):
