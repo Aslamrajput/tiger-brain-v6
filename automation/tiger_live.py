@@ -959,6 +959,26 @@ class TigerLiveRunner:
         sig["entry_ts"] = datetime.now()
         sig["sniper_atr_pct"] = sig.get("commodity_volatility", 0.0)
         sig["market"] = market
+
+        # === CRITICAL: set ATM strike from 1m data ===
+        # Without this, strike defaults to 0 → "CRUDEOIL 0CE" → wrong contract.
+        # The ATM strike = underlying's last close, rounded to nearest strike.
+        df_1m = self.data_map_1m.get(symbol)
+        if df_1m is not None and not df_1m.empty:
+            atm_price = float(df_1m["close"].iloc[-1])
+            sig["strike"] = atm_price
+            logger.info(
+                f"🎯 SNIPER [{symbol}] ATM strike set: ₹{atm_price:.2f} "
+                f"from 1m close")
+        else:
+            # Fallback: use order_block midpoint
+            ob = sig.get("order_block", {})
+            atm_price = (float(ob.get("top", 0)) + float(ob.get("bottom", 0))) / 2
+            sig["strike"] = atm_price if atm_price > 0 else 0
+            logger.warning(
+                f"🎯 SNIPER [{symbol}] no 1m data — using OB midpoint "
+                f"₹{atm_price:.2f} as ATM strike")
+
         return sig
 
     # ============================================================
@@ -2257,7 +2277,7 @@ class TigerLiveRunner:
                     logger.info(
                         f"   ❌ NO AFFORDABLE STRIKE — {symbol} {strike}{option_type} "
                         f"min 1 lot ₹{one_lot_cost:,.0f} > balance ₹{available_balance:,.0f}, "
-                        f"no OTM strike affordable within 15 steps")
+                        f"no OTM strike affordable within 3 steps")
 
             # 🔥 FUND BRAIN LIVE SIZING — real balance + real LTP + real lot
             re_size = self._live_re_size(
