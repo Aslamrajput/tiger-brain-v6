@@ -138,9 +138,10 @@ class TigerLiveRunner:
         self._last_15m_fetch: datetime | None = None
         # Dedup guard — apscheduler job AND the 60s heartbeat both call
         # intraday_scan(), so the same minute could scan twice (doubling
-        # REST candle calls and risking duplicate entries). One scan/min max.
+        # REST candle calls and risking duplicate entries). At most one
+        # scan per _scan_min_interval_sec.
         self._last_scan_ts: datetime | None = None
-        self._scan_min_interval_sec: float = 55.0
+        self._scan_min_interval_sec: float = 30.0
         # === ML INFERENCE GATE — LightGBM win-probability gate ===
         self.ml_gate = TigerMLGate(
             model_path=ML_ENGINE["MODEL_PATH"],

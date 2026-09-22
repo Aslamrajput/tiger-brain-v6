@@ -439,9 +439,9 @@ ANGEL_RETRY_BACKOFF_SEC = 3.0
 # Angel historical API allows ~3 req/sec, but a burst across many symbols
 # (per-symbol chunks) trips "Access denied because of exceeding access rate".
 # A process-wide gate serialises every getCandleData call so consecutive
-# requests are spaced >= ANGEL_MIN_CALL_INTERVAL_SEC apart (< 2 req/sec),
+# requests are spaced >= ANGEL_MIN_CALL_INTERVAL_SEC apart (~2.9 req/sec),
 # including across symbols scanned in sequence.
-ANGEL_MIN_CALL_INTERVAL_SEC = 0.5
+ANGEL_MIN_CALL_INTERVAL_SEC = 0.35
 _angel_call_lock = threading.Lock()
 _angel_last_call_ts = 0.0
 
