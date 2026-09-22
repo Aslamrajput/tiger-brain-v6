@@ -281,12 +281,35 @@ def mcx_scan_symbols() -> dict:
     }
 
 
+def _apply_candle_cap(symbols: dict[str, str]) -> dict[str, str]:
+    """Trim an NSE symbol dict to MAX_CANDLES_PER_SCAN, indices first.
+
+    Startup pe 27 symbols ka REST candle burst Angel ka rate limit tod deta
+    tha (VELOCITY BLOCK + 429s). Cap sirf REST fetch list ko chhota karta
+    hai — WebSocket sabhi ko stream karta rehta hai, isliye capped symbols
+    live 1m data se hi trade karte hain.
+    """
+    from config.thresholds import UNIVERSE
+    cap = int(UNIVERSE.get("MAX_CANDLES_PER_SCAN", 15))
+    if len(symbols) <= cap:
+        return symbols
+    index_first = [s for s in INDEX_SYMBOLS if s in symbols]
+    rest = [s for s in symbols if s not in index_first]
+    keep = (index_first + rest)[:cap]
+    logger.info("Candle fetch cap: %d -> %d symbols (indices first)",
+                len(symbols), len(keep))
+    return {s: symbols[s] for s in keep}
+
+
 def get_active_scan_symbols(now=None) -> tuple[dict, str]:
     """Return (symbols_dict, market_label) for the currently active session.
 
     MCX commodities (CRUDEOIL, GOLDM, SILVERM, NATURALGAS) trade from
     09:00 AM. Tiger scans NSE + MCX SIMULTANEOUSLY during NSE hours so
     no commodity opportunity is missed (e.g. morning crude oil spikes).
+
+    NSE returns are capped to MAX_CANDLES_PER_SCAN for the REST candle
+    fetch (indices first); MCX's 4 commodities are always included.
 
     Returns:
         (dict, "NSE+MCX")  during 09:15-15:15 (both markets scanned)
@@ -314,11 +337,12 @@ def get_active_scan_symbols(now=None) -> tuple[dict, str]:
 
     if nse_open <= current <= nse_close:
         # NSE session — scan NSE + MCX simultaneously (MCX already open)
-        combined = nse_scan_symbols()
+        nse_syms = _apply_candle_cap(nse_scan_symbols())
         if mcx_active:
+            combined = dict(nse_syms)
             combined.update(mcx_scan_symbols())
             return combined, "NSE+MCX"
-        return combined, "NSE"
+        return nse_syms, "NSE"
 
     if mcx_active:
         # NSE closed — MCX only

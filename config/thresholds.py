@@ -198,6 +198,10 @@ UNIVERSE = {
     # 23 symbols × 1s delay = 23s per refresh — well within Angel rate limits.
     # WebSocket streams live ticks for all 23 (zero rate limits on LTP/1m).
     "TOP_N_LIQUID_STOCKS": 19,
+    # Live scan cap: REST candle fetch ke liye max NSE symbols (indices
+    # pehle, phir top liquid stocks). 27-symbol burst startup pe Angel ka
+    # rate limit tod deta tha — 15 rakho (4 index + 11 stocks).
+    "MAX_CANDLES_PER_SCAN": 15,
     "RESCAN_INTERVAL_MINUTES": 1,
     "SCORE_WEIGHTS": {
         "volume_rank": 0.35,

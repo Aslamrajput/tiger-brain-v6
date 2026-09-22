@@ -429,19 +429,19 @@ ANGEL_INTERVAL_MAX_DAYS = {
 # "Access denied because of exceeding access rate" bhejta hai). Chunked
 # download mein ye error aana normal hai, isliye har chunk ke beech ruko
 # aur rate-limit wale error pe badhte hue intezaar ke saath retry karo.
-# NOTE: retries kam (2) aur backoff chhota (2s) rakha gaya hai taaki
-# rate-limit hit hone par symbol jaldi yfinance fallback pe chale —
-# 75s retry backoff ke bajaye 6s me fail ho jaaye.
+# NOTE: backoff chhota (1s, 2s, 4s) rakha gaya hai — turant wapas maarna
+# burst ko aur badha deta hai, isliye pehle attempt pe peechhe hato.
 ANGEL_CHUNK_PAUSE_SEC = 0.5
-ANGEL_MAX_RETRIES = 2
-ANGEL_RETRY_BACKOFF_SEC = 3.0
+# Exponential backoff on rate-limit (429): 1s, 2s, 4s between the 4 attempts.
+ANGEL_MAX_RETRIES = 4
+ANGEL_RETRY_BACKOFF_SEC = 1.0
 
 # Angel historical API allows ~3 req/sec, but a burst across many symbols
 # (per-symbol chunks) trips "Access denied because of exceeding access rate".
 # A process-wide gate serialises every getCandleData call so consecutive
-# requests are spaced >= ANGEL_MIN_CALL_INTERVAL_SEC apart (~2.9 req/sec),
+# requests are spaced >= ANGEL_MIN_CALL_INTERVAL_SEC apart (~2.2 req/sec),
 # including across symbols scanned in sequence.
-ANGEL_MIN_CALL_INTERVAL_SEC = 0.35
+ANGEL_MIN_CALL_INTERVAL_SEC = 0.45
 _angel_call_lock = threading.Lock()
 _angel_last_call_ts = 0.0
 
@@ -551,15 +551,15 @@ def fetch_candle_chunk(
 
         if not is_rate_limit_error(message) or attempt == max_retries - 1:
             logger.warning(
-                f"Candle chunk {params['fromdate']}-{params['todate']} "
+                f"NO_DATA candle chunk {params['fromdate']}-{params['todate']} "
                 f"khali/fail: {message}"
             )
             return []
 
         delay = backoff_sec * (2 ** attempt)
         logger.warning(
-            f"Angel rate limit ({message}) — {delay:.0f}s baad retry "
-            f"({attempt + 1}/{max_retries - 1})"
+            f"RATE_LIMIT_HIT ({message}) — {delay:.0f}s exponential backoff "
+            f"before retry ({attempt + 1}/{max_retries - 1})"
         )
         time.sleep(delay)
 
@@ -627,9 +627,16 @@ def fetch_angel_historical_candles(
                     f"({len(candles)} rows)"
                 )
         except Exception as exc:
-            logger.error(
-                f"Candle fetch error {chunk_start.date()}-{chunk_end.date()}: {exc}"
-            )
+            if is_rate_limit_error(exc):
+                logger.error(
+                    f"RATE_LIMIT_HIT {chunk_start.date()}-{chunk_end.date()} "
+                    f"(retries exhausted): {exc}"
+                )
+            else:
+                logger.error(
+                    f"NO_DATA candle fetch error "
+                    f"{chunk_start.date()}-{chunk_end.date()}: {exc}"
+                )
 
         chunk_start = (chunk_end + timedelta(days=1)).replace(
             hour=0, minute=0, second=0, microsecond=0
@@ -638,7 +645,7 @@ def fetch_angel_historical_candles(
             time.sleep(ANGEL_CHUNK_PAUSE_SEC)
 
     if not all_candles:
-        logger.warning("Koi candle data nahi mila poore range mein.")
+        logger.warning("NO_DATA — koi candle data nahi mila poore range mein.")
         return pd.DataFrame()
 
     df = pd.DataFrame(
