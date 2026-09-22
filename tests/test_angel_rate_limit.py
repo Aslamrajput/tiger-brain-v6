@@ -158,17 +158,17 @@ def test_chunk_ranges_cover_boundary_sessions(no_real_sleep):
 
 class TestGlobalCandleRateGate:
     """Process-wide spacing so sequential (cross-symbol) candle calls stay
-    under Angel's ~2 req/sec limit instead of bursting and getting denied."""
+    under Angel's ~3 req/sec limit instead of bursting and getting denied."""
 
-    def test_constants_keep_under_two_per_second(self):
-        # interval must be >= 0.5s to stay strictly below 2 requests/sec.
+    def test_constants_keep_under_three_per_second(self):
+        # interval must be >= 0.34s to stay under ~3 requests/sec.
         # Read the real value from source (the autouse fixture zeroes it).
         import re
         from pathlib import Path
         src = (Path(__file__).resolve().parent.parent / "data" / "loader.py").read_text()
         m = re.search(r"^ANGEL_MIN_CALL_INTERVAL_SEC\s*=\s*([0-9.]+)", src, re.M)
         assert m, "ANGEL_MIN_CALL_INTERVAL_SEC not found"
-        assert float(m.group(1)) >= 0.5
+        assert float(m.group(1)) >= 0.34
 
     def test_gate_spaces_consecutive_calls(self, monkeypatch):
         slept = []

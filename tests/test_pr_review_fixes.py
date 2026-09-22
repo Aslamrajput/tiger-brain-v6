@@ -270,7 +270,7 @@ class TestScanDedup:
         r = TigerLiveRunner.__new__(TigerLiveRunner)
         r._scan_lock = threading.Lock()
         r._last_scan_ts = None
-        r._scan_min_interval_sec = 55.0
+        r._scan_min_interval_sec = 30.0
         r.calls = 0
 
         def fake_inner():
