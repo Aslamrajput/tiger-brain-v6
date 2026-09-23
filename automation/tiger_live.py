@@ -1966,6 +1966,25 @@ class TigerLiveRunner:
             logger.debug("Data refresh skipped (last %.0f min ago) — using WS live ticks",
                          mins_since)
 
+        # === 50% PROFIT EXTRACTION CHECK (user mandate) ===
+        # Check every scan if account has grown 50% above baseline.
+        # Alert for withdrawal so profits go to family, not back to market.
+        try:
+            cm = CapitalManager(self.broker)
+            cm._baseline_capital = self.capital_start
+            cm._extraction_alerted = getattr(self, '_profit_extracted', False)
+            extraction = cm.check_profit_extraction(self.account_capital)
+            if extraction:
+                self._profit_extracted = True
+                # Log prominently for user to see
+                logger.info("=" * 60)
+                logger.info("🏆🏆🏆 PROFIT EXTRACTION ALERT 🏆🏆🏆")
+                logger.info(extraction["message"])
+                logger.info("Withdraw this amount from Angel One app.")
+                logger.info("=" * 60)
+        except Exception as exc:
+            logger.debug("Profit extraction check skip: %s", exc)
+
         # === DIRECT SCAN (no threading wrapper — threading timeout doesn't work
         # with Angel SDK's C extensions holding the GIL) ===
         # The scan runs directly. If it hangs, the 60s sleep cycle is delayed,

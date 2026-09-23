@@ -63,6 +63,56 @@ class TestFeatureStore:
         assert SNIPER["NSE_MIN_CONFLUENCE_COMPONENTS"] == 2
         assert SNIPER["MIN_CONFLUENCE_COMPONENTS"] == 2
 
+class TestProfitExtraction:
+    """50% profit extraction logic (user mandate)."""
+
+    def _make_cm(self, baseline=None, alerted=False):
+        from risk.capital_manager import CapitalManager
+        cm = CapitalManager.__new__(CapitalManager)
+        cm._cached_funds = 0.0
+        cm._cache_ts = 0.0
+        cm._baseline_capital = baseline or 0.0
+        cm._extraction_alerted = alerted
+        return cm
+
+    def test_sets_baseline_on_first_balance(self):
+        cm = self._make_cm()
+        result = cm.check_profit_extraction(28705.0)
+        assert cm._baseline_capital == 28705.0
+        assert result is None  # no extraction on first call
+
+    def test_no_extraction_below_50pct(self):
+        cm = self._make_cm(baseline=28705.0)
+        result = cm.check_profit_extraction(40000.0)  # ~39% profit
+        assert result is None
+
+    def test_extraction_at_50pct_profit(self):
+        cm = self._make_cm(baseline=28705.0)
+        result = cm.check_profit_extraction(45000.0)  # 56.7% profit
+        assert result is not None
+        assert result["extract"] is True
+        assert result["profit_pct"] >= 0.50
+        assert result["extract_amount"] > 0
+
+    def test_extract_50pct_of_profit(self):
+        cm = self._make_cm(baseline=10000.0)
+        result = cm.check_profit_extraction(18000.0)  # 80% profit
+        assert result is not None
+        assert result["extract_amount"] == 4000.0  # 50% of 8000 profit
+        assert result["remaining_capital"] == 14000.0
+
+    def test_extraction_alerted_once(self):
+        cm = self._make_cm(baseline=10000.0)
+        r1 = cm.check_profit_extraction(16000.0)  # 60% profit
+        assert r1 is not None
+        r2 = cm.check_profit_extraction(17000.0)  # still above, but alerted
+        assert r2 is None  # already alerted, no repeat
+
+    def test_profit_tracking_logs_progress(self):
+        cm = self._make_cm(baseline=10000.0)
+        result = cm.check_profit_extraction(12000.0)  # 20% profit
+        assert result is None  # below 50%, no extraction
+
     def test_sniper_trail_activates_at_3pct(self):
         """Rocket trail arms at +3% profit — backtest showed most wins are +5-6%,
         so arming at 3% captures them. 60% peak lock (tighter than 50%).

@@ -46,12 +46,17 @@ class CapitalCheck:
 class CapitalManager:
     """Pre-order RMS capital gate with conviction-based dynamic sizing.
 
+    Includes 50% profit extraction logic (user mandate):
+    When account balance grows 50% above the baseline capital,
+    Tiger alerts for profit withdrawal. This locks in gains so
+    profits go to the user's family, not back to the market.
+
     Usage in TigerBrainAutomation._place_live_orders::
 
         cm = CapitalManager(broker)
         check = cm.check_and_allocate(
             setup_score=85.0,
-            brain_alignment=7,        # all 7 brains aligned
+            brain_alignment=7,
             trade_cost_estimate=12000,
             open_positions_cost=45000,
         )
@@ -61,10 +66,15 @@ class CapitalManager:
         # use check.allocated_capital for sizing
     """
 
+    # 50% profit extraction threshold (user mandate)
+    PROFIT_EXTRACTION_THRESHOLD = 0.50  # extract when balance = 1.5x baseline
+
     def __init__(self, broker):
         self.broker = broker
         self._cached_funds: float = 0.0
         self._cache_ts: float = 0.0
+        self._baseline_capital: float = 0.0  # set on first scan
+        self._extraction_alerted: bool = False  # avoid repeated alerts
 
     # ----------------------------------------------------------
     # GATE 1: Live funds fetch (cached — avoids rate-limit 0 returns)
@@ -92,6 +102,63 @@ class CapitalManager:
         except Exception as exc:
             logger.error("RMS funds fetch failed: %s", exc)
             return 0.0
+
+    # ----------------------------------------------------------
+    # PROFIT EXTRACTION: 50% growth → alert for withdrawal
+    # ----------------------------------------------------------
+    def check_profit_extraction(self, current_balance: float) -> dict | None:
+        """Check if account has grown 50% above baseline → extraction alert.
+
+        User mandate: "50% profit nikalna hai capital ka"
+        When balance reaches 1.5x the baseline (starting capital),
+        Tiger alerts that 50% of profit should be withdrawn.
+
+        Returns dict with extraction details, or None if threshold not met.
+        """
+        if current_balance <= 0:
+            return None
+
+        # Set baseline on first call (first real balance seen)
+        if self._baseline_capital <= 0:
+            self._baseline_capital = current_balance
+            logger.info(
+                f"🏦 Baseline capital set: ₹{self._baseline_capital:,.0f} "
+                f"— 50% extraction at ₹{self._baseline_capital * 1.5:,.0f}")
+            return None
+
+        profit = current_balance - self._baseline_capital
+        profit_pct = profit / self._baseline_capital
+
+        if profit_pct >= self.PROFIT_EXTRACTION_THRESHOLD and not self._extraction_alerted:
+            extract_amount = profit * 0.50  # extract 50% of profit
+            self._extraction_alerted = True
+            result = {
+                "extract": True,
+                "baseline": self._baseline_capital,
+                "current": current_balance,
+                "profit": profit,
+                "profit_pct": profit_pct,
+                "extract_amount": extract_amount,
+                "remaining_capital": current_balance - extract_amount,
+                "message": (
+                    f"🏆 50% PROFIT TARGET HIT! "
+                    f"Balance ₹{current_balance:,.0f} = "
+                    f"{profit_pct*100:.0f}% above baseline ₹{self._baseline_capital:,.0f}. "
+                    f"Extract ₹{extract_amount:,.0f} (50% of profit). "
+                    f"Keep ₹{current_balance - extract_amount:,.0f} for trading."
+                ),
+            }
+            logger.info("🏆" * 10)
+            logger.info(result["message"])
+            logger.info("🏆" * 10)
+            return result
+
+        # Log progress toward 50% target
+        if profit > 0 and profit_pct > 0.10:
+            logger.info(
+                f"📈 Profit tracking: {profit_pct*100:.1f}% above baseline "
+                f"(target: 50% at ₹{self._baseline_capital * 1.5:,.0f})")
+        return None
 
     # ----------------------------------------------------------
     # GATE 2: Disposable capital check

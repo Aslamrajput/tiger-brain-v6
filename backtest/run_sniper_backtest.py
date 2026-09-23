@@ -8,9 +8,9 @@ Usage:
     python3 -m backtest.run_sniper_backtest --days 30
     python3 -m backtest.run_sniper_backtest --days 60 --capital 29453
 
-Data: yfinance 5m + 1m proxies (GC=F, SI=F, CL=F, NG=F, HG=F) for the MCX
-universe. yfinance caps 5m at 60 days, 1m at 7 days — the backtest runs over
-the overlapping window.
+Data: Angel One historical candle API (FIVE_MINUTE + ONE_MINUTE) for the MCX
+universe — NOT yfinance. Requires Angel credentials in .env (broker login).
+Falls back to yfinance ONLY if Angel login fails (offline dev mode).
 
 This is a SIMULATION only — no broker orders, no live deploy. trade_log.json
 structure is preserved (records are written to a separate sniper_backtest_log
@@ -29,7 +29,7 @@ import pandas as pd
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s [sniper-bt] %(levelname)s: %(message)s")
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("sniper-bt")
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _ROOT not in os.sys.path:
@@ -43,17 +43,24 @@ from config.thresholds import SNIPER
 
 # ─────────────────────────────────────────────────────────
 # Option-premium leverage proxy.
-# The backtest fetches UNDERLYING price (GC=F, CL=F etc.) but Tiger trades
-# OPTION PREMIUMS, which move at delta-leverage to the underlying. A typical
-# MCX ATM option has delta ~0.5 and premium ~1.5-2% of the underlying, giving
-# ~7x leverage (1% underlying move ≈ 7% option premium move). All gain/trail/
-# PnL calculations use this factor so the +10% trail threshold is meaningful.
+# The backtest fetches UNDERLYING price but Tiger trades OPTION PREMIUMS,
+# which move at delta-leverage to the underlying. A typical MCX ATM option
+# has delta ~0.5 and premium ~1.5-2% of the underlying, giving ~7x leverage.
 # ─────────────────────────────────────────────────────────
 OPTION_LEVERAGE = 7.0
 
+# MCX symbols that map to Angel One instrument master names.
+# MCX_SYMBOLS values are yfinance tickers; we need Angel names for REST fetch.
+MCX_ANGEL_SYMBOLS = {
+    "GOLDM": "GOLDM",
+    "SILVERM": "SILVERM",
+    "CRUDEOIL": "CRUDEOIL",
+    "NATURALGAS": "NATURALGAS",
+}
+
 
 # ─────────────────────────────────────────────────────────
-# Data fetch (yfinance 5m + 1m, IST-converted)
+# Data fetch — Angel One historical candles (primary), yfinance (fallback)
 # ─────────────────────────────────────────────────────────
 def _flatten_cols(df):
     flat = []
@@ -72,11 +79,65 @@ def _to_ist(df):
     return df
 
 
+def _try_angel_login():
+    """Try to create an AngelBroker and login. Returns broker or None."""
+    try:
+        from broker.angel_connect import AngelBroker
+        broker = AngelBroker()
+        broker.login()
+        logger.info("✅ Angel One login successful — using REAL Angel data")
+        return broker
+    except Exception as exc:
+        logger.warning("⚠️ Angel login failed (%s) — falling back to yfinance", exc)
+        return None
+
+
 def fetch_mcx_5m(days: int = 60) -> dict[str, pd.DataFrame]:
-    """Fetch 5m candles for all MCX commodities via yfinance."""
+    """Fetch 5m candles for all MCX commodities via Angel One historical API.
+
+    Falls back to yfinance if Angel credentials are not available.
+    """
+    broker = _try_angel_login()
+    if broker is not None:
+        from data.loader import fetch_angel_historical_candles, resolve_underlying_token
+        to_date = datetime.now().replace(hour=23, minute=59, second=0, microsecond=0)
+        from_date = to_date - timedelta(days=days)
+        out = {}
+        for sym in MCX_ANGEL_SYMBOLS:
+            resolved = resolve_underlying_token(sym)
+            if resolved is None:
+                logger.warning("%s: token resolve fail", sym)
+                continue
+            exchange, token = resolved
+            try:
+                df = fetch_angel_historical_candles(
+                    broker, exchange, token, "FIVE_MINUTE", from_date, to_date)
+                if df is not None and not df.empty:
+                    for col in ("open", "high", "low", "close"):
+                        if col in df.columns:
+                            df[col] = df[col].astype(float)
+                    if "volume" not in df.columns:
+                        df["volume"] = 0.0
+                    out[sym] = df
+                    logger.info("%s: %d 5m bars (Angel One) %s → %s",
+                                sym, len(df), df.index[0], df.index[-1])
+                else:
+                    logger.warning("%s: no Angel 5m data", sym)
+            except Exception as exc:
+                logger.warning("%s Angel fetch fail: %s", sym, exc)
+        if out:
+            return out
+        logger.warning("Angel fetch returned empty — falling back to yfinance")
+
+    # yfinance fallback
+    return _fetch_mcx_5m_yfinance(days)
+
+
+def _fetch_mcx_5m_yfinance(days: int = 60) -> dict[str, pd.DataFrame]:
+    """yfinance fallback — only when Angel One is not available."""
     import yfinance as yf
     to_date = datetime.now()
-    days = min(days, 60)  # yfinance 5m cap
+    days = min(days, 60)
     from_date = to_date - timedelta(days=days)
     out = {}
     for sym, ticker in MCX_SYMBOLS.items():
@@ -84,7 +145,7 @@ def fetch_mcx_5m(days: int = 60) -> dict[str, pd.DataFrame]:
             raw = yf.download(ticker, start=from_date, end=to_date,
                               interval="5m", progress=False, auto_adjust=True)
             if raw is None or raw.empty:
-                logger.warning("%s: no 5m data", sym)
+                logger.warning("%s: no 5m data (yfinance)", sym)
                 continue
             raw = _flatten_cols(raw)
             raw = _to_ist(raw)
@@ -99,15 +160,47 @@ def fetch_mcx_5m(days: int = 60) -> dict[str, pd.DataFrame]:
             if "volume" not in raw.columns:
                 raw["volume"] = 0.0
             out[sym] = raw
-            logger.info("%s: %d 5m bars (%s → %s)", sym, len(raw),
-                        raw.index[0], raw.index[-1])
+            logger.info("%s: %d 5m bars (yfinance fallback)", sym, len(raw))
         except Exception as exc:
-            logger.warning("%s fetch fail: %s", sym, exc)
+            logger.warning("%s yfinance fetch fail: %s", sym, exc)
     return out
 
 
 def fetch_mcx_1m(days: int = 7) -> dict[str, pd.DataFrame]:
-    """Fetch 1m candles for the 1m entry-confirmation window."""
+    """Fetch 1m candles via Angel One historical API (yfinance fallback)."""
+    broker = _try_angel_login()
+    if broker is not None:
+        from data.loader import fetch_angel_historical_candles, resolve_underlying_token
+        to_date = datetime.now().replace(hour=23, minute=59, second=0, microsecond=0)
+        from_date = to_date - timedelta(days=min(days, 30))
+        out = {}
+        for sym in MCX_ANGEL_SYMBOLS:
+            resolved = resolve_underlying_token(sym)
+            if resolved is None:
+                continue
+            exchange, token = resolved
+            try:
+                df = fetch_angel_historical_candles(
+                    broker, exchange, token, "ONE_MINUTE", from_date, to_date)
+                if df is not None and not df.empty:
+                    for col in ("open", "high", "low", "close"):
+                        if col in df.columns:
+                            df[col] = df[col].astype(float)
+                    if "volume" not in df.columns:
+                        df["volume"] = 0.0
+                    out[sym] = df
+                    logger.info("%s: %d 1m bars (Angel One)", sym, len(df))
+            except Exception as exc:
+                logger.warning("%s Angel 1m fetch fail: %s", sym, exc)
+        if out:
+            return out
+
+    # yfinance fallback
+    return _fetch_mcx_1m_yfinance(days)
+
+
+def _fetch_mcx_1m_yfinance(days: int = 7) -> dict[str, pd.DataFrame]:
+    """yfinance fallback for 1m data."""
     import yfinance as yf
     to_date = datetime.now()
     days = min(days, 7)

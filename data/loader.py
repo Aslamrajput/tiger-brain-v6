@@ -1047,6 +1047,33 @@ def find_affordable_option(
             _greeks_fail_cache.mark_fail(underlying)
             greeks_df = None
 
+    # === PRE-SUBSCRIBE OPTION TOKENS TO WEBSOCKET (zero REST LTP) ===
+    # User mandate: permanent websocket, no REST, no limit, no error.
+    # Subscribe all candidate option tokens to WS so ws_get_ltp() reads from
+    # cache instead of falling back to REST. Wait 3s for first ticks.
+    if broker is not None and hasattr(broker, 'websocket') and broker.websocket is not None:
+        _candidate_tokens = []
+        _exchange_type = 2  # default NSE_FO
+        _, _exch_name = OPTION_INSTRUMENT_TYPE.get(underlying, ("OPTSTK", "NFO"))
+        if _exch_name == "MCX":
+            _exchange_type = 5  # MCX_FO
+        elif _exch_name == "BFO":
+            _exchange_type = 2  # BSE_FO treated as NSE_FO type
+        for _, row in matches.head(max_otm_steps).iterrows():
+            _tok = str(row["token"])
+            if _tok:
+                _candidate_tokens.append(_tok)
+        if _candidate_tokens:
+            try:
+                broker.websocket.subscribe_tokens(_candidate_tokens, _exchange_type)
+                import time as _time
+                _time.sleep(3.0)  # wait for first ticks to arrive
+                logger.info(
+                    f"📡 WS pre-subscribed {len(_candidate_tokens)} {underlying} "
+                    f"option tokens — zero REST LTP calls")
+            except Exception as exc:
+                logger.debug(f"WS pre-subscribe fail (REST fallback): {exc}")
+
     for _, row in matches.head(max_otm_steps).iterrows():
         strike = float(row["strike"])
         lot = int(row["lotsize"])
