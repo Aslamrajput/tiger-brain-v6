@@ -965,6 +965,7 @@ def find_affordable_option(
     max_otm_steps: int = 3,
     min_delta: float = 0.10,
     iv_crush_warning_pct: float = 50.0,
+    max_premium: float = 0.0,
 ) -> dict | None:
     """Find an affordable option strike — walks OTM until 1 lot fits balance.
 
@@ -981,6 +982,11 @@ def find_affordable_option(
       - Max 15 OTM steps — dynamically balances small accounts (₹4,000-₹8,000)
       - Falls back to moneyness-based delta estimate if greeks unavailable
 
+    CHEAP OPTIONS GATE (max_premium):
+      - If max_premium > 0, skips any option with premium > max_premium
+      - User mandate: only buy ₹5-50 premium options (cheap options buying)
+      - This ensures Tiger walks far enough OTM to find truly cheap premiums
+
     Args:
         underlying: 'NIFTY', 'SILVERM', 'CRUDEOIL', etc.
         atm_strike: ATM strike price (underlying close)
@@ -990,6 +996,7 @@ def find_affordable_option(
         max_otm_steps: max OTM strikes to try before giving up (hard cap 15)
         min_delta: minimum delta threshold (default 0.10 — allows cheap OTM)
         iv_crush_warning_pct: ATM IV % above which IV crush risk is flagged
+        max_premium: skip options with premium above this (0 = no limit)
 
     Returns:
         {'tradingsymbol', 'symboltoken', 'exchange', 'lotsize', 'strike',
@@ -1062,6 +1069,15 @@ def find_affordable_option(
 
         one_lot_cost = lot * ltp
         if one_lot_cost > balance or one_lot_cost <= 0:
+            continue
+
+        # === CHEAP OPTIONS GATE — skip expensive premiums ===
+        # User mandate: only buy ₹5-50 premium options. If max_premium is set,
+        # skip any option whose per-unit premium exceeds it and keep walking OTM.
+        if max_premium > 0 and ltp > max_premium:
+            logger.info(
+                f"   💰 CHEAP GATE: {underlying} {strike}{option_type} "
+                f"premium ₹{ltp:.2f} > ₹{max_premium:.0f} max — walking further OTM")
             continue
 
         # === DELTA GATE — reject dead zero-delta junk ===

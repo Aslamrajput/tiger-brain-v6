@@ -2339,7 +2339,7 @@ class TigerLiveRunner:
             )
             _free_capital = _pre_cap.free_disposable if _pre_cap else available_balance
             _trade_capital = min(_free_capital, available_balance) if _free_capital > 0 else available_balance
-            otm_steps = 3 if real_lot_size <= 50 else 20
+            otm_steps = 20  # always walk far OTM — user wants ₹5-50 cheap options
             # Trigger OTM walk if: too expensive OR premium too high (user: cheap only)
             _need_cheap = real_ltp > _max_premium
             if one_lot_cost > _trade_capital or _need_cheap:
@@ -2351,6 +2351,7 @@ class TigerLiveRunner:
                     broker=self.broker,
                     max_otm_steps=otm_steps,
                     min_delta=0.02,  # deep OTM cheap options — user wants cheap, not high-delta
+                    max_premium=_max_premium,  # ₹50 — only buy cheap options (user mandate)
                 )
                 if affordable is not None:
                     _cheap_label = "CHEAP" if _need_cheap else "ZERO-TO-HERO"
