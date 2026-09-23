@@ -2295,6 +2295,7 @@ class TigerLiveRunner:
                 open_position_count=open_position_count,
                 market=_this_market,
                 market_deployed_cost=market_deployed_cost,
+                available_balance_override=available_balance,
             )
             _free_capital = _pre_cap.free_disposable if _pre_cap else available_balance
             _trade_capital = min(_free_capital, available_balance) if _free_capital > 0 else available_balance
@@ -2429,6 +2430,7 @@ class TigerLiveRunner:
                     open_position_count=open_position_count,
                     market=_this_market,
                     market_deployed_cost=market_deployed_cost,
+                    available_balance_override=available_balance,
                 )
                 if not cap_check.allowed:
                     logger.info(

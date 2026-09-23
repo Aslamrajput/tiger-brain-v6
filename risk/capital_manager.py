@@ -63,15 +63,26 @@ class CapitalManager:
 
     def __init__(self, broker):
         self.broker = broker
+        self._cached_funds: float = 0.0
+        self._cache_ts: float = 0.0
 
     # ----------------------------------------------------------
-    # GATE 1: Live funds fetch
+    # GATE 1: Live funds fetch (cached — avoids rate-limit 0 returns)
     # ----------------------------------------------------------
-    def fetch_live_funds(self) -> float:
+    def fetch_live_funds(self, cached_balance: float = 0.0) -> float:
         """Fetch real available cash from Angel One RMS API.
 
-        Returns 0.0 on failure (caller must block the order).
+        Multiple check_and_allocate calls per scan cycle would each
+        hit the Angel balance API -> rate-limited -> returns 0 -> false
+        BLOCK. If the caller passes a pre-fetched balance (> 0), we
+        use it directly instead of hitting the API again.
+
+        Args:
+            cached_balance: if > 0, use this instead of an API call.
         """
+        if cached_balance > 0:
+            self._cached_funds = cached_balance
+            return cached_balance
         try:
             funds = self.broker.get_balance()
             if funds <= 0:
@@ -137,6 +148,7 @@ class CapitalManager:
         open_position_count: int = 0,
         market: str = "",
         market_deployed_cost: float = 0.0,
+        available_balance_override: float = 0.0,
     ) -> CapitalCheck:
         """Run all three gates and return allocation decision.
 
@@ -169,8 +181,8 @@ class CapitalManager:
                 blocked=True,
             )
 
-        # GATE 1: Live funds
-        available = self.fetch_live_funds()
+        # GATE 1: Live funds (use override if provided to avoid rate-limit)
+        available = self.fetch_live_funds(cached_balance=available_balance_override)
         if available <= 0:
             return CapitalCheck(
                 allowed=False,
