@@ -499,6 +499,27 @@ ML_ENGINE = {
         "ROCKET_FACTOR": 1.5,      # rocket multiplier
         "NORMAL_FACTOR": 1.0,      # normal multiplier
     },
+    # --- ADVANCED TRAINING MODULES (backtest validation) ---
+    "VOLATILITY_FILTER": {
+        "ENABLED": True,
+        "MIN_ATR_PCT": 0.3,       # skip if ATR < 0.3% of price (dead market)
+        "MIN_IV_RANK": 30,        # skip if IV rank < 30 (low vol = theta kill)
+        "MAX_IV_RANK": 95,        # skip if IV rank > 95 (too expensive premium)
+    },
+    "SLIPPAGE_MODEL": {
+        "ENABLED": True,
+        "SLIPPAGE_PCT": 0.75,     # 0.75% slippage per side (entry + exit)
+        "STT_PCT": 0.05,          # STT on options selling side
+        "EXCHANGE_FEE_PCT": 0.05, # NSE/BSE transaction charges
+        "GST_PCT": 18.0,          # GST on brokerage + exchange fees
+        "BROKERAGE_FLAT": 20.0,   # flat brokerage per order (Angel)
+    },
+    "WALK_FORWARD": {
+        "TRAIN_WINDOW_DAYS": 60,  # train on 60 days of backtest history
+        "TEST_WINDOW_DAYS": 15,   # test on next 15 days (out-of-sample)
+        "STEP_DAYS": 15,          # roll forward 15 days each iteration
+        "MIN_TRADES_PER_WINDOW": 5,  # skip window if too few trades
+    },
 }
 
 # ============================================================
