@@ -612,3 +612,19 @@ re-run, so CI status on main is not automatically refreshed after merge.
 - Benign: SmartWebSocketV2 `_on_close() takes 2 positional args but 4 given`
   on close; nightly ML logs "ensemble partial" (models absent, advisory only).
 
+
+## SEQUENTIAL MARKET + 3 BRAIN REVIVAL + Rs8K PROFIT + RESEARCH BRAIN (Sep 24 2026)
+- Branch: main, commit 57fbb3a (pushed to GitHub + deployed to EC2).
+- EC2: 3.108.53.100, service tiger-brain.service (system-level), PID 1347320, DRY_RUN=false.
+- 651 tests pass on EC2 (0 failures). Python 3.9.25.
+- PEM key shredded (3-pass) after deploy — no credential left on disk.
+
+### Changes deployed:
+1. 3 Brain Revival (Brain 3,5,6) — advisory-only, Tiger decides.
+2. 50/50 split DELETED -> MARKET_CAPITAL_SPLIT_PCT=100.0 (sequential market).
+3. Rs8,000 daily profit alert (Ujjivan Foundation) — capital NEVER touched.
+4. Research Brain (subbrains/research_brain.py) — top gainers/losers + SMC plan, cached 12h.
+
+### Note on catboost:
+- ML ensemble tries catboost but not installed on EC2. Heuristic fallback OK.
+- LightGBM + XGBoost available. Not a blocker.
