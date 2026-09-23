@@ -2574,7 +2574,18 @@ class TigerLiveRunner:
             # LIMIT order at LTP + small buffer for fill — prevents overpaying.
             # MARKET orders on low-liquidity options fill at worst price.
             # Round to tick size — exchange rejects prices not matching tick.
-            _tick = 0.05 if contract["exchange"] == "NFO" else 0.10
+            # MCX tick sizes vary by commodity (GOLDM/SILVERM=0.50, CRUDEOIL=1.0,
+            # NATURALGAS=0.10). NFO/BSE equity+index options tick=0.05.
+            _exch = contract["exchange"]
+            if _exch == "NFO" or _exch == "BSE":
+                _tick = 0.05
+            elif _exch == "MCX":
+                _MCX_TICK = {"GOLDM": 0.50, "SILVERM": 0.50, "SILVER": 0.50,
+                             "GOLD": 0.50, "CRUDEOIL": 1.00,
+                             "NATURALGAS": 0.10, "COPPER": 0.05}
+                _tick = _MCX_TICK.get(symbol, 0.50)
+            else:
+                _tick = 0.05
             _raw = real_ltp * 1.02
             limit_price = round(_raw / _tick) * _tick
             # Fix float precision (221.54000... → 221.5)
