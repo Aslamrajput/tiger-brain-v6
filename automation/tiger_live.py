@@ -893,7 +893,7 @@ class TigerLiveRunner:
             if df_1m is None or df_1m.empty:
                 skipped += 1
                 continue
-            if len(df_1m) < 30:
+            if len(df_1m) < 15:
                 skipped += 1
                 continue
             try:
@@ -908,7 +908,7 @@ class TigerLiveRunner:
                     "low": "min", "close": "last",
                     "volume": "sum",
                 }).dropna()
-                if len(df_5m) >= 25:
+                if len(df_5m) >= 10:
                     data_map_5m[sym] = df_5m
             except Exception as exc:
                 logger.debug(f"🎯 SNIPER [{market}] 5m build fail {sym}: {exc}")
@@ -1224,7 +1224,9 @@ class TigerLiveRunner:
                         self.data_map_1m[sym] = self.data_map_1m[sym].tail(1000)
                     merged += 1
         if merged or created:
-            logger.debug("WS 1m merge: %d updated, %d created from live ticks", merged, created)
+            logger.info("📡 WS 1m merge: %d updated, %d created from live ticks (data_map_1m has %d symbols)", merged, created, len(self.data_map_1m))
+        else:
+            logger.info("📡 WS 1m merge: 0 updates (data_map_1m has %d symbols, data_map has %d)", len(self.data_map_1m), len(self.data_map))
 
         # === INDEX VOLUME BACKFILL (Bug fix) ===
         # Index spot tokens (NIFTY/BANKNIFTY) report volume=0 from Angel
