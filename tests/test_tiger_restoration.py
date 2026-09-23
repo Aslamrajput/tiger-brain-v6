@@ -427,8 +427,9 @@ class TestNSESniperRoute:
 
     def test_scan_sniper_signals_does_not_market_shadow(self):
         """CRITICAL: during the 10:30-15:00 NSE+MCX overlap, an NSE signal must
-        NOT suppress the MCX scan (and vice versa). Both markets are scanned
-        independently and every qualifying signal is returned."""
+        NOT suppress the MCX scan (and vice versa). With sequential timing (user
+        mandate), NSE runs morning (09:15-15:00) and MCX runs evening (15:30-23:30).
+        During NSE hours, only NSE is scanned. During MCX hours, only MCX."""
         from datetime import datetime
         import automation.tiger_live as tl
 
@@ -442,15 +443,24 @@ class TestNSESniperRoute:
         runner._scan_one_market = fake_scan
         runner._sniper_trades_today = lambda: 0
 
-        # 11:00 → both NSE (09:15-15:00) and MCX (10:30-23:30) sessions are live.
+        # NSE session active → only NSE scanned (sequential, not parallel)
         runner._nse_sniper_session_active = lambda now=None: True
         runner._sniper_session_active = lambda now=None: True
 
         signals = runner.scan_sniper_signals()
 
-        assert calls == ["NSE", "MCX"]          # neither market skipped
-        assert len(signals) == 2                 # both signals returned
-        assert {s["market"] for s in signals} == {"NSE", "MCX"}
+        assert calls == ["NSE"]              # NSE active → only NSE scanned
+        assert len(signals) == 1
+        assert signals[0]["market"] == "NSE"
+
+        # Now test MCX-only path: NSE closed, MCX open
+        calls.clear()
+        runner._nse_sniper_session_active = lambda now=None: False
+        runner._sniper_session_active = lambda now=None: True
+        signals = runner.scan_sniper_signals()
+        assert calls == ["MCX"]              # NSE closed → only MCX scanned
+        assert len(signals) == 1
+        assert signals[0]["market"] == "MCX"
 
     def test_scan_sniper_signals_honours_daily_cap_across_markets(self):
         """The shared MAX_TRADES_PER_DAY cap is respected across both markets —

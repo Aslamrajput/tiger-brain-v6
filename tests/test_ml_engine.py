@@ -69,7 +69,7 @@ class TestFeatureStore:
         of peak. The 5m opposite BOS exit only fires AFTER the trail arms so
         first-pullback noise doesn't kill the rocket before takeoff."""
         from config.thresholds import SNIPER
-        assert SNIPER["TRAIL_ACTIVATE_PCT"] == 10.0
+        assert SNIPER["TRAIL_ACTIVATE_PCT"] == 5.0
         # 50% peak lock retained
         assert SNIPER["TRAIL_LOCK_PCT_OF_PEAK"] == 50.0
         # OB stop still wide (-12%) so rocket survives pre-takeoff pullback

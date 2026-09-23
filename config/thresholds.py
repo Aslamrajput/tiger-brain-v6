@@ -502,12 +502,21 @@ SNIPER = {
     "MAX_TRADES_PER_DAY": 3,        # sniper doesn't overtrade
     "MIN_ZONE_STRENGTH": 50.0,      # was 80 — too strict, killed all live MCX zones
     "MIN_WIN_PROB": 0.80,           # ML conviction gate (high only)
-    # === MCX high-volume session — 10:30 AM to 11:30 PM IST ===
-    "SESSION_START": "10:30",
+    # === SEQUENTIAL TIMING: NSE morning → MCX evening (user mandate) ===
+    # NSE: 9:15 AM - 3:00 PM (50% capital, morning session)
+    # MCX: 3:30 PM - 11:30 PM (50% capital, evening session — starts AFTER NSE)
+    # Never overlap — clean sequential, each market gets full focus.
+    "SESSION_START": "15:30",       # MCX entry starts AFTER NSE closes (was 10:30)
     "SESSION_END": "23:30",
-    # === NSE index/stock session — 9:15 AM to 3:00 PM IST (entry cutoff) ===
     "NSE_SESSION_START": "09:15",
     "NSE_SESSION_END": "15:00",     # entry cutoff (square-off 15:15 separate)
+    # === CHEAP OPTIONS ONLY (user: "sasta sa options buying kar leta") ===
+    # Max ₹50 per option premium. Even if ATM is affordable, if premium > this,
+    # Tiger walks OTM to find cheap ₹5-50 options. No more ₹125 ATM buys.
+    "MAX_OPTION_PREMIUM": 50.0,
+    # === VOLUME GATE (user: "jha buying selling ho rhi hai volumes hai wha jaye") ===
+    # Minimum option trade volume — reject dead options with no buying/selling.
+    "MIN_OPTION_VOLUME": 50,
     # Entry: OB retest + CHOCH + wick rejection on 1m
     "OB_BUFFER_PCT": 0.35,          # SL = OB edge +/- 0.35% buffer
     "CHOCH_LOOKBACK": 20,           # 1m structure-shift lookback
@@ -516,15 +525,13 @@ SNIPER = {
     "MIN_CONFLUENCE_COMPONENTS": 2,     # MCX — 2+ SMC components (was 3, too strict)
     "NSE_MIN_CONFLUENCE_COMPONENTS": 2, # NSE — 2+ SMC components
     # Exit: NO FIXED TARGET. Pure momentum ride — let the rocket run.
-    #   1. Give the rocket room first: trail activates only after +10% profit
-    #      (options real moves are +10-15%; 25% was too high — never armed,
-    #      rockets died on BOS exit before takeoff).
+    #   1. Trail arms at +5% (was 10 — too high, surrendered small gains).
     #   2. Once active, trail = 50% of peak (lock half, ride the rest).
     #   3. OB hard stop survives the pre-rocket pullback (entry*0.88 = -12%).
     #   4. 5m opposite BOS = structure reversal exit — but ONLY checked AFTER
     #      the trail arms (before that, first pullbacks must not kill the rocket).
     "ATR_PERIOD": 14,
-    "TRAIL_ACTIVATE_PCT": 10.0,     # rocket must be +10% before trail arms
+    "TRAIL_ACTIVATE_PCT": 5.0,      # trail arms at +5% (was 10 — lock profits faster)
     "TRAIL_LOCK_PCT_OF_PEAK": 50.0, # lock 50% of peak once armed (rocket room)
     "OB_STOP_PCT": 12.0,            # OB stop at -12% (survive pre-rocket noise)
     "EXIT_REASON": "SNIPER_TRAILING_EXIT",

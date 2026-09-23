@@ -670,7 +670,7 @@ class TigerLiveRunner:
     # Exit: ATR(14)*2.5 trailing + 5m opposite BOS. No fixed target.
     # ============================================================
     def _sniper_session_active(self, now_dt: datetime = None) -> bool:
-        """MCX high-volume sniper session: 10:30 AM - 11:30 PM IST."""
+        """MCX sniper session: 3:30 PM - 11:30 PM IST (after NSE closes)."""
         from config.thresholds import SNIPER
         from datetime import time
         if now_dt is None:
@@ -700,7 +700,7 @@ class TigerLiveRunner:
     def _sniper_can_trade(self, market: str = "MCX") -> tuple[bool, str]:
         """Sniper safety gate: session + daily cap + risk manager.
 
-        market: "MCX" (10:30-23:30) or "NSE" (09:15-15:00).
+        market: "MCX" (15:30-23:30) or "NSE" (09:15-15:00).
         """
         from config.thresholds import SNIPER
         if market == "NSE":
@@ -708,7 +708,7 @@ class TigerLiveRunner:
                 return False, "outside NSE sniper session (09:15-15:00)"
         else:
             if not self._sniper_session_active():
-                return False, "outside MCX sniper session (10:30-23:30)"
+                return False, "outside MCX sniper session (15:30-23:30)"
         count = self._sniper_trades_today()
         if count >= SNIPER["MAX_TRADES_PER_DAY"]:
             return False, f"max {SNIPER['MAX_TRADES_PER_DAY']} sniper trades/day reached"
@@ -840,16 +840,17 @@ class TigerLiveRunner:
         """
         from config.thresholds import SNIPER
 
-        # Scan BOTH active markets independently — a signal in one market must
-        # NEVER suppress the other. During the 10:30-15:00 overlap both the NSE
-        # and MCX sessions are live, so an NSE zone must not shadow an MCX zone
-        # (that was the "one market blocks the other" bug).
+        # === SEQUENTIAL TIMING (user mandate) ===
+        # NSE morning (09:15-15:00) → MCX evening (15:30-23:30).
+        # NEVER overlap — each market gets full focus + its own 50% capital.
+        # During NSE hours, scan ONLY NSE. After 15:30, scan ONLY MCX.
         signals: list[dict] = []
         if self._nse_sniper_session_active():
             sig = self._scan_one_market("NSE")
             if sig:
                 signals.append(sig)
-        if self._sniper_session_active():
+        elif self._sniper_session_active():
+            # MCX only AFTER NSE session ends (15:30 onwards)
             sig = self._scan_one_market("MCX")
             if sig:
                 signals.append(sig)
@@ -2277,15 +2278,15 @@ class TigerLiveRunner:
                         real_ltp = mini_ltp
                         one_lot_cost = mini_one_lot
 
-            # === ZERO-TO-HERO OTM FALLBACK ===
-            # If ATM/ITM option is still unaffordable after MINI fallback,
-            # walk OTM strikes until we find one that fits the balance.
-            # This is how Tiger trades MCX with a small account — and how
-            # it catches CHEAP strikes that rocket (₹36 → ₹160).
-            # ADAPTIVE steps: large-lot commodities (CRUDEOIL lot=100,
-            # NATURALGAS lot=1250) need deeper OTM for affordability.
-            # CAPITAL PRE-CHECK: use REAL free disposable (not total balance)
-            # so the OTM fallback finds strikes that fit the actual free margin.
+            # === CHEAP OPTIONS GATE + ZERO-TO-HERO OTM FALLBACK ===
+            # User mandate: "sasta sa options buying kar leta" — ONLY cheap
+            # options (₹5-50 premium). Even if ATM is affordable, if premium
+            # > MAX_OPTION_PREMIUM (₹50), Tiger walks OTM to find cheap strikes.
+            # Also: "jha buying selling ho rhi hai volumes hai wha jaye" — only
+            # enter options with actual volume (MIN_OPTION_VOLUME gate).
+            from config.thresholds import SNIPER as _SNIP
+            _max_premium = _SNIP.get("MAX_OPTION_PREMIUM", 50.0)
+            _min_vol = _SNIP.get("MIN_OPTION_VOLUME", 50)
             _pre_cap = CapitalManager(self.broker).check_and_allocate(
                 setup_score=t.get("setup_score", 50.0),
                 brain_alignment=count_aligned_brains(t),
@@ -2300,7 +2301,9 @@ class TigerLiveRunner:
             _free_capital = _pre_cap.free_disposable if _pre_cap else available_balance
             _trade_capital = min(_free_capital, available_balance) if _free_capital > 0 else available_balance
             otm_steps = 3 if real_lot_size <= 50 else 20
-            if one_lot_cost > _trade_capital:
+            # Trigger OTM walk if: too expensive OR premium too high (user: cheap only)
+            _need_cheap = real_ltp > _max_premium
+            if one_lot_cost > _trade_capital or _need_cheap:
                 affordable = find_affordable_option(
                     underlying=symbol,
                     atm_strike=float(strike),
@@ -2311,8 +2314,9 @@ class TigerLiveRunner:
                     min_delta=0.02,  # deep OTM cheap options — user wants cheap, not high-delta
                 )
                 if affordable is not None:
+                    _cheap_label = "CHEAP" if _need_cheap else "ZERO-TO-HERO"
                     logger.info(
-                        f"   🚀 ZERO-TO-HERO: {symbol} {strike}{option_type} "
+                        f"   🚀 {_cheap_label}: {symbol} {strike}{option_type} "
                         f"→ strike {affordable['strike']}{option_type} "
                         f"(premium ₹{affordable['ltp']:.2f}, "
                         f"1 lot ₹{affordable['one_lot_cost']:,.0f})")
@@ -2328,9 +2332,9 @@ class TigerLiveRunner:
                     strike = affordable["strike"]
                 else:
                     logger.info(
-                        f"   ❌ NO AFFORDABLE STRIKE — {symbol} {strike}{option_type} "
-                        f"min 1 lot ₹{one_lot_cost:,.0f} > free capital ₹{_trade_capital:,.0f}, "
-                        f"no OTM strike affordable within {otm_steps} steps")
+                        f"   ❌ NO CHEAP STRIKE — {symbol} {strike}{option_type} "
+                        f"premium ₹{real_ltp:.2f} > ₹{_max_premium:.0f} max, "
+                        f"no affordable OTM within {otm_steps} steps")
 
             # 🔥 FUND BRAIN LIVE SIZING — real balance + real LTP + real lot
             # Pass market_budget (50% of total) so sizing stays within this market's share.
@@ -2572,6 +2576,34 @@ class TigerLiveRunner:
                             f"confluence {brain_alignment}/{req_conf}")
             except Exception as exc:
                 logger.warning(f"ML gate error (pass-through): {exc}")
+
+            # === VOLUME GATE (user: "jha buying selling ho rhi hai wha jaye") ===
+            # Reject dead options — only trade where there's actual volume.
+            _opt_vol = 0
+            try:
+                _opt_vol = self.broker.get_option_volume(
+                    contract["tradingsymbol"],
+                    contract["symboltoken"],
+                    contract["exchange"],
+                )
+            except Exception:
+                pass  # volume API fail → don't block (best effort)
+            if _opt_vol < _min_vol:
+                logger.info(
+                    f"   🚫 VOLUME GATE: {symbol} {strike}{option_type} "
+                    f"vol={_opt_vol} < {_min_vol} — dead option, no buying/selling")
+                self._order_log.append({
+                    "time": datetime.now().isoformat(),
+                    "symbol": symbol, "strike": strike,
+                    "option_type": option_type,
+                    "exchange": contract["exchange"],
+                    "tradingsymbol": contract["tradingsymbol"],
+                    "real_ltp": real_ltp, "volume": _opt_vol,
+                    "balance": available_balance,
+                    "success": False, "error": "low_volume",
+                })
+                self._save_order_log()
+                continue
 
             # LIMIT order at LTP + small buffer for fill — prevents overpaying.
             # MARKET orders on low-liquidity options fill at worst price.

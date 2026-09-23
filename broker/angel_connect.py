@@ -228,9 +228,39 @@ class AngelBroker:
         # REST fallback
         return self.get_ltp(tradingsymbol, symboltoken, exchange)
 
-    def is_session_valid(self) -> bool:
+    def get_option_volume(self, tradingsymbol: str, symboltoken: str,
+                          exchange: str) -> int:
+        """Fetch option trade volume — for the volume gate.
+
+        User mandate: "jha buying selling ho rhi hai volumes hai wha jaye"
+        — only enter options with actual buying/selling activity.
+
+        Returns 0 if API fails or no volume data available.
         """
-        Checks whether the session is still valid. Angel One sessions are
+        self.ensure_logged_in()
+        try:
+            try:
+                from data.loader import _angel_rate_limit_gate
+                _angel_rate_limit_gate()
+            except Exception:
+                pass
+            # Angel One quote API returns tradeVolume field
+            resp = self.smart_api.quoteApi(
+                mode="ltp",
+                exchangeTokens={exchange: [str(symboltoken)]})
+            if not resp or not resp.get("data"):
+                return 0
+            data = resp["data"]
+            if isinstance(data, list) and len(data) > 0:
+                data = data[0]
+            vol = float(data.get("tradeVolume", 0) or data.get("volume", 0) or 0)
+            return int(vol)
+        except Exception as exc:
+            logger.debug(f"Volume fetch fail {tradingsymbol}: {exc}")
+            return 0
+
+    def is_session_valid(self) -> bool:
+        """Checks whether the session is still valid. Angel One sessions are
         usually valid for one trading day — if more than 20 hours have
         passed since login_time, the session is treated as expired
         (safe default; exact expiry should be confirmed from Angel One
