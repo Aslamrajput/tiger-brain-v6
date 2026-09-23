@@ -419,7 +419,7 @@ SCALPER = {
     "MIN_VOLUME_SURGE": 1.4,      # dynamic — instantaneous vol 1.3x-1.5x of trailing avg
     "MIN_RSI_BUY": 60,            # CE: RSI >= 60 (bullish momentum)
     "MAX_RSI_SELL": 40,           # PE: RSI <= 40 (bearish momentum)
-    "REQUIRE_SUPERTREND": True,   # supertrend must agree with direction
+    "REQUIRE_SUPERTREND": False,  # REMOVED per user: supertrend blocks good trades
     # === EXIT RULES (momentum-aware — give trades room to breathe) ===
     "TARGET_PCT": 15.0,           # +15% = exit (let momentum run, don't exit too early)
     "MAX_STOP_PCT": 7.0,          # -7% = hard stop (premium-aware: gives pullback room)

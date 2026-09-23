@@ -243,43 +243,13 @@ def find_scalper_entry(
             f"🚫 SKIP {symbol} — vol {vol_ratio:.1f}x < {SCALPER['MIN_VOLUME_SURGE']}x")
         return None
 
-    # === GATE 4: SuperTrend 15m confirmation ===
-    if SCALPER.get("REQUIRE_SUPERTREND", True):
-        try:
-            from subbrains.trend_follow import calculate_supertrend
-            st = calculate_supertrend(df_15m.iloc[:i_15m + 1])
-            current_trend = int(st["trend"].iloc[-1])
-            if direction == "BUY" and current_trend != 1:
-                logger.info(
-                    f"🚫 SKIP {symbol} BUY — supertrend bearish (trend={current_trend})")
-                return None
-            if direction == "SELL" and current_trend != -1:
-                logger.info(
-                    f"🚫 SKIP {symbol} SELL — supertrend bullish (trend={current_trend})")
-                return None
-        except Exception as exc:
-            logger.debug(f"Scalper supertrend check fail {symbol}: {exc}")
-            logger.info(f"🚫 SKIP {symbol} — supertrend unavailable")
-            return None
+    # === GATE 4: SuperTrend 15m confirmation (DISABLED — user: blocks good trades) ===
+    # if SCALPER.get("REQUIRE_SUPERTREND", True):
+    #     ... removed — supertrend was blocking momentum entries ...
 
-    # === GATE 5: RSI alignment ===
+    # === GATE 5: RSI alignment (DISABLED — user: blocks good trades) ===
+    # RSI gate removed — Tiger should follow SMC zones, not RSI thresholds.
     latest_rsi = 50.0
-    try:
-        from subbrains.mean_reversion import calculate_rsi
-        rsi_series = calculate_rsi(df_15m.iloc[:i_15m + 1])
-        latest_rsi = float(rsi_series.iloc[-1])
-        if is_call and latest_rsi < SCALPER["MIN_RSI_BUY"]:
-            logger.info(
-                f"🚫 SKIP {symbol} BUY — RSI {latest_rsi:.0f} < {SCALPER['MIN_RSI_BUY']}")
-            return None
-        if not is_call and latest_rsi > SCALPER["MAX_RSI_SELL"]:
-            logger.info(
-                f"🚫 SKIP {symbol} SELL — RSI {latest_rsi:.0f} > {SCALPER['MAX_RSI_SELL']}")
-            return None
-    except Exception as exc:
-        logger.debug(f"Scalper RSI check fail {symbol}: {exc}")
-        logger.info(f"🚫 SKIP {symbol} — RSI unavailable")
-        return None
 
     # === GATE 6: VWAP confluence (institutional consensus) ===
     vwap_ok = False
