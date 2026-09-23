@@ -483,13 +483,21 @@ ML_ENGINE = {
         "sniper_zone_strength", "fvg_size", "commodity_volatility",
     ],
     "TRAINING": {
-        "N_SPLITS": 5,           # TimeSeriesSplit folds
-        "PURGE_BARS": 5,         # purge labels within N bars of train/test boundary
-        "MIN_SAMPLES": 50,       # minimum samples to train (lowered — faster learning)
-        "VALIDATED_ACC_MIN": 0.55,  # reject retrain if OOS accuracy below this
-        "SNIPER_ONLY": True,     # train only on sniper trades (pnl>30% + SNIPER_TRAILING_EXIT)
-        "SNIPER_MIN_PNL_PCT": 30.0,   # only learn from big sniper winners
+        "N_SPLITS": 3,           # TimeSeriesSplit folds (3 for small data)
+        "PURGE_BARS": 2,         # purge labels within N bars of train/test boundary
+        "MIN_SAMPLES": 10,       # minimum samples to train (lowered — ML starts sooner)
+        "VALIDATED_ACC_MIN": 0.50,  # accept model if OOS accuracy >= 50% (better than random)
+        "SNIPER_ONLY": False,    # learn from ALL trades (not just sniper)
+        "SNIPER_MIN_PNL_PCT": 30.0,
         "SNIPER_EXIT_REASON": "SNIPER_TRAILING_EXIT",
+    },
+    "ROCKET_SIZING": {
+        "ENABLED": True,
+        "HIGH_CONFIDENCE": 0.75,   # win_prob >= 0.75 → qty × 1.5 (rocket)
+        "MID_CONFIDENCE": 0.50,    # win_prob >= 0.50 → qty × 1.0 (normal)
+        "LOW_FACTOR": 0.5,         # win_prob < 0.50 → qty × 0.5 (cautious)
+        "ROCKET_FACTOR": 1.5,      # rocket multiplier
+        "NORMAL_FACTOR": 1.0,      # normal multiplier
     },
 }
 

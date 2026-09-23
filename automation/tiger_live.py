@@ -155,7 +155,7 @@ class TigerLiveRunner:
     def _live_re_size(
         self, real_balance: float, real_ltp: float, real_lot_size: int,
         is_delivery: bool, current_exposure: float = 0.0,
-        market_budget: float = 0.0,
+        market_budget: float = 0.0, win_prob: float = 1.0,
     ) -> dict:
         """Derive quantity from REAL balance + REAL LTP + REAL lot size.
 
@@ -227,6 +227,45 @@ class TigerLiveRunner:
             logger.info(
                 f"   💰 Re-sized to {affordable_lots} lots = {qty} qty "
                 f"= ₹{cost:,.0f} (fit balance ₹{real_balance:,.0f})")
+
+        # === ML ROCKET SIZING — win_prob adjusts position size ===
+        # ML confidence → bigger position for rocket setups, smaller for weak ones.
+        # This puts ML to WORK (user: "ML ko kaam pe laga de").
+        from config.thresholds import ML_ENGINE as _ML
+        _rocket = _ML.get("ROCKET_SIZING", {})
+        if _rocket.get("ENABLED", False) and qty > 0:
+            _hi = _rocket.get("HIGH_CONFIDENCE", 0.75)
+            _mid = _rocket.get("MID_CONFIDENCE", 0.50)
+            _rocket_f = _rocket.get("ROCKET_FACTOR", 1.5)
+            _normal_f = _rocket.get("NORMAL_FACTOR", 1.0)
+            _low_f = _rocket.get("LOW_FACTOR", 0.5)
+            if win_prob >= _hi:
+                _factor = _rocket_f
+                _label = "🚀 ROCKET"
+            elif win_prob >= _mid:
+                _factor = _normal_f
+                _label = "📊 NORMAL"
+            else:
+                _factor = _low_f
+                _label = "🛡️ CAUTIOUS"
+            _new_qty = int(qty * _factor)
+            # Re-align to lot multiple
+            if lot > 0:
+                _new_lots = max(1, _new_qty // lot)
+                _new_qty = _new_lots * lot
+            # Never exceed what balance allows
+            _new_cost = _new_qty * real_ltp
+            if _new_cost > effective_balance:
+                _aff = max(1, int(effective_balance // (real_ltp * lot)))
+                _new_qty = _aff * lot
+                _new_cost = _new_qty * real_ltp
+            if _new_qty != qty:
+                logger.info(
+                    f"   {_label} SIZING: win_prob={win_prob:.2f} → "
+                    f"qty {qty}→{_new_qty} (×{_factor})")
+                qty = _new_qty
+                lots = qty // lot if lot > 0 else 0
+                cost = qty * real_ltp
 
         return {
             "quantity": qty,
@@ -2336,6 +2375,26 @@ class TigerLiveRunner:
                         f"premium ₹{real_ltp:.2f} > ₹{_max_premium:.0f} max, "
                         f"no affordable OTM within {otm_steps} steps")
 
+            # === EARLY ML EXTRACTION — compute win_prob BEFORE sizing ===
+            # Rocket sizing needs win_prob to decide position size.
+            # Full ML block (sensex filter etc.) runs later.
+            if "ml_win_prob" not in t:
+                try:
+                    _early_feat = extract_live_features(
+                        symbol=symbol,
+                        signal=t,
+                        data_map_15m=self.data_map,
+                        data_map_1m=self.data_map_1m,
+                        broker=self.broker,
+                        pcr_value=t.get("pcr", 1.0),
+                    )
+                    _, _early_wp = self.ml_gate.check_gate(_early_feat)
+                    t["ml_features"] = _early_feat
+                    t["ml_win_prob"] = _early_wp
+                except Exception:
+                    t["ml_win_prob"] = 1.0
+            _wp = t.get("ml_win_prob", 1.0)
+
             # 🔥 FUND BRAIN LIVE SIZING — real balance + real LTP + real lot
             # Capital split: 50/50 when BOTH markets open, but 100% to the
             # active market when the other is closed (user: "nse band hote hi
@@ -2364,6 +2423,7 @@ class TigerLiveRunner:
                 is_delivery=is_delivery,
                 current_exposure=current_exposure,
                 market_budget=_market_budget,
+                win_prob=t.get("ml_win_prob", 1.0),
             )
             quantity = re_size["quantity"]
             trade_cost = re_size["allocated_capital"]
@@ -2525,31 +2585,35 @@ class TigerLiveRunner:
                 continue
 
             # === ML INFERENCE ADVISOR — win-probability signal (never blocks) ===
-            # Extract live features from WS 1m candles + 15m zones + option
-            # chain, run ensemble predict_proba. ML is ADVISORY — provides
-            # win_prob as confidence, Tiger decides whether to proceed.
-            try:
-                ml_features = extract_live_features(
-                    symbol=symbol,
-                    signal=t,
-                    data_map_15m=self.data_map,
-                    data_map_1m=self.data_map_1m,
-                    broker=self.broker,
-                    pcr_value=t.get("pcr", 1.0),
-                )
-                ml_passed, win_prob = self.ml_gate.check_gate(ml_features)
-                # Attach features + win_prob to signal early (used by both
-                # block branches and the trade-log entry below).
-                t["ml_features"] = ml_features
-                t["ml_win_prob"] = win_prob
-                t["sensex_trend"] = float(ml_features.get("sensex_trend", 0.0))
+            # win_prob already computed above (early extraction for rocket sizing).
+            # Here we run the sensex directional filter + attach to trade log.
+            if "ml_features" in t:
+                ml_features = t["ml_features"]
+                win_prob = t.get("ml_win_prob", 1.0)
+            else:
+                try:
+                    ml_features = extract_live_features(
+                        symbol=symbol,
+                        signal=t,
+                        data_map_15m=self.data_map,
+                        data_map_1m=self.data_map_1m,
+                        broker=self.broker,
+                        pcr_value=t.get("pcr", 1.0),
+                    )
+                    ml_passed, win_prob = self.ml_gate.check_gate(ml_features)
+                except Exception:
+                    ml_features = {}
+                    win_prob = 1.0
+            t["ml_features"] = ml_features
+            t["ml_win_prob"] = win_prob
+            t["sensex_trend"] = float(ml_features.get("sensex_trend", 0.0))
 
-                # --- SENSEX DIRECTIONAL FILTER ---
-                # Block options that fight the broad-market trend:
-                #   bullish market (sensex_trend=+1) + PE → BLOCK
-                #   bearish market (sensex_trend=-1) + CE → BLOCK
-                if self.ml_gate.is_enabled() and sensex_blocks_option(
-                        t["sensex_trend"], option_type):
+            # --- SENSEX DIRECTIONAL FILTER ---
+            # Block options that fight the broad-market trend:
+            #   bullish market (sensex_trend=+1) + PE → BLOCK
+            #   bearish market (sensex_trend=-1) + CE → BLOCK
+            if self.ml_gate.is_enabled() and sensex_blocks_option(
+                    t["sensex_trend"], option_type):
                     logger.info(
                         f"   📉 SENSEX BLOCK {symbol} {option_type} — "
                         f"trend={t['sensex_trend']:+.0f} fights {option_type}")
@@ -2568,31 +2632,29 @@ class TigerLiveRunner:
                     self._save_order_log()
                     continue
 
-                # --- ML WIN-PROBABILITY ADVISORY (never blocks) ---
-                # ML check_gate always passes now. Log low win_prob as advisory.
-                if win_prob < self.ml_gate.min_win_prob:
-                    logger.info(
-                        f"   💡 ML ADVISORY {symbol} {option_type} — "
-                        f"win_prob={win_prob:.2f} < {self.ml_gate.min_win_prob:.2f} "
-                        f"(advisory only — Tiger decides)")
+            # --- ML WIN-PROBABILITY ADVISORY (never blocks) ---
+            # ML check_gate always passes now. Log low win_prob as advisory.
+            if win_prob < self.ml_gate.min_win_prob:
+                logger.info(
+                    f"   💡 ML ADVISORY {symbol} {option_type} — "
+                    f"win_prob={win_prob:.2f} < {self.ml_gate.min_win_prob:.2f} "
+                    f"(advisory only — Tiger decides)")
 
-                # --- ML CONFLUENCE ADVISORY (never blocks) ---
-                # Higher ML confidence → fewer 7-brain alignments needed.
-                # Lower confidence → log advisory but Tiger decides.
-                if self.ml_gate.is_enabled():
-                    req_conf = required_confluence_for_win_prob(win_prob)
-                    if brain_alignment < req_conf:
-                        logger.info(
-                            f"   💡 ML CONFLUENCE ADVISORY {symbol} {option_type} — "
-                            f"brains {brain_alignment}/{req_conf} suggested "
-                            f"(win_prob={win_prob:.2f}) — Tiger decides")
-                    else:
-                        logger.info(
-                            f"   🧠 ML SIGNAL {symbol} {option_type} — "
-                            f"win_prob={win_prob:.2f}, "
-                            f"confluence {brain_alignment}/{req_conf}")
-            except Exception as exc:
-                logger.warning(f"ML gate error (pass-through): {exc}")
+            # --- ML CONFLUENCE ADVISORY (never blocks) ---
+            # Higher ML confidence → fewer 7-brain alignments needed.
+            # Lower confidence → log advisory but Tiger decides.
+            if self.ml_gate.is_enabled():
+                req_conf = required_confluence_for_win_prob(win_prob)
+                if brain_alignment < req_conf:
+                    logger.info(
+                        f"   💡 ML CONFLUENCE ADVISORY {symbol} {option_type} — "
+                        f"brains {brain_alignment}/{req_conf} suggested "
+                        f"(win_prob={win_prob:.2f}) — Tiger decides")
+                else:
+                    logger.info(
+                        f"   🧠 ML SIGNAL {symbol} {option_type} — "
+                        f"win_prob={win_prob:.2f}, "
+                        f"confluence {brain_alignment}/{req_conf}")
 
             # === VOLUME GATE (user: "jha buying selling ho rhi hai wha jaye") ===
             # Reject dead options — only trade where there's actual volume.

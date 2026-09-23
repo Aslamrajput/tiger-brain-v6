@@ -159,8 +159,51 @@ class TigerMLGate:
             win_probability is logged as a confidence signal.
         """
         win_prob = self.predict_win_probability(features)
+        # If no model loaded, use feature-based heuristic so ML still helps
+        if win_prob >= 1.0:
+            win_prob = heuristic_win_probability(features)
         # ADVISORY: always pass — Tiger decides, not ML
         return True, win_prob
+
+
+def heuristic_win_probability(features: dict) -> float:
+    """Feature-based win probability estimate when no ML model is trained yet.
+
+    Uses the same features ML would learn from, but as simple weighted rules.
+    This gives Tiger a meaningful confidence score from day one — ML takes
+    over once a real model is trained (10+ closed trades).
+
+    Base = 0.50 (neutral). Each strong feature adds confidence:
+      - zone_strength > 0.8  → +0.10 (strong SMC zone)
+      - brain_alignment >= 0.8 (normalized 0-1) → +0.08 (7 brains agree)
+      - vol_surge > 1.5      → +0.06 (volume explosion)
+      - body_pct > 50%       → +0.06 (momentum candle)
+      - rsi <= 35 or >= 65   → +0.05 (momentum extreme = entry)
+      - sniper_zone > 80     → +0.10 (strong sniper confluence)
+    Capped at 0.95 (never 1.0 — always some uncertainty).
+    """
+    base = 0.50
+    zone = float(features.get("zone_strength", 0) or 0)
+    align = float(features.get("brain_alignment", 0) or 0)
+    vol_surge = float(features.get("vol_surge_ratio", 0) or 0)
+    body = float(features.get("body_pct", 0) or 0)
+    rsi = float(features.get("rsi", 50) or 50)
+    sniper_zone = float(features.get("sniper_zone_strength", 0) or 0)
+
+    if zone > 0.8:
+        base += 0.10
+    if align >= 0.8:
+        base += 0.08
+    if vol_surge > 1.5:
+        base += 0.06
+    if body > 50:
+        base += 0.06
+    if rsi <= 35 or rsi >= 65:
+        base += 0.05
+    if sniper_zone > 80:
+        base += 0.10
+
+    return min(base, 0.95)
 
 
 def required_confluence_for_win_prob(win_prob: float) -> int:

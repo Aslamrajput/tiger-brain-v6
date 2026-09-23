@@ -243,17 +243,20 @@ class TestMLEngine:
     """pipeline/ml_engine.py — model training and inference gate."""
 
     def test_tiger_ml_gate_disabled_without_model(self, tmp_path):
-        """Gate must be disabled (pass-through) when no model file exists."""
+        """Gate must be disabled (pass-through) when no model file exists.
+
+        With heuristic fallback, win_prob comes from features (0.50 for
+        empty features). Gate still passes (advisory)."""
         from pipeline.ml_engine import TigerMLGate
         gate = TigerMLGate(
             model_path=str(tmp_path / "nonexistent.joblib"),
             min_win_prob=0.70,
         )
         assert not gate.is_enabled()
-        # Pass-through: win_prob=1.0 → gate passes
+        # Pass-through: gate passes, win_prob from heuristic (0.50 for empty)
         passed, prob = gate.check_gate({})
         assert passed is True
-        assert prob == 1.0
+        assert prob == 0.50
 
     def test_tiger_ml_gate_advisory_never_rejects(self, tmp_path):
         """ML is ADVISORY — never blocks even when win_probability < min_win_prob.
@@ -634,8 +637,12 @@ class TestMLConfig:
         train = ML_ENGINE["TRAINING"]
         assert train["N_SPLITS"] >= 3
         assert train["PURGE_BARS"] >= 1
-        # MIN_SAMPLES lowered to 50 (Sep 2026) — faster learning on small accounts
-        assert train["MIN_SAMPLES"] >= 50
+        # MIN_SAMPLES lowered to 10 — ML starts learning sooner
+        assert train["MIN_SAMPLES"] == 10
+        # ROCKET SIZING config (user: "ML ko kaam pe laga de")
+        rocket = ML_ENGINE["ROCKET_SIZING"]
+        assert rocket["ENABLED"] is True
+        assert rocket["ROCKET_FACTOR"] == 1.5
 
 
 # ============================================================
