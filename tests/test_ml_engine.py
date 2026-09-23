@@ -271,7 +271,7 @@ class TestMLEngine:
             model_path=str(tmp_path / "nonexistent.joblib"),
             min_win_prob=0.70,
         )
-        gate.model = MockModel()  # inject mock
+        gate.models["LightGBM"] = MockModel()  # inject mock into ensemble dict
         passed, prob = gate.check_gate({})
         assert passed  # ADVISORY: always passes now, never blocks
         assert prob == pytest.approx(0.4, abs=0.01)
@@ -288,7 +288,7 @@ class TestMLEngine:
             model_path=str(tmp_path / "nonexistent.joblib"),
             min_win_prob=0.70,
         )
-        gate.model = MockModel()
+        gate.models["LightGBM"] = MockModel()
         passed, prob = gate.check_gate({})
         assert passed
         assert prob == pytest.approx(0.85, abs=0.01)
@@ -327,7 +327,7 @@ class TestMLEngine:
         assert "model" in bundle
         assert "feature_columns" in bundle
         assert "metrics" in bundle
-        assert bundle["metrics"]["n_splits"] == 3
+        assert "n_models" in bundle["metrics"]
 
     def test_train_model_skips_insufficient_samples(self):
         """Training must be skipped if samples < min_samples."""
@@ -600,12 +600,12 @@ class TestMLEngine:
         assert required_confluence_for_win_prob(0.65) == 5
         assert required_confluence_for_win_prob(0.50) == 5
 
-    def test_train_model_min_samples_lowered_to_50(self):
-        """train_model now accepts 50 samples (was 200) — faster learning."""
+    def test_train_model_min_samples_lowered_to_10(self):
+        """train_model now accepts 10 samples — ML starts learning sooner."""
         import inspect
         from pipeline.ml_engine import train_model
         sig = inspect.signature(train_model)
-        assert sig.parameters["min_samples"].default == 50
+        assert sig.parameters["min_samples"].default == 10
 
 
 # ============================================================
