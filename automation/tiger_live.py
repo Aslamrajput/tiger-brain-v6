@@ -155,6 +155,7 @@ class TigerLiveRunner:
     def _live_re_size(
         self, real_balance: float, real_ltp: float, real_lot_size: int,
         is_delivery: bool, current_exposure: float = 0.0,
+        market_budget: float = 0.0,
     ) -> dict:
         """Derive quantity from REAL balance + REAL LTP + REAL lot size.
 
@@ -171,9 +172,14 @@ class TigerLiveRunner:
             return {"quantity": 0, "lots": 0, "allocated_capital": 0,
                     "reason": "invalid balance/ltp/lotsize"}
 
+        # === 50/50 NSE/MCX CAPITAL SPLIT ===
+        # Use market_budget (50% of total) instead of full balance so one
+        # market never over-allocates and blocks the other.
+        effective_balance = market_budget if market_budget > 0 else real_balance
+
         lot = int(real_lot_size)
         try:
-            plan = announce_fund_plan(real_balance)
+            plan = announce_fund_plan(effective_balance)
         except ValueError as exc:
             logger.warning(f"Fund plan fail: {exc} — skip order")
             return {"quantity": 0, "lots": 0, "allocated_capital": 0,
@@ -206,10 +212,10 @@ class TigerLiveRunner:
                 f"   ⚠️ Exchange qty guard: capped to {max_lots} lots "
                 f"= {qty} qty (exchange freeze limit)")
 
-        # Final affordability: qty × real_ltp MUST fit in balance
+        # Final affordability: qty × real_ltp MUST fit in market budget
         cost = qty * real_ltp
-        if cost > real_balance:
-            affordable_lots = int(real_balance // (real_ltp * lot))
+        if cost > effective_balance:
+            affordable_lots = int(effective_balance // (real_ltp * lot))
             if affordable_lots < 1:
                 logger.info(
                     f"   💰 SKIP — 1 lot ₹{lot * real_ltp:,.0f} > "
@@ -2229,6 +2235,20 @@ class TigerLiveRunner:
                 if o.get("success") and not o.get("exited", False)
             )
 
+            # === 50/50 NSE/MCX CAPITAL SPLIT (PERMANENT FIX) ===
+            # Determine this trade's market + deployed capital in THAT market only.
+            # NSE trades only check against the NSE 50% budget.
+            # MCX trades only check against the MCX 50% budget.
+            # This way one market NEVER blocks the other.
+            _this_market = "MCX" if is_mcx_commodity else "NSE"
+            market_deployed_cost = sum(
+                float(o.get("trade_cost", 0)) for o in self._order_log
+                if o.get("success") and not o.get("exited", False)
+                and ("MCX" if MARKET_CATEGORIES.get(
+                    resolve_exchange_for_symbol(o.get("symbol", "")), "") == "commodity"
+                    else "NSE") == _this_market
+            )
+
             # MCX MINI fallback — if a full-size MCX contract is not affordable,
             # try the MINI variant (smaller lot = less capital).
             from data.loader import MCX_MINI_FALLBACK
@@ -2273,6 +2293,8 @@ class TigerLiveRunner:
                 open_positions_cost=current_exposure,
                 min_allocation=one_lot_cost,
                 open_position_count=open_position_count,
+                market=_this_market,
+                market_deployed_cost=market_deployed_cost,
             )
             _free_capital = _pre_cap.free_disposable if _pre_cap else available_balance
             _trade_capital = min(_free_capital, available_balance) if _free_capital > 0 else available_balance
@@ -2310,12 +2332,16 @@ class TigerLiveRunner:
                         f"no OTM strike affordable within {otm_steps} steps")
 
             # 🔥 FUND BRAIN LIVE SIZING — real balance + real LTP + real lot
+            # Pass market_budget (50% of total) so sizing stays within this market's share.
+            from config.thresholds import BRAIN4 as _B4
+            _market_budget = available_balance * (_B4.get("MARKET_CAPITAL_SPLIT_PCT", 50.0) / 100.0)
             re_size = self._live_re_size(
                 real_balance=available_balance,
                 real_ltp=real_ltp,
                 real_lot_size=real_lot_size,
                 is_delivery=is_delivery,
                 current_exposure=current_exposure,
+                market_budget=_market_budget,
             )
             quantity = re_size["quantity"]
             trade_cost = re_size["allocated_capital"]
@@ -2401,6 +2427,8 @@ class TigerLiveRunner:
                     open_positions_cost=current_exposure,
                     min_allocation=one_lot_cost,
                     open_position_count=open_position_count,
+                    market=_this_market,
+                    market_deployed_cost=market_deployed_cost,
                 )
                 if not cap_check.allowed:
                     logger.info(

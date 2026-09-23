@@ -135,6 +135,8 @@ class CapitalManager:
         open_positions_cost: float = 0.0,
         min_allocation: float = 0.0,
         open_position_count: int = 0,
+        market: str = "",
+        market_deployed_cost: float = 0.0,
     ) -> CapitalCheck:
         """Run all three gates and return allocation decision.
 
@@ -177,9 +179,25 @@ class CapitalManager:
                 blocked=True,
             )
 
-        # GATE 2: Disposable capital (RULE B — Order Blocking)
-        free_disposable = self.compute_free_disposable(
-            available, open_positions_cost)
+        # === 50/50 NSE/MCX CAPITAL SPLIT (PERMANENT FIX) ===
+        # Each market gets its own 50% budget. NSE never blocks MCX, MCX never
+        # blocks NSE. market_deployed_cost = capital already deployed in THIS
+        # market only (not the other market's positions).
+        if market and market_deployed_cost >= 0:
+            split_pct = BRAIN4.get("MARKET_CAPITAL_SPLIT_PCT", 50.0) / 100.0
+            market_budget = available * split_pct
+            market_free = market_budget - market_deployed_cost
+            free_disposable = market_free
+            logger.info(
+                "💰 50/50 SPLIT [%s]: budget ₹%.0f, deployed ₹%.0f, "
+                "free ₹%.0f (total balance ₹%.0f)",
+                market, market_budget, market_deployed_cost,
+                market_free, available,
+            )
+        else:
+            # Fallback: old behavior (total balance minus all deployed)
+            free_disposable = self.compute_free_disposable(
+                available, open_positions_cost)
 
         if free_disposable <= 0:
             return CapitalCheck(

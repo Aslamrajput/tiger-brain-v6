@@ -342,6 +342,11 @@ BRAIN4 = {
     # by conviction-multiplier allocating < one_lot_cost.
     "MAX_OPEN_POSITIONS": 2,
     "ALLOCATED_PER_TRADE": 14500.0,
+    # === 50/50 NSE/MCX CAPITAL SPLIT (PERMANENT FIX) ===
+    # Each market gets its own 50% budget — NSE never blocks MCX, MCX never blocks NSE.
+    # NSE budget = total_balance * 0.50 (for NIFTY/BANKNIFTY/stock options — cheap ₹50-100 premiums)
+    # MCX budget = total_balance * 0.50 (for CRUDEOIL/NATURALGAS/SILVER — separate pool)
+    "MARKET_CAPITAL_SPLIT_PCT": 50.0,
     # Dynamic position sizing: full Angel One capital available for trading.
     "MAX_CAPITAL_PER_TRADE_PCT": 100.0,
     # Full capital deployable across trades (Angel One balance = 100% trading money).
