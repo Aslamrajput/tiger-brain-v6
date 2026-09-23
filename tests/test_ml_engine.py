@@ -63,17 +63,17 @@ class TestFeatureStore:
         assert SNIPER["NSE_MIN_CONFLUENCE_COMPONENTS"] == 2
         assert SNIPER["MIN_CONFLUENCE_COMPONENTS"] == 2
 
-    def test_sniper_trail_activates_at_10pct(self):
-        """Rocket trail arms at +10% profit (was 25% — too high, never armed).
-        At +10% the trail actually engages on real option moves and locks 50%
-        of peak. The 5m opposite BOS exit only fires AFTER the trail arms so
+    def test_sniper_trail_activates_at_3pct(self):
+        """Rocket trail arms at +3% profit — backtest showed most wins are +5-6%,
+        so arming at 3% captures them. 60% peak lock (tighter than 50%).
+        The 5m opposite BOS exit only fires AFTER the trail arms so
         first-pullback noise doesn't kill the rocket before takeoff."""
         from config.thresholds import SNIPER
-        assert SNIPER["TRAIL_ACTIVATE_PCT"] == 5.0
-        # 50% peak lock retained
-        assert SNIPER["TRAIL_LOCK_PCT_OF_PEAK"] == 50.0
-        # OB stop still wide (-12%) so rocket survives pre-takeoff pullback
-        assert SNIPER["OB_STOP_PCT"] == 12.0
+        assert SNIPER["TRAIL_ACTIVATE_PCT"] == 3.0
+        # 60% peak lock (tighter than 50%)
+        assert SNIPER["TRAIL_LOCK_PCT_OF_PEAK"] == 60.0
+        # OB stop tightened to -5% (was -12% — 7 losses × -12% = -84% killed account)
+        assert SNIPER["OB_STOP_PCT"] == 5.0
 
     def test_feature_values_are_finite(self):
         """No NaN or Inf in feature values — must be sanitized to 0."""

@@ -529,7 +529,7 @@ ML_ENGINE = {
 # ============================================================
 SNIPER = {
     "MAX_TRADES_PER_DAY": 3,        # sniper doesn't overtrade
-    "MIN_ZONE_STRENGTH": 50.0,      # was 80 — too strict, killed all live MCX zones
+    "MIN_ZONE_STRENGTH": 80.0,      # backtest: ZS 80 = 67% win, ZS 70 = 31% win (TRAP)
     "MIN_WIN_PROB": 0.80,           # ML conviction gate (high only)
     # === SEQUENTIAL TIMING: NSE morning → MCX evening (user mandate) ===
     # NSE: 9:15 AM - 3:00 PM (50% capital, morning session)
@@ -560,8 +560,9 @@ SNIPER = {
     #   4. 5m opposite BOS = structure reversal exit — but ONLY checked AFTER
     #      the trail arms (before that, first pullbacks must not kill the rocket).
     "ATR_PERIOD": 14,
-    "TRAIL_ACTIVATE_PCT": 5.0,      # trail arms at +5% (was 10 — lock profits faster)
-    "TRAIL_LOCK_PCT_OF_PEAK": 50.0, # lock 50% of peak once armed (rocket room)
-    "OB_STOP_PCT": 12.0,            # OB stop at -12% (survive pre-rocket noise)
+    "TRAIL_ACTIVATE_PCT": 3.0,      # trail arms at +3% (was 5/10 — most wins are +5-6%, arm early)
+    "TRAIL_LOCK_PCT_OF_PEAK": 60.0, # lock 60% of peak once armed (tighter lock)
+    "OB_STOP_PCT": 5.0,             # OB stop at -5% (was 12 — 7 losses × -12% = -84% killed account)
+    "SELL_MIN_ZONE_STRENGTH": 70.0, # SELL/PE needs higher score (24% win rate vs BUY 50%)
     "EXIT_REASON": "SNIPER_TRAILING_EXIT",
 }

@@ -46,7 +46,7 @@ MCX_SYMBOLS: dict[str, str] = {
 
 # Confluence weights — sum to 100.
 _WEIGHTS = {"bos": 25, "sweep": 25, "ob": 25, "fvg": 25}
-MIN_ZONE_STRENGTH = 50.0  # was 80 — too strict for live, killed all MCX zones
+MIN_ZONE_STRENGTH = 80.0  # backtest: ZS 80 = 67% win, ZS 70 = 31% win (TRAP)
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -403,6 +403,30 @@ def scan_mcx(data_map_5m: dict[str, pd.DataFrame],
         fvg_size = float(fvg["size"]) if fvg else 0.0
         vol = calculate_atr_pct(df)
         ob_edge = ob or {"top": 0.0, "bottom": 0.0}
+
+        # === SELL/PE DIRECTION FILTER ===
+        # Backtest data: SELL trades have 24% win rate vs BUY 50%.
+        # Require higher zone_strength for SELL (PE) — only trade strong SELL zones.
+        from config.thresholds import SNIPER as _SNIP_CFG
+        _sell_min = _SNIP_CFG.get("SELL_MIN_ZONE_STRENGTH", 70.0)
+        if direction == "SELL" and score < _sell_min:
+            logger.debug(
+                "mcx_scanner: %s SELL score %.0f < %.0f — "
+                "weak SELL zone, skip (24%% win rate without filter)",
+                symbol, score, _sell_min)
+            continue
+
+        # === ZS 70 TRAP FILTER ===
+        # Backtest: ZS 70 (3 components, no sweep) has 30% win rate, -45.8% total.
+        # ZS 50 (2 components) = 52% win, ZS 80 (3+ with sweep) = 60% win.
+        # ZS 70 is the "false confluence" trap — looks strong but fails.
+        # Block scores in [65, 76) range (catches ZS 70, lets ZS 50 + ZS 80 through).
+        if 65 <= score < 76:
+            logger.debug(
+                "mcx_scanner: %s score %.0f in ZS-70 trap range — "
+                "false confluence (30%% win rate), skip",
+                symbol, score)
+            continue
 
         zone = SniperZone(
             symbol=symbol, direction=direction, option_type=option_type,
