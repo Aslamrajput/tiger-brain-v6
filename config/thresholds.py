@@ -342,11 +342,16 @@ BRAIN4 = {
     # by conviction-multiplier allocating < one_lot_cost.
     "MAX_OPEN_POSITIONS": 2,
     "ALLOCATED_PER_TRADE": 14500.0,
-    # === 50/50 NSE/MCX CAPITAL SPLIT (PERMANENT FIX) ===
-    # Each market gets its own 50% budget — NSE never blocks MCX, MCX never blocks NSE.
-    # NSE budget = total_balance * 0.50 (for NIFTY/BANKNIFTY/stock options — cheap ₹50-100 premiums)
-    # MCX budget = total_balance * 0.50 (for CRUDEOIL/NATURALGAS/SILVER — separate pool)
-    "MARKET_CAPITAL_SPLIT_PCT": 50.0,
+    # === SEQUENTIAL MARKET — 100% capital to active market ===
+    # User mandate: "50/50 nahi chaiye — ak time pe ak market"
+    # No split — whoever is active (NSE morning / MCX evening) gets full wallet.
+    "MARKET_CAPITAL_SPLIT_PCT": 100.0,
+    # === DAILY PROFIT TARGET — ₹8,000 for Ujjivan Foundation ===
+    # User mandate: "Tiger ka dimag me gussa do — daily ₹8,000 profit target.
+    # ₹8,000+ profit → alert for withdrawal to Ujjivan (gareeb/aunty/bacche).
+    # More than ₹8,000 → excess goes to capital (reinvest, no withdrawal of excess).
+    # Less than ₹8,000 → no withdrawal, capital safe."
+    "DAILY_PROFIT_TARGET": 8000.0,
     # Dynamic position sizing: full Angel One capital available for trading.
     "MAX_CAPITAL_PER_TRADE_PCT": 100.0,
     # Full capital deployable across trades (Angel One balance = 100% trading money).

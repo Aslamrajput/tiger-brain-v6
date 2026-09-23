@@ -125,6 +125,11 @@ class TigerLiveRunner:
         self.capital_start: float = 0.0
         self.capital_after_entry: float = 0.0
         self.capital_after_exit: float = 0.0
+        # === ₹8,000 DAILY PROFIT TARGET — Ujjivan Foundation ===
+        # Daily starting balance → current balance = daily profit.
+        # ₹8,000+ → alert. Excess → reinvest (capital). Capital NEVER touched.
+        self._daily_start_balance: float = 0.0
+        self._daily_profit_alerted: bool = False
         # Open position tracker — Tiger's eyes always on broker positions
         # {tsym: {"peak": float, "target_booked": bool, "entry": float, "is_scalper": bool}}
         self._position_peaks: dict = self._load_position_peaks()
@@ -151,6 +156,11 @@ class TigerLiveRunner:
             min_win_prob=ML_ENGINE["MIN_WIN_PROB"],
             feature_columns=ML_ENGINE["FEATURE_COLUMNS"],
         )
+        # === BRAIN 6: Premium Discount Tracker — IV percentile advisor ===
+        # Tracks IV history per symbol, advises on premium cheap/expensive.
+        # ADVISORY only — informs Tiger, never blocks (user mandate).
+        from backtest.tiger_premium_brain import PremiumDiscountTracker
+        self.premium_tracker = PremiumDiscountTracker()
 
     def _live_re_size(
         self, real_balance: float, real_ltp: float, real_lot_size: int,
@@ -1393,14 +1403,23 @@ class TigerLiveRunner:
         self.monitor_open_positions()
 
     def mcx_market_open(self):
-        """MCX market open (15:30) — Tiger switches to MCX scanning.
+        """MCX market open (15:30) — Tiger FULLY switches to MCX.
 
         NSE closed at 15:15 (square-off done). Tiger now hunts MCX
-        commodities (GOLDM, SILVERM, CRUDEOIL, NATURALGAS) till 23:15.
-        Does NOT call pre_market_wake() (which fetches NSE symbols).
-        Instead: ensure broker login, then fetch MCX data only.
+        commodities (GOLDM, SILVERM, CRUDEOIL, NATURALGAS) till 23:15
+        with 100% capital. Does NOT call pre_market_wake() (which fetches
+        NSE symbols). Instead: ensure broker login, then fetch MCX data only.
+
+        ANTI-FORGET BUG FIX: This is the automatic switch point. Tiger
+        CANNOT "forget" MCX — get_active_market() returns "MCX" after 15:15,
+        and the sequential scan filter ensures only MCX symbols are scanned.
         """
-        logger.info("🐅 MCX MARKET OPEN (15:30) — Tiger switches to MCX scanning.")
+        logger.info("=" * 60)
+        logger.info("🐅 NSE CLOSED → MCX FULL SWITCH (15:30)")
+        logger.info("💰 100% CAPITAL → MCX (₹%s)", f"{self.account_capital:,.0f}"
+                    if self.account_capital else "pending")
+        logger.info("🎯 Hunting: GOLDM, SILVERM, CRUDEOIL, NATURALGAS")
+        logger.info("=" * 60)
         # Ensure broker session (login if needed, but skip NSE data fetch)
         if self.broker is None or not self.broker.is_session_valid():
             try:
@@ -1512,6 +1531,43 @@ class TigerLiveRunner:
                 f"held={hold_str}"
                 f"{' [target_booked]' if target_booked else ''}"
                 f"{' [SCALPER]' if tsym in self._scalper_positions else ''}")
+
+            # === BRAIN 5: GAMMA TRACKING ADVISORY (near-expiry protection) ===
+            # Options near expiry have explosive gamma — a small underlying
+            # move causes huge premium swings. Brain 5's exit_brain.py has
+            # this logic but it was never wired into live. Now it runs as
+            # an ADVISORY: logs a warning, tightens stops mentally, but
+            # Tiger's inline exit logic still makes the final call.
+            try:
+                from risk.exit_brain import check_gamma_risk
+                from config.thresholds import BRAIN5
+                # Estimate days-to-expiry from tradingsymbol (e.g. ...29SEP26CE)
+                _dte = None
+                _date_part = ""
+                for _suffix in ("CE", "PE"):
+                    if tsym.endswith(_suffix):
+                        _date_part = tsym[:-len(_suffix)]
+                        break
+                if _date_part:
+                    for _fmt in ("%d%b%Y", "%d%b%y"):
+                        try:
+                            _exp_date = datetime.strptime(_date_part[-7:], _fmt).date()
+                            _dte = (_exp_date - datetime.now().date()).days
+                            break
+                        except ValueError:
+                            continue
+                if _dte is not None and _dte <= BRAIN5["GAMMA_RISK_DAYS_TO_EXPIRY"]:
+                    _gamma_check = check_gamma_risk(
+                        {"days_to_expiry": _dte, "gamma_pct": tracker.get("gamma_pct", 1.0)},
+                        gamma_pct=tracker.get("gamma_pct", 1.0))
+                    if _gamma_check["gamma_exit"]:
+                        logger.warning(
+                            f"⚠️ BRAIN 5 GAMMA: {tsym} {_dte}d to expiry + high gamma "
+                            f"→ {tracker.get('gamma_pct', '?')}% — TIGHTEN STOP (advisory)")
+                        # Stash gamma warning on tracker for tighter exit
+                        self._position_peaks[tsym]["gamma_warning"] = True
+            except Exception:
+                pass  # gamma check is advisory — never break the exit loop
 
             # === SCALPER EXIT LOGIC (MOMENTUM-AWARE edition) ===
             # Give trades room to breathe — momentum needs time to develop.
@@ -1985,6 +2041,51 @@ class TigerLiveRunner:
         except Exception as exc:
             logger.debug("Profit extraction check skip: %s", exc)
 
+        # === ₹8,000 DAILY PROFIT TARGET — Ujjivan Foundation ===
+        # Daily starting balance → current balance = daily profit.
+        # ₹8,000+ profit → alert (withdraw ₹8,000 to Ujjivan).
+        # Excess profit → stays in capital (reinvest, no withdrawal).
+        # < ₹8,000 → no withdrawal, capital safe.
+        # Capital is NEVER touched — only profit.
+        try:
+            from config.thresholds import BRAIN4
+            _daily_target = BRAIN4.get("DAILY_PROFIT_TARGET", 8000.0)
+            # Set daily start balance once per day (first scan of the day)
+            _today = datetime.now().date()
+            if self._daily_start_balance <= 0 or \
+                    getattr(self, '_daily_start_date', None) != _today:
+                self._daily_start_balance = self.account_capital
+                self._daily_start_date = _today
+                self._daily_profit_alerted = False
+                logger.info(
+                    f"🌅 Daily start balance: ₹{self._daily_start_balance:,.0f} "
+                    f"| Target: ₹{_daily_target:,.0f} profit → Ujjivan Foundation")
+
+            # Refresh current balance
+            _current_bal = self.broker.get_balance() if self.broker else 0.0
+            if _current_bal > 0:
+                self.account_capital = _current_bal
+                _daily_profit = _current_bal - self._daily_start_balance
+                if _daily_profit >= _daily_target and not self._daily_profit_alerted:
+                    self._daily_profit_alerted = True
+                    _excess = _daily_profit - _daily_target
+                    logger.info("=" * 60)
+                    logger.info("🏦🏦🏦 ₹8,000 DAILY PROFIT TARGET HIT! 🏦🏦🏦")
+                    logger.info(f"   Daily start:   ₹{self._daily_start_balance:,.0f}")
+                    logger.info(f"   Current:       ₹{_current_bal:,.0f}")
+                    logger.info(f"   Daily profit:  ₹{_daily_profit:,.0f}")
+                    logger.info(f"   → Withdraw ₹{_daily_target:,.0f} to Ujjivan Foundation")
+                    logger.info(f"   → Excess ₹{_excess:,.0f} stays in capital (reinvest)")
+                    logger.info("   ⚠️ Withdraw ONLY profit, NEVER touch capital.")
+                    logger.info("   Withdraw via Angel One app → Ujjivan linked bank.")
+                    logger.info("=" * 60)
+                elif _daily_profit > 0 and not self._daily_profit_alerted:
+                    logger.info(
+                        f"📊 Daily profit: ₹{_daily_profit:,.0f} / ₹{_daily_target:,.0f} "
+                        f"({_daily_profit/_daily_target*100:.0f}%) → Ujjivan target")
+        except Exception as exc:
+            logger.debug(f"Daily profit check skip: {exc}")
+
         # === DIRECT SCAN (no threading wrapper — threading timeout doesn't work
         # with Angel SDK's C extensions holding the GIL) ===
         # The scan runs directly. If it hangs, the 60s sleep cycle is delayed,
@@ -1997,14 +2098,50 @@ class TigerLiveRunner:
                 monitored = 0
 
             from automation.live_scanner import scan_live_signals
+            from universe.fno_universe import segment_of
 
             today = datetime.now().date()
             daily_entries = self._daily_entries_taken.get(today, 0)
             scalper_today = self._scalper_trades.get(today, 0)
 
+            # === SEQUENTIAL MARKET — one market at a time, 100% capital ===
+            # User mandate: "Ak time pe ak market — morning NSE, 3:30 ke baad MCX.
+            # 50/50 nahi chaiye. Full automatic switch, bina confuse ke."
+            # During NSE hours → ONLY NSE symbols scan. After 3:30 → ONLY MCX.
+            # This prevents the "forgot MCX after NSE" bug — Tiger never
+            # scans both simultaneously, so it never forgets one.
+            _active_mkt = get_active_market()
+            if _active_mkt == "CLOSED":
+                logger.info("🐅 Market CLOSED — skip scan.")
+                return
+
+            # Filter data_map to ONLY the active market's symbols
+            _filtered_map = {}
+            _filtered_1m = {}
+            for _sym, _df in self.data_map.items():
+                _seg = segment_of(_sym)
+                _is_mcx = (_seg == "commodity")
+                if _active_mkt == "NSE+MCX" and not _is_mcx:
+                    # NSE+MCX overlap → NSE FIRST (user: morning = NSE)
+                    _filtered_map[_sym] = _df
+                elif _active_mkt == "NSE" and not _is_mcx:
+                    _filtered_map[_sym] = _df
+                elif _active_mkt == "MCX" and _is_mcx:
+                    _filtered_map[_sym] = _df
+                if _sym in _filtered_map and self.data_map_1m:
+                    _filtered_1m[_sym] = self.data_map_1m.get(_sym)
+
+            _nse_count = sum(1 for s in _filtered_map if segment_of(s) != "commodity")
+            _mcx_count = len(_filtered_map) - _nse_count
+            logger.info(
+                f"🐅 SEQUENTIAL SCAN [{_active_mkt}] — "
+                f"{len(_filtered_map)} symbols "
+                f"(NSE:{_nse_count} MCX:{_mcx_count}) — "
+                f"100% capital to {'NSE' if _nse_count > 0 else 'MCX'}")
+
             signals = scan_live_signals(
-                self.data_map,
-                self.data_map_1m if self.data_map_1m else None,
+                _filtered_map,
+                _filtered_1m if _filtered_1m else None,
                 self.broker,
                 now=datetime.now(),
                 daily_entries_taken=daily_entries,
@@ -2415,27 +2552,53 @@ class TigerLiveRunner:
                     t["ml_win_prob"] = 1.0
             _wp = t.get("ml_win_prob", 1.0)
 
+            # === BRAIN 6: PREMIUM DISCOUNT ADVISOR (IV percentile) ===
+            # "Sasta premium kharido, mehnge pe becho" — Tiger's core philosophy.
+            # Tracks IV history per symbol, advises on premium cheap/expensive.
+            # ADVISORY only — adds discount_bonus to score, logs warning if
+            # expensive, but NEVER blocks (user: Tiger decides, advisors inform).
+            # Uses compute_iv (VIX + realized vol blend) — NO extra REST call,
+            # rate-limit safe. Same IV model as the backtest.
+            try:
+                from backtest.run_tiger_brain_backtest import compute_iv
+                _is_call = (option_type == "CE")
+                _underlying_px = float(t.get("entry_price", 0) or strike)
+                _df_15m = self.data_map.get(symbol)
+                if _df_15m is not None and len(_df_15m) > 25 and \
+                        hasattr(self, 'premium_tracker'):
+                    _vix = float(t.get("vix", 15.0) or 15.0)
+                    _iv = compute_iv(_df_15m, _vix, symbol, _is_call,
+                                     float(strike), _underlying_px)
+                    if _iv and 0.05 < _iv < 2.0:  # sanity: decimal IV 0.05-2.0
+                        self.premium_tracker.update(symbol, _iv)
+                        _iv_snap = self.premium_tracker.evaluate(
+                            symbol, _iv,
+                            setup_score=t.get("setup_score", 50.0))
+                        if _iv_snap:
+                            if _iv_snap.discount_bonus > 0:
+                                t["setup_score"] = t.get("setup_score", 50) + \
+                                    _iv_snap.discount_bonus
+                                logger.info(
+                                    f"   💎 BRAIN 6: {_iv_snap.premium_status} "
+                                    f"IV={_iv:.1%} ({_iv_snap.iv_percentile:.0f}th pct) "
+                                    f"+{_iv_snap.discount_bonus:.0f} score bonus "
+                                    f"→ {_iv_snap.recommended_strike} strike")
+                            elif _iv_snap.premium_status == "EXPENSIVE":
+                                logger.warning(
+                                    f"   ⚠️ BRAIN 6: EXPENSIVE IV "
+                                    f"({_iv_snap.iv_percentile:.0f}th pct) — "
+                                    f"premium overpriced (advisory, Tiger decides)")
+                            t["iv_percentile"] = _iv_snap.iv_percentile
+                            t["premium_status"] = _iv_snap.premium_status
+            except Exception as _iv_exc:
+                logger.debug(f"Brain 6 IV check skip: {_iv_exc}")
+
             # 🔥 FUND BRAIN LIVE SIZING — real balance + real LTP + real lot
-            # Capital split: 50/50 when BOTH markets open, but 100% to the
-            # active market when the other is closed (user: "nse band hote hi
-            # pura capital use ho mcx market mai").
-            from config.thresholds import BRAIN4 as _B4
-            _split_pct = _B4.get("MARKET_CAPITAL_SPLIT_PCT", 50.0)
-            _nse_open = self._nse_sniper_session_active()
-            _mcx_open = self._sniper_session_active()
-            if _nse_open and _mcx_open:
-                # Both open → 50/50 split
-                _market_budget = available_balance * (_split_pct / 100.0)
-            elif _this_market == "MCX" and not _nse_open:
-                # NSE closed, MCX open → full capital to MCX
-                _market_budget = available_balance
-                logger.info(f"💰 FULL CAPITAL → MCX: ₹{available_balance:,.0f} (NSE closed)")
-            elif _this_market == "NSE" and not _mcx_open:
-                # MCX closed, NSE open → full capital to NSE
-                _market_budget = available_balance
-                logger.info(f"💰 FULL CAPITAL → NSE: ₹{available_balance:,.0f} (MCX closed)")
-            else:
-                _market_budget = available_balance * (_split_pct / 100.0)
+            # === SEQUENTIAL MARKET — 100% capital to active market ===
+            # User mandate: "50/50 nahi chaiye — ak time pe ak market"
+            # NSE open → 100% NSE. MCX only (after 3:30) → 100% MCX.
+            # No split — whoever is active gets the full wallet.
+            _market_budget = available_balance
             re_size = self._live_re_size(
                 real_balance=available_balance,
                 real_ltp=real_ltp,
@@ -2562,6 +2725,35 @@ class TigerLiveRunner:
                     f"   💰 Capital tier: {cap_check.conviction_tier} "
                     f"({cap_check.conviction_multiplier:.0%} of margin) | "
                     f"Allocated: ₹{cap_check.allocated_capital:,.0f}")
+
+            # === BRAIN 3: SPREAD CHECK ADVISORY (bid-ask liquidity) ===
+            # Brain 3's option_selector.py has a spread gate (MAX_SPREAD_PCT=2%).
+            # Live path uses find_affordable_option (its own logic), so the
+            # spread check was missing. Now logged as ADVISORY — wide spread
+            # = illiquid option = hard to exit. Tiger decides, but warned.
+            try:
+                from config.thresholds import BRAIN3
+                _bid = float(self.broker.get_bid_ask(
+                    contract["tradingsymbol"], contract["symboltoken"],
+                    contract["exchange"]).get("bid", 0) or 0) \
+                    if hasattr(self.broker, 'get_bid_ask') else 0.0
+                _ask = float(self.broker.get_bid_ask(
+                    contract["tradingsymbol"], contract["symboltoken"],
+                    contract["exchange"]).get("ask", 0) or 0) \
+                    if hasattr(self.broker, 'get_bid_ask') else 0.0
+                if _bid > 0 and _ask > 0 and real_ltp > 0:
+                    _spread_pct = (_ask - _bid) / real_ltp * 100
+                    if _spread_pct > BRAIN3["MAX_SPREAD_PCT_OF_PREMIUM"]:
+                        logger.warning(
+                            f"   ⚠️ BRAIN 3: Wide spread {_spread_pct:.1f}% "
+                            f"(bid ₹{_bid:.2f} / ask ₹{_ask:.2f}) — "
+                            f"illiquid, hard to exit (advisory)")
+                    else:
+                        logger.debug(
+                            f"   ✅ BRAIN 3: Spread {_spread_pct:.1f}% OK "
+                            f"(≤ {BRAIN3['MAX_SPREAD_PCT_OF_PREMIUM']}%)")
+            except Exception:
+                pass  # spread check advisory — broker may not support bid/ask
 
             # Step 6: Place REAL BUY order (Tiger always buys options)
             # Delivery = CARRYFORWARD (overnight), Intraday = INTRADAY
