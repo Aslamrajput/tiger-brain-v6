@@ -2337,9 +2337,26 @@ class TigerLiveRunner:
                         f"no affordable OTM within {otm_steps} steps")
 
             # 🔥 FUND BRAIN LIVE SIZING — real balance + real LTP + real lot
-            # Pass market_budget (50% of total) so sizing stays within this market's share.
+            # Capital split: 50/50 when BOTH markets open, but 100% to the
+            # active market when the other is closed (user: "nse band hote hi
+            # pura capital use ho mcx market mai").
             from config.thresholds import BRAIN4 as _B4
-            _market_budget = available_balance * (_B4.get("MARKET_CAPITAL_SPLIT_PCT", 50.0) / 100.0)
+            _split_pct = _B4.get("MARKET_CAPITAL_SPLIT_PCT", 50.0)
+            _nse_open = self._nse_sniper_session_active()
+            _mcx_open = self._sniper_session_active()
+            if _nse_open and _mcx_open:
+                # Both open → 50/50 split
+                _market_budget = available_balance * (_split_pct / 100.0)
+            elif _this_market == "MCX" and not _nse_open:
+                # NSE closed, MCX open → full capital to MCX
+                _market_budget = available_balance
+                logger.info(f"💰 FULL CAPITAL → MCX: ₹{available_balance:,.0f} (NSE closed)")
+            elif _this_market == "NSE" and not _mcx_open:
+                # MCX closed, NSE open → full capital to NSE
+                _market_budget = available_balance
+                logger.info(f"💰 FULL CAPITAL → NSE: ₹{available_balance:,.0f} (MCX closed)")
+            else:
+                _market_budget = available_balance * (_split_pct / 100.0)
             re_size = self._live_re_size(
                 real_balance=available_balance,
                 real_ltp=real_ltp,
