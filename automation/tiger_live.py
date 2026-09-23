@@ -1134,6 +1134,27 @@ class TigerLiveRunner:
             logger.error("❌ Data fetch fail: %s", exc)
             self.data_map, self.data_map_1m = {}, {}
 
+        # 4. RESEARCH BRAIN — top gainers/losers + SMC trade plan
+        # Runs once pre-market. Scans ALL NSE F&O stocks via yfinance,
+        # finds top movers, runs SMC zone analysis, generates today's plan.
+        # Tiger uses this to prioritize intraday hunting.
+        try:
+            from subbrains.research_brain import run_research
+            from universe.fno_universe import STOCK_SYMBOLS, INDEX_SYMBOLS
+            _research_symbols = {**INDEX_SYMBOLS, **STOCK_SYMBOLS}
+            plan = run_research(_research_symbols)
+            if plan:
+                logger.info(f"🧠 Research plan ready: "
+                            f"{len(plan.today_watchlist)} watchlist, "
+                            f"bias={plan.market_bias}")
+                self._research_plan = plan
+            else:
+                logger.warning("🧠 Research plan: no data (will retry next scan)")
+                self._research_plan = None
+        except Exception as exc:
+            logger.warning(f"Research brain fail: {exc}")
+            self._research_plan = None
+
     def _subscribe_ws_symbols(self, symbols: list[str]):
         """Subscribe scan symbols to WebSocket for real-time ticks.
 
