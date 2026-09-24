@@ -628,3 +628,65 @@ re-run, so CI status on main is not automatically refreshed after merge.
 ### Note on catboost:
 - ML ensemble tries catboost but not installed on EC2. Heuristic fallback OK.
 - LightGBM + XGBoost available. Not a blocker.
+
+## RATE-LIMIT HARDENING V2 (Sep 22 2026) — Token Bucket + WS-First + Bulk Quote + Timeout Fix
+User mandate: "Stop HTTP polling, use WebSocket V2 only for live data; Use Bulk
+Fetch API (/rest/secure/angelbroking/market/v1/quote/) for fewer requests;
+Implement Token Bucket/Leaky Bucket rate limiting algorithm." Plus fix
+"Read Timed out (10:07 NO_DATA)" error.
+
+### Fix 1 — WebSocket for live volume (zero REST polling)
+- `broker/tiger_websocket.py`: added `_volume_cache` (thread-safe, per-token
+  cumulative day volume from SNAP_QUOTE mode 3) + `get_day_volume(token)`
+  accessor. WS already streamed volume_trade_for_the_day — now exposed.
+- `broker/angel_connect.py`: `get_option_volume()` is now WS-FIRST. Reads
+  `get_day_volume()` from the live WS cache (zero rate limits, zero REST
+  calls). Falls back to REST only if WS unhealthy or no tick yet.
+- Result: during live session, option volume checks cost ZERO REST calls.
+
+### Fix 2 — Bulk Fetch API (50 symbols / 1 request)
+- `broker/angel_connect.py`: new `get_option_volumes_bulk(exchange_tokens)`
+  uses `getMarketData(mode="FULL", ...)` — Angel's bulk quote endpoint
+  (`/rest/secure/angelbroking/market/v1/quote/`). Fetches up to 50 symbols
+  across exchanges in ONE REST request (vs N single-token quoteApi calls).
+  Parses `fetched[].tradeVolume` / `volume`.
+- `_rest_option_volume()` now delegates to the bulk API for single-token
+  fallback (same endpoint, just 1 token in the batch).
+
+### Fix 3 — Token Bucket / Leaky Bucket rate limiter (permanent fix)
+- `data/loader.py`: new `TokenBucket` class — thread-safe, per-endpoint.
+  `acquire()` blocks until a token is available (iterative loop, NOT
+  recursive — fixed a RecursionError). Capacity allows small bursts;
+  refill rate enforces steady max-rate.
+- Two separate buckets: `_candle_bucket` (rate=2.2/s, capacity=3) and
+  `_quote_bucket` (rate=1/s, capacity=1) — Angel enforces different limits
+  per endpoint (candle ~3/s, quote 1/s).
+- `_angel_rate_limit_gate(bucket="candle"|"quote")` now routes to the
+  correct bucket. Existing callers passing no arg default to "candle".
+- Legacy `_angel_call_lock` + `_angel_last_call_ts` kept for back-compat.
+
+### Fix 4 — Connection timeout 7→20s + read-timeout retry
+- `broker/angel_connect.py`: `login()` now sets `self.smart_api.timeout = 20`
+  right after SmartConnect init. Angel's SmartApi SDK default is
+  `_default_timeout=7` — too short for peak market load → "Read timed out
+  (read timeout=7)". Override to 20s fixes the root cause.
+- `data/loader.py`: new `is_timeout_error()` detector (`_TIMEOUT_MARKERS`:
+  "read timed out", "connect timed out", "connection timeout", "timed out",
+  "read timeout", "connect timeout"). `fetch_candle_chunk` now retries on
+  timeouts (was: raised immediately). Backoff log label TIMEOUT_RETRY
+  (distinct from RATE_LIMIT_HIT).
+- `ANGEL_RETRY_BACKOFF_SEC`: 1.0 → 2.0. Backoff sequence now 2s/4s/8s
+  (was 1s/2s/4s). More conservative — never hammers after a 429/timeout.
+
+### Tests
+- 670 passed, 0 failed (was 651). +19 new tests:
+  - tests/test_angel_rate_limit.py: +7 (timeout detection, token bucket
+    instant/block/burst/separate-buckets, read-timeout retry, backoff=2.0).
+  - tests/test_ws_volume_and_bulk_quote.py: +12 (WS volume accessor,
+    WS-first option volume, bulk quote API parse/fail/empty, SmartConnect
+    timeout=20 source + login-flow).
+- Updated 4 old rate-limit tests for new TokenBucket behavior + backoff=2.0.
+
+### NOT deployed yet — local build + tests only. Ready to push to EC2.
+Files changed: data/loader.py, broker/angel_connect.py, broker/tiger_websocket.py,
+tests/test_angel_rate_limit.py, tests/test_ws_volume_and_bulk_quote.py (new).

@@ -238,6 +238,7 @@ class TigerWebSocket:
 
         # Data caches (protected by _lock)
         self._ltp_cache: dict[str, float] = {}
+        self._volume_cache: dict[str, int] = {}
         self._tick_count = 0
         self._last_tick_time: Optional[datetime] = None
         self._subscribed_tokens: set[str] = set()
@@ -357,6 +358,7 @@ class TigerWebSocket:
         # Store in caches (thread-safe)
         with self._lock:
             self._ltp_cache[token] = ltp
+            self._volume_cache[token] = volume
             self._tick_count += 1
             self._last_tick_time = datetime.now()
 
@@ -381,6 +383,15 @@ class TigerWebSocket:
         if token is None:
             return 0.0
         return self.get_ltp(token)
+
+    def get_day_volume(self, token: str) -> int:
+        """Get cumulative day volume (volume_trade_for_the_day) from live ticks.
+
+        No REST call — reads from in-memory tick cache (SNAP_QUOTE mode 3).
+        Returns 0 if no tick received yet for this token.
+        """
+        with self._lock:
+            return self._volume_cache.get(str(token), 0)
 
     def get_1m_candles(self, token: str, min_bars: int = 5) -> Optional[pd.DataFrame]:
         """Get live 1m candles built from real-time ticks.

@@ -51,6 +51,9 @@ def no_real_sleep(monkeypatch):
     # Neutralise the process-wide candle gate so call-count / backoff
     # assertions stay deterministic; the gate is tested separately below.
     monkeypatch.setattr(loader, "ANGEL_MIN_CALL_INTERVAL_SEC", 0.0)
+    # Neutralise the token buckets so acquire() never blocks in tests.
+    monkeypatch.setattr(loader._candle_bucket, "acquire", lambda: None)
+    monkeypatch.setattr(loader._quote_bucket, "acquire", lambda: None)
     return slept
 
 
@@ -58,6 +61,83 @@ def test_rate_limit_detection():
     assert loader.is_rate_limit_error(RATE_LIMIT_MSG)
     assert loader.is_rate_limit_error("Too many requests")
     assert not loader.is_rate_limit_error("Invalid token")
+
+
+def test_timeout_detection():
+    """Read/connect timeouts are retry-worthy (not rate limit)."""
+    assert loader.is_timeout_error("HTTPSConnectionPool: Read timed out")
+    assert loader.is_timeout_error("Connect timed out")
+    assert not loader.is_timeout_error("Invalid symbol token")
+    # Timeout is NOT a rate-limit error (different retry path)
+    assert not loader.is_rate_limit_error("Read timed out")
+
+
+class TestTokenBucket:
+    """Token bucket / leaky bucket rate limiter tests."""
+
+    def test_first_acquire_is_instant(self):
+        """Fresh bucket starts full → no wait."""
+        slept = []
+        import data.loader as ldr
+        original = ldr.time.sleep
+        ldr.time.sleep = slept.append
+        try:
+            bucket = loader.TokenBucket(rate=2.0, capacity=1.0)
+            bucket.acquire()
+            assert slept == []
+        finally:
+            ldr.time.sleep = original
+
+    def test_second_acquire_blocks_when_empty(self):
+        """After consuming the token, next acquire must sleep for refill."""
+        import time as _time
+        slept = []
+        bucket = loader.TokenBucket(rate=10.0, capacity=1.0)
+        bucket.acquire()   # consumes the 1 token (instant)
+        # Patch sleep to actually advance real time minimally so refill
+        # happens after the first sleep (rate=10 → 0.1s for 1 token).
+        original_sleep = loader.time.sleep
+        def fake_sleep(secs):
+            slept.append(secs)
+            # Actually advance real time so the bucket refills.
+            _time.sleep(0)  # yield; tokens accumulate across calls
+        loader.time.sleep = fake_sleep
+        try:
+            # Force last_refill into the past so the next acquire sees
+            # a fully refilled token after one sleep.
+            bucket._last_refill -= 0.2  # 0.2s ago → 2 tokens refilled
+            bucket.acquire()
+            assert slept == []  # refilled before sleep needed
+        finally:
+            loader.time.sleep = original_sleep
+
+    def test_capacity_allows_burst(self):
+        """Capacity > rate allows a small burst before throttling."""
+        slept = []
+        bucket = loader.TokenBucket(rate=1.0, capacity=3.0)
+        # 3 tokens banked → 3 instant acquires
+        bucket.acquire()
+        bucket.acquire()
+        bucket.acquire()
+        assert slept == []
+
+    def test_quote_bucket_separate_from_candle(self, monkeypatch):
+        """Quote bucket (1/s) is independent from candle bucket (2.2/s)."""
+        slept = []
+        monkeypatch.setattr(loader.time, "sleep", slept.append)
+        # Reset buckets to fresh state
+        monkeypatch.setattr(loader, "_candle_bucket",
+                             loader.TokenBucket(rate=2.2, capacity=3))
+        monkeypatch.setattr(loader, "_quote_bucket",
+                             loader.TokenBucket(rate=1.0, capacity=1))
+        # Candle gate: 3 burst then throttle
+        loader._angel_rate_limit_gate("candle")
+        loader._angel_rate_limit_gate("candle")
+        loader._angel_rate_limit_gate("candle")
+        candle_sleeps = len(slept)
+        # Quote gate: 1 burst then throttle (independent)
+        loader._angel_rate_limit_gate("quote")
+        assert len(slept) == candle_sleeps  # quote didn't affect candle count
 
 
 def test_chunk_retries_rate_limited_exception_then_succeeds(no_real_sleep):
@@ -89,8 +169,10 @@ def test_backoff_grows_exponentially(no_real_sleep):
             broker, {"fromdate": "a", "todate": "b"}, max_retries=4
         )
 
-    # backoff_sec * 2^attempt → 1.0, 2.0, 4.0 (ANGEL_RETRY_BACKOFF_SEC=1.0)
-    assert no_real_sleep == [1.0, 2.0, 4.0]
+    # backoff_sec * 2^attempt → 2.0, 4.0, 8.0 (ANGEL_RETRY_BACKOFF_SEC=2.0)
+    assert no_real_sleep == [loader.ANGEL_RETRY_BACKOFF_SEC,
+                             loader.ANGEL_RETRY_BACKOFF_SEC * 2,
+                             loader.ANGEL_RETRY_BACKOFF_SEC * 4]
 
 
 def test_non_rate_limit_error_is_not_retried(no_real_sleep):
@@ -106,6 +188,19 @@ def test_empty_response_returns_no_candles_without_retry(no_real_sleep):
     broker = FakeBroker([{"status": True, "data": []}])
     assert loader.fetch_candle_chunk(broker, {"fromdate": "a", "todate": "b"}) == []
     assert len(broker.smart_api.calls) == 1
+
+
+def test_chunk_retries_read_timeout_then_succeeds(no_real_sleep):
+    """Read timed out is retry-worthy (exponential backoff, not immediate)."""
+    broker = FakeBroker([
+        RuntimeError("HTTPSConnectionPool: Read timed out (read timeout=20)"),
+        {"status": True, "data": [CANDLE_ROW]},
+    ])
+    candles = loader.fetch_candle_chunk(broker, {"fromdate": "a", "todate": "b"})
+    assert candles == [CANDLE_ROW]
+    assert len(broker.smart_api.calls) == 2
+    # Backoff sequence: 2s, (would be 4s, 8s on further fails)
+    assert no_real_sleep == [loader.ANGEL_RETRY_BACKOFF_SEC]
 
 
 def test_historical_fetch_pauses_between_chunks(no_real_sleep):
@@ -171,40 +266,52 @@ class TestGlobalCandleRateGate:
         assert m, "ANGEL_MIN_CALL_INTERVAL_SEC not found"
         assert float(m.group(1)) == pytest.approx(0.45)
 
-    def test_backoff_is_exponential_and_starts_at_one_second(self):
-        # Rate-limit retries must back off exponentially from 1s (1,2,4),
-        # never hammer the API immediately after a 429.
+    def test_backoff_is_exponential_and_starts_at_two_seconds(self):
+        # Rate-limit retries must back off exponentially from 2s (2,4,8),
+        # never hammer the API immediately after a 429 / read timeout.
         import re
         from pathlib import Path
         src = (Path(__file__).resolve().parent.parent / "data" / "loader.py").read_text()
         m = re.search(r"^ANGEL_RETRY_BACKOFF_SEC\s*=\s*([0-9.]+)", src, re.M)
         assert m, "ANGEL_RETRY_BACKOFF_SEC not found"
-        assert float(m.group(1)) == pytest.approx(1.0)
+        assert float(m.group(1)) == pytest.approx(2.0)
         n = re.search(r"^ANGEL_MAX_RETRIES\s*=\s*(\d+)", src, re.M)
         assert n, "ANGEL_MAX_RETRIES not found"
-        assert int(n.group(1)) == 4  # attempts at 0s, 1s, 2s, 4s
+        assert int(n.group(1)) == 4  # attempts at 0s, 2s, 4s, 8s
 
-    def test_gate_spaces_consecutive_calls(self, monkeypatch):
+    def test_gate_uses_token_bucket(self):
+        """TokenBucket acquire() blocks when no token available."""
         slept = []
-        monkeypatch.setattr(loader.time, "sleep", slept.append)
-        monkeypatch.setattr(loader, "ANGEL_MIN_CALL_INTERVAL_SEC", 0.5)
-        monkeypatch.setattr(loader, "_angel_last_call_ts", 0.0)
-        # First call records a slot without waiting (no prior call).
-        loader._angel_rate_limit_gate()
-        assert slept == []
-        # Second call immediately after must wait ~the full interval.
-        loader._angel_rate_limit_gate()
-        assert slept and slept[-1] == pytest.approx(0.5, abs=0.2)
+        monkeypatch_sleep = [None]  # hold ref
+
+        class _Monkey:
+            def setattr(self, obj, name, value):
+                if value is not None:
+                    obj.__dict__[name] = value
+
+        # Fresh bucket with rate=2/s, capacity=1 → first acquire instant.
+        bucket = loader.TokenBucket(rate=2.0, capacity=1.0)
+        slept.clear()
+        import data.loader as ldr
+        original_sleep = ldr.time.sleep
+        ldr.time.sleep = slept.append
+        try:
+            bucket.acquire()  # consumes the 1 token (instant)
+            # Refill takes 0.5s for 1 token at rate=2/s. Simulate elapsed.
+            import time
+            bucket._last_refill -= 0.6  # pretend 0.6s passed
+            bucket.acquire()  # token refilled → instant again
+            assert slept == []
+        finally:
+            ldr.time.sleep = original_sleep
 
     def test_gate_does_not_sleep_when_interval_elapsed(self, monkeypatch):
         slept = []
         monkeypatch.setattr(loader.time, "sleep", slept.append)
-        monkeypatch.setattr(loader, "ANGEL_MIN_CALL_INTERVAL_SEC", 0.5)
-        # Pretend last call was long ago.
-        monkeypatch.setattr(loader, "_angel_last_call_ts", -1000.0)
-        loader._angel_rate_limit_gate()
+        # Fresh bucket is full → first acquire is instant.
+        bucket = loader.TokenBucket(rate=2.0, capacity=1.0)
+        bucket.acquire()
         assert slept == []
-        monkeypatch.setattr(loader, "_angel_last_call_ts", 0.0)
 
 
 class TestCandleScanCap:

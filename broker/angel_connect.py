@@ -133,6 +133,10 @@ class AngelBroker:
                 totp_code = self._generate_totp()
 
                 self.smart_api = SmartConnect(api_key=self.api_key)
+                # Override SDK default 7s timeout -> 20s (Read timed out fix).
+                # Angel's SmartApi SDK default is _default_timeout=7, which is
+                # too short for candle/quote calls during peak market load.
+                self.smart_api.timeout = 20
                 session = self.smart_api.generateSession(
                     self.client_id, self.mpin, totp_code
                 )
@@ -235,29 +239,66 @@ class AngelBroker:
         User mandate: "jha buying selling ho rhi hai volumes hai wha jaye"
         — only enter options with actual buying/selling activity.
 
-        Returns 0 if API fails or no volume data available.
+        WS-FIRST: reads volume_trade_for_the_day from the live WebSocket
+        cache (zero rate limits, zero REST calls). Falls back to REST
+        quoteApi only if WS is not connected or has no tick for this token.
+
+        Returns 0 if both WS + REST fail or no volume data available.
         """
+        # WS-first — zero rate limit, zero REST call
+        if self.websocket is not None and self.websocket.is_healthy():
+            vol = self.websocket.get_day_volume(symboltoken)
+            if vol > 0:
+                return int(vol)
+            # WS healthy but no tick for this token yet — fall through to REST
+        # REST fallback (bulk quote API, rate-limited via quote bucket)
+        return self._rest_option_volume(tradingsymbol, symboltoken, exchange)
+
+    def _rest_option_volume(self, tradingsymbol: str, symboltoken: str,
+                            exchange: str) -> int:
+        """REST fallback for option volume via bulk quote API."""
+        vols = self.get_option_volumes_bulk(
+            {exchange: [str(symboltoken)]})
+        return vols.get(str(symboltoken), 0)
+
+    def get_option_volumes_bulk(self, exchange_tokens: dict) -> dict:
+        """Bulk fetch option volumes — up to 50 symbols in ONE REST request.
+
+        Uses Angel One's market/v1/quote endpoint (getMarketData) which
+        accepts multiple tokens across exchanges in a single call,
+        reducing REST requests from N (one per token) to 1.
+
+        Args:
+            exchange_tokens: {exchange: [token, token, ...]} dict
+
+        Returns:
+            {token: volume} dict (0 for tokens that failed/missing)
+        """
+        if not exchange_tokens:
+            return {}
         self.ensure_logged_in()
         try:
             try:
                 from data.loader import _angel_rate_limit_gate
-                _angel_rate_limit_gate()
+                _angel_rate_limit_gate(bucket="quote")
             except Exception:
                 pass
-            # Angel One quote API returns tradeVolume field
-            resp = self.smart_api.quoteApi(
-                mode="ltp",
-                exchangeTokens={exchange: [str(symboltoken)]})
+            resp = self.smart_api.getMarketData(
+                mode="FULL",
+                exchangeTokens=exchange_tokens)
+            result = {}
             if not resp or not resp.get("data"):
-                return 0
-            data = resp["data"]
-            if isinstance(data, list) and len(data) > 0:
-                data = data[0]
-            vol = float(data.get("tradeVolume", 0) or data.get("volume", 0) or 0)
-            return int(vol)
+                return result
+            fetched = resp["data"].get("fetched", []) or []
+            for item in fetched:
+                tok = str(item.get("symbolToken", ""))
+                vol = float(item.get("tradeVolume", 0)
+                            or item.get("volume", 0) or 0)
+                result[tok] = int(vol)
+            return result
         except Exception as exc:
-            logger.debug(f"Volume fetch fail {tradingsymbol}: {exc}")
-            return 0
+            logger.debug(f"Bulk volume fetch fail: {exc}")
+            return {}
 
     def is_session_valid(self) -> bool:
         """Checks whether the session is still valid. Angel One sessions are

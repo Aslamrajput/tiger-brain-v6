@@ -432,9 +432,9 @@ ANGEL_INTERVAL_MAX_DAYS = {
 # NOTE: backoff chhota (1s, 2s, 4s) rakha gaya hai — turant wapas maarna
 # burst ko aur badha deta hai, isliye pehle attempt pe peechhe hato.
 ANGEL_CHUNK_PAUSE_SEC = 0.5
-# Exponential backoff on rate-limit (429): 1s, 2s, 4s between the 4 attempts.
+# Exponential backoff on rate-limit (429) + read timeouts: 2s, 4s, 8s between the 4 attempts.
 ANGEL_MAX_RETRIES = 4
-ANGEL_RETRY_BACKOFF_SEC = 1.0
+ANGEL_RETRY_BACKOFF_SEC = 2.0  # 2s, 4s, 8s exponential backoff sequence
 
 # Angel historical API allows ~3 req/sec, but a burst across many symbols
 # (per-symbol chunks) trips "Access denied because of exceeding access rate".
@@ -442,29 +442,72 @@ ANGEL_RETRY_BACKOFF_SEC = 1.0
 # requests are spaced >= ANGEL_MIN_CALL_INTERVAL_SEC apart (~2.2 req/sec),
 # including across symbols scanned in sequence.
 ANGEL_MIN_CALL_INTERVAL_SEC = 0.45
+
+
+class TokenBucket:
+    """Leaky-bucket rate limiter — thread-safe, per-endpoint.
+
+    Capacity tokens accumulate at a fixed refill rate; each call consumes
+    one token. If the bucket is empty, the caller blocks until a token
+    refills. This guarantees a steady max-rate with no bursts.
+
+    Args:
+        rate: tokens added per second (e.g. 2.2 = max 2.2 req/sec)
+        capacity: max tokens that can bank up (burst allowance)
+    """
+
+    def __init__(self, rate: float, capacity: float = None):
+        self.rate = rate
+        self.capacity = capacity if capacity is not None else rate
+        self._tokens = self.capacity
+        self._last_refill = time.monotonic()
+        self._lock = threading.Lock()
+
+    def acquire(self) -> None:
+        """Block until one token is available, then consume it."""
+        while True:
+            with self._lock:
+                now = time.monotonic()
+                elapsed = now - self._last_refill
+                self._tokens = min(self.capacity, self._tokens + elapsed * self.rate)
+                self._last_refill = now
+                if self._tokens >= 1.0:
+                    self._tokens -= 1.0
+                    return
+                wait = (1.0 - self._tokens) / self.rate
+            time.sleep(wait)
+
+
+# Separate buckets per endpoint — Angel enforces different rate limits.
+# Candle historical: ~3 req/sec (safe 2.2).  Quote/market data: 1 req/sec.
+_candle_bucket = TokenBucket(rate=ANGEL_MIN_CALL_INTERVAL_SEC ** -1,
+                             capacity=3)
+_quote_bucket = TokenBucket(rate=1.0, capacity=1)
+
+# Legacy lock kept for backward-compat with tests/importers that reference it.
 _angel_call_lock = threading.Lock()
 _angel_last_call_ts = 0.0
 
 
-def _angel_rate_limit_gate() -> None:
-    """Block until >= ANGEL_MIN_CALL_INTERVAL_SEC since the last candle call.
+def _angel_rate_limit_gate(bucket: str = "candle") -> None:
+    """Block until a rate-limit slot is available (token bucket / leaky bucket).
 
-    Thread-safe: holds the lock only while reserving the next slot, then
-    sleeps outside the lock so callers queue rather than serialise on a
-    shared sleep.
+    Thread-safe. Uses a per-endpoint token bucket so candle (2.2/s) and
+    quote (1/s) limits are independently enforced.
     """
-    global _angel_last_call_ts
-    with _angel_call_lock:
-        now = time.monotonic()
-        wait = ANGEL_MIN_CALL_INTERVAL_SEC - (now - _angel_last_call_ts)
-        if wait > 0:
-            time.sleep(wait)
-        _angel_last_call_ts = time.monotonic()
+    if bucket == "quote":
+        _quote_bucket.acquire()
+    else:
+        _candle_bucket.acquire()
 
 
 _RATE_LIMIT_MARKERS = (
     "access rate", "rate limit", "exceeding access", "too many request",
     "too many requests", "ab1021",
+)
+_TIMEOUT_MARKERS = (
+    "read timed out", "connect timed out", "connection timeout",
+    "timed out", "read timeout", "connect timeout",
 )
 
 
@@ -472,6 +515,16 @@ def is_rate_limit_error(message: str) -> bool:
     """Kya ye error rate-limit ka hai (yani retry karne layak)?"""
     lowered = str(message).lower()
     return any(marker in lowered for marker in _RATE_LIMIT_MARKERS)
+
+
+def is_timeout_error(message: str) -> bool:
+    """Kya ye error read/connect timeout ka hai (retry karne layak)?
+
+    Read timed out = Angel server ne connection accept kiya par response
+    bhejne mein latak gaya. Retry karna safe hai (rate-limit nahi hai).
+    """
+    lowered = str(message).lower()
+    return any(marker in lowered for marker in _TIMEOUT_MARKERS)
 
 
 def fetch_candle_chunk(
@@ -524,7 +577,9 @@ def fetch_candle_chunk(
                 return []
             # SmartAPI rate-limit ka jawab JSON nahi hota, isliye SDK
             # exception phenkta hai — usme bhi wahi message hota hai.
-            if not is_rate_limit_error(exc) or attempt == max_retries - 1:
+            # Read/connect timeout bhi retry-worthy hai (rate-limit nahi).
+            is_retryable = is_rate_limit_error(exc) or is_timeout_error(exc)
+            if not is_retryable or attempt == max_retries - 1:
                 raise
             response = {"message": str(exc)}
 
@@ -550,15 +605,17 @@ def fetch_candle_chunk(
             return []
 
         if not is_rate_limit_error(message) or attempt == max_retries - 1:
-            logger.warning(
-                f"NO_DATA candle chunk {params['fromdate']}-{params['todate']} "
-                f"khali/fail: {message}"
-            )
-            return []
+            if not is_timeout_error(message):
+                logger.warning(
+                    f"NO_DATA candle chunk {params['fromdate']}-{params['todate']} "
+                    f"khali/fail: {message}"
+                )
+                return []
 
         delay = backoff_sec * (2 ** attempt)
+        reason = "RATE_LIMIT_HIT" if is_rate_limit_error(message) else "TIMEOUT_RETRY"
         logger.warning(
-            f"RATE_LIMIT_HIT ({message}) — {delay:.0f}s exponential backoff "
+            f"{reason} ({message}) — {delay:.0f}s exponential backoff "
             f"before retry ({attempt + 1}/{max_retries - 1})"
         )
         time.sleep(delay)
