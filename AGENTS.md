@@ -690,3 +690,15 @@ Implement Token Bucket/Leaky Bucket rate limiting algorithm." Plus fix
 ### NOT deployed yet — local build + tests only. Ready to push to EC2.
 Files changed: data/loader.py, broker/angel_connect.py, broker/tiger_websocket.py,
 tests/test_angel_rate_limit.py, tests/test_ws_volume_and_bulk_quote.py (new).
+
+## DEPLOY: Sep 24 2026 — RATE-LIMIT HARDENING V2 LIVE on EC2
+- PEM key provisioned, EC2 git pull (57fbb3a → 9339c13, fast-forward, 6 files).
+- Remote tests: 670 passed (0 failures) on EC2 (Python 3.9.25).
+- Code verified live: TokenBucket class (1 ref), get_day_volume (1 ref),
+  get_option_volumes_bulk (2 refs), timeout=20 (1 ref), ANGEL_RETRY_BACKOFF_SEC=2.0.
+- Imports verified: TokenBucket + is_timeout_error + _angel_rate_limit_gate OK.
+- Service restarted: `tiger-brain.service` active, PID 1362452, running
+  `automation.scheduler` since 11:28:24 IST.
+- PEM key shredded (3-pass) + removed after deploy. 🔐
+- Market closed (11:30 IST pre-market) → journald quiet, Tiger in wait phase.
+  Next live verification: pre-market open (09:00 IST Sep 24).
