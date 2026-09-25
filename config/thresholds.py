@@ -195,7 +195,7 @@ REPLAY = {
 
 UNIVERSE = {
     "TOP_N_SYMBOLS": 5,
-    "RESCAN_INTERVAL_MINUTES": 20,
+    "RESCAN_INTERVAL_MINUTES": 2,
     "SCORE_WEIGHTS": {
         "volume_rank": 0.35,
         "oi_velocity": 0.25,
