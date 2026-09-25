@@ -1824,11 +1824,13 @@ def run_tiger_brain_backtest(data_map, start_capital=150000.0,
                     filter_stats["rejected_premium_sanity"] += 1
                     continue
 
-                # Tier-2 MCX commodities have structurally wider spreads
-                # (0.55% base vs 0.50% gate). Loosen gate for commodities so
-                # real MCX options can enter — V6.6 locked gate stays default
-                # for NSE (tier-1) symbols.
-                spread_max = 0.75 if seg == "commodity" else MAX_SPREAD_PCT
+                # MCX commodities allow up to 1.5% spread (tier-2/3 base
+                # 0.55%/0.85% both pass). NSE stays 0.5% (tier-1).
+                _is_mcx_sym = sym.upper() in (
+                    "CRUDEOIL", "GOLD", "SILVER", "NATURALGAS",
+                    "CRUDEOILM", "GOLDM", "SILVERM", "NATGASMINI",
+                )
+                spread_max = 1.5 if _is_mcx_sym else MAX_SPREAD_PCT
                 ok_spread, spread_pct = spread_ok(sym, entry_prem, max_pct=spread_max)
                 if not ok_spread:
                     filter_stats["rejected_spread"] += 1

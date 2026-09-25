@@ -94,12 +94,18 @@ def model_spread_pct(symbol: str, premium: float) -> float:
     Model a realistic bid-ask spread (%) for an ATM contract.
     Spread widens for illiquid tiers and for very cheap premiums (where
     the fixed tick size dominates). No live chain → model from tier.
+    MCX commodities: cheap-premium penalty halved (tick size dominates less).
     """
     tier = liquidity_tier(symbol)
     base = _TIER_BASE_SPREAD.get(tier, 0.85)
     # Cheap options (< ₹10) suffer larger relative spreads due to tick size.
+    # MCX commodities: half penalty (0.025) vs NSE (0.05).
+    _is_mcx = symbol.upper() in (
+        "CRUDEOIL", "GOLD", "SILVER", "NATURALGAS",
+        "CRUDEOILM", "GOLDM", "SILVERM", "NATGASMINI",
+    )
     if premium < 10:
-        base += (10 - premium) * 0.05
+        base += (10 - premium) * (0.025 if _is_mcx else 0.05)
     return base
 
 

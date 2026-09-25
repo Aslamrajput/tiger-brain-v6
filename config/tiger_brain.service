@@ -1,0 +1,42 @@
+[Unit]
+Description=Tiger Brain V19 — Live Algorithmic Trading Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ec2-user
+WorkingDirectory=/home/ec2-user/tiger-brain-v6
+Environment=TZ=Asia/Kolkata
+Environment=PYTHONUNBUFFERED=1
+Environment=DRY_RUN=false
+ExecStart=/usr/bin/python3 -m automation.scheduler
+Restart=always
+RestartSec=10
+StandardOutput=append:/home/ec2-user/tiger_v19.log
+StandardError=append:/home/ec2-user/tiger_v19.log
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target
+
+[Unit]
+Description=Tiger Watchdog — monitors tiger-brain liveness + restarts on stall
+After=tiger-brain.service
+Wants=tiger-brain.service
+
+[Service]
+Type=simple
+User=ec2-user
+WorkingDirectory=/home/ec2-user/tiger-brain-v6
+Environment=TZ=Asia/Kolkata
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 automation/watchdog.py
+Restart=always
+RestartSec=10
+StandardOutput=append:/home/ec2-user/tiger_watchdog.log
+StandardError=append:/home/ec2-user/tiger_watchdog.log
+
+[Install]
+WantedBy=multi-user.target

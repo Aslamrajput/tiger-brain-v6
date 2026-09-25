@@ -185,6 +185,7 @@ class TigerLiveRunner:
             return
 
         logger.info("🐅 INTRADAY SCAN — %s", datetime.now().strftime("%H:%M"))
+        logger.info("   ℹ️ Zone data: MCX symbols use US futures proxy (CL=F/GC=F/SI=F/NG=F), not live MCX chain — 003a9ff original design.")
         try:
             from backtest.run_tiger_brain_backtest import run_tiger_brain_backtest
             capital = self.account_capital if self.account_capital > 0 else 10000.0
@@ -762,6 +763,16 @@ class TigerLiveRunner:
         logger.info("🐅  24x7 cycle: Mon-Fri trading, Sat watch, Sun OFF")
         logger.info("=" * 60)
 
+        # DUTY LOCK — override schedule values at runtime (config/thresholds.py untouched).
+        # 09:15 wakeup, every 2 min scan, NSE square-off 15:30, MCX 15:30->23:30.
+        AUTOMATION["MARKET_OPEN_TIME"] = "09:15"
+        AUTOMATION["PRE_MARKET_WAKE_TIME"] = "09:15"
+        AUTOMATION["RESCAN_INTERVAL_MINUTES"] = 2
+        AUTOMATION["NSE_SQUARE_OFF_TIME"] = "15:30"
+        AUTOMATION["MCX_OPEN_TIME"] = "15:30"
+        AUTOMATION["MCX_SQUARE_OFF_TIME"] = "23:30"
+        AUTOMATION["MCX_CLOSE_TIME"] = "23:30"
+
         self.scheduler = TigerBrainScheduler()
         self.scheduler.setup_jobs(
             pre_market_fn=self.pre_market_wake,
@@ -776,13 +787,10 @@ class TigerLiveRunner:
         self.scheduler.start()
         self._running = True
         logger.info("✅ Tiger scheduler STARTED. 24x7 cycle active.")
-        logger.info("   Pre-market:  09:00")
-        logger.info("   Market open: 09:15")
-        logger.info("   Intraday:    every 20 min (entry bandh 3PM)")
-        logger.info("   Delivery:    15:00 (overnight direction)")
-        logger.info("   NSE close:   15:15 (NFO square-off)")
-        logger.info("   Market close:15:30 (fallback square-off)")
-        logger.info("   MCX close:   23:15 (MCX square-off + logout)")
+        logger.info("   Wakeup:      09:15")
+        logger.info("   Intraday:    every 2 min (NSE 09:15-15:30, MCX 15:30-23:30)")
+        logger.info("   NSE square-off: 15:30")
+        logger.info("   MCX square-off: 23:30")
         logger.info("   Nightly:     00:00")
         logger.info("")
         logger.info("🐅 Tiger live hai. Ctrl+C pe shutdown hoga.")
