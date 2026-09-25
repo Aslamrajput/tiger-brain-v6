@@ -213,8 +213,7 @@ class TigerLiveRunner:
                         totals.get("final_equity", 0),
                         totals.get("total_return_pct", 0))
         except Exception as exc:
-            import traceback as _tb
-            logger.error("Intraday scan error: %s\n%s", exc, _tb.format_exc())
+            logger.error("Intraday scan error: %s", exc)
 
     def _place_live_orders(self, trades: list[dict]) -> int:
         """Backtest signals → REAL Angel One orders.
