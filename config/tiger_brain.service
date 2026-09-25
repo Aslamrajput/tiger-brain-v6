@@ -1,3 +1,4 @@
+# --- split: tiger-brain ---
 [Unit]
 Description=Tiger Brain V19 — Live Algorithmic Trading Bot
 After=network-online.target
@@ -21,6 +22,7 @@ TimeoutStopSec=30
 [Install]
 WantedBy=multi-user.target
 
+# --- split: tiger-watchdog ---
 [Unit]
 Description=Tiger Watchdog — monitors tiger-brain liveness + restarts on stall
 After=tiger-brain.service
