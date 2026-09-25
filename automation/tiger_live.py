@@ -511,6 +511,11 @@ class TigerLiveRunner:
             logger.error("❌ Exit orders: position fetch fail: %s", exc)
             return 0
 
+        # Angel One sometimes returns None instead of [] — guard against it.
+        if open_positions is None:
+            logger.info("📤 Broker returned no positions (None) — skip sell orders.")
+            return 0
+
         # Build map: tradingsymbol → net quantity (from real broker)
         broker_positions = {}
         for p in open_positions:
