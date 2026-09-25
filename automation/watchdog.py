@@ -12,6 +12,7 @@ import re
 import subprocess
 import time
 from datetime import datetime, timedelta
+from typing import Optional
 
 LOG_PATH = "/home/ec2-user/tiger_v19.log"
 WATCHDOG_LOG = "/tmp/watchdog.log"
@@ -54,14 +55,14 @@ def _restart_tiger() -> None:
         _alert(f"restart failed: {exc}")
 
 
-def _log_mtime() -> float | None:
+def _log_mtime() -> Optional[float]:
     try:
         return os.path.getmtime(LOG_PATH)
     except OSError:
         return None
 
 
-def _last_scan_ts() -> datetime | None:
+def _last_scan_ts() -> Optional[datetime]:
     try:
         with open(LOG_PATH, "r") as f:
             lines = f.readlines()[-500:]
