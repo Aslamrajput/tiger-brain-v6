@@ -235,6 +235,7 @@ AUTOMATION = {
     "NSE_SQUARE_OFF_TIME": "15:15",
     # MCX square-off — 23:15 (15 min before MCX close 23:30)
     "MCX_SQUARE_OFF_TIME": "23:15",
+    "RESCAN_INTERVAL_MINUTES": 2,
 }
 
 # ============================================================
