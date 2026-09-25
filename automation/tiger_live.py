@@ -511,6 +511,9 @@ class TigerLiveRunner:
 
         # Build map: tradingsymbol → net quantity (from real broker)
         broker_positions = {}
+        if open_positions is None:
+            logger.info("📤 Broker returned no positions (None) — skip sell orders.")
+            return 0
         for p in open_positions:
             tsym = p.get("tradingsymbol", "")
             qty = int(p.get("netqty", 0) or 0)
